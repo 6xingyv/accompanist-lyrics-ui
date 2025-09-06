@@ -38,7 +38,14 @@ class MusicRepositoryImpl(private val context: Context): MusicRepository {
                 "TTML [Single Singer, With Breathing Dots, CJK]",
                 MediaItem.fromUri("asset:///havent-rain-for-so-long.mp3"),
                 "havent-rain-for-so-long.ttml"
+            ),
+            MusicItem(
+                "耀斑",
+                "KugouKrc",
+                MediaItem.fromUri("asset:///耀斑.mp3"),
+                "耀斑.krc"
             )
+
         )
     }
 
