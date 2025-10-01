@@ -1,5 +1,6 @@
 package com.mocharealm.accompanist.lyrics.ui.composable.lyrics
 
+import androidx.compose.animation.core.EaseInOut
 import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.Canvas
@@ -14,6 +15,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Stable
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -583,9 +585,20 @@ fun KaraokeLineText(
 
     val animatedScale by animateFloatAsState(
         targetValue = if (isFocused) 1.05f else 1f,
+        animationSpec = if (isFocused) {
+            androidx.compose.animation.core.tween(
+                durationMillis = 600,
+                easing = LinearOutSlowInEasing
+            )
+        } else {
+            androidx.compose.animation.core.tween(
+                durationMillis = 300,
+                easing = EaseInOut
+            )
+        },
         label = "scale"
     )
-    val alphaAnimation by animateFloatAsState(
+    val animatedAlpha by animateFloatAsState(
         targetValue = if (!line.isAccompaniment) if (isFocused) 1f else 0.4f else if (isFocused) 0.6f else 0.2f,
         label = "alpha"
     )
@@ -605,7 +618,7 @@ fun KaraokeLineText(
                 .graphicsLayer {
                     scaleX = animatedScale
                     scaleY = animatedScale
-                    alpha = alphaAnimation
+                    alpha = animatedAlpha
                     transformOrigin = TransformOrigin(
                         if (line.alignment == KaraokeAlignment.Start) 0f else 1f,
                         1f
@@ -631,8 +644,9 @@ fun KaraokeLineText(
                         line.syllables
                     }
                 }
-                val initialLayouts =
-                    remember(processedSyllables, textStyle, textMeasurer, line.isAccompaniment) {
+
+                val initialLayouts by remember {
+                    derivedStateOf {
                         measureSyllablesAndDetermineAnimation(
                             syllables = processedSyllables,
                             textMeasurer = textMeasurer,
@@ -640,10 +654,11 @@ fun KaraokeLineText(
                             isAccompanimentLine = line.isAccompaniment
                         )
                     }
+                }
 
                 // 2. Wrap Layout objects into lines
-                val wrappedLines =
-                    remember(initialLayouts, availableWidthPx, textMeasurer, textStyle) {
+                val wrappedLines by remember {
+                    derivedStateOf {
                         calculateBalancedLines(
                             syllableLayouts = initialLayouts,
                             availableWidthPx = availableWidthPx,
@@ -651,6 +666,7 @@ fun KaraokeLineText(
                             style = textStyle
                         )
                     }
+                }
 
                 val lineHeight = remember(textStyle) {
                     textMeasurer.measure("M", textStyle).size.height.toFloat()
@@ -740,3 +756,4 @@ private fun Int.toDp(): Dp = with(LocalDensity.current) { this@toDp.toDp() }
 @Composable
 private fun IntSize.toDpSize(): DpSize =
     with(LocalDensity.current) { DpSize(width.toDp(), height.toDp()) }
+

@@ -93,19 +93,21 @@ fun KaraokeLyricsView(
 
     val rawFirstFocusedLineIndex = lyrics.getCurrentFirstHighlightLineIndexByTime(currentTimeMs)
 
-    val finalFirstFocusedLineIndex = run {
-        val line = lyrics.lines.getOrNull(rawFirstFocusedLineIndex) as? KaraokeLine
-        if (line != null && line.isAccompaniment) {
-            var newIndex = rawFirstFocusedLineIndex
-            for (i in rawFirstFocusedLineIndex downTo 0) {
-                if (!(lyrics.lines[i] as KaraokeLine).isAccompaniment) {
-                    newIndex = i
-                    break
+    val finalFirstFocusedLineIndex by remember(currentTimeMs, lyrics.lines) {
+        derivedStateOf {
+            val line = lyrics.lines.getOrNull(rawFirstFocusedLineIndex) as? KaraokeLine
+            if (line != null && line.isAccompaniment) {
+                var newIndex = rawFirstFocusedLineIndex
+                for (i in rawFirstFocusedLineIndex downTo 0) {
+                    if (!(lyrics.lines[i] as KaraokeLine).isAccompaniment) {
+                        newIndex = i
+                        break
+                    }
                 }
+                newIndex
+            } else {
+                rawFirstFocusedLineIndex
             }
-            newIndex
-        } else {
-            rawFirstFocusedLineIndex
         }
     }
 
@@ -173,6 +175,18 @@ fun KaraokeLyricsView(
             currentTimeMs
         )
     )
+
+    val accompanimentFocusedLines by remember(lyrics, currentTimeMs) {
+        derivedStateOf {
+            lyrics.lines.filter {
+                it is KaraokeLine && it.isAccompaniment &&
+                        (currentTimeMs in it.start..it.end || (abs(
+                            currentTimeMs - it.start
+                        )) < 600 || (abs(currentTimeMs - it.end)) < 600)
+            }
+        }
+    }
+
     Crossfade(lyrics) { lyrics ->
         LazyColumn(
             state = listState,
@@ -257,11 +271,7 @@ fun KaraokeLyricsView(
                             )
                         } else {
                             val isCurrentFocusLine by rememberUpdatedState(
-                                lyrics.lines.filter {
-                                    currentTimeMs in it.start..it.end || (abs(
-                                        currentTimeMs - it.start
-                                    )) < 600 || (abs(currentTimeMs - it.end)) < 600
-                                }.contains(line)
+                                accompanimentFocusedLines.contains(line)
                             )
                             val isLineDone by rememberUpdatedState(currentTimeMs - line.end >= 600)
 
@@ -305,32 +315,32 @@ fun KaraokeLyricsView(
                     }
 
                     is SyncedLine -> {
-                        val animatedScale by animateFloatAsState(targetValue = if (isCurrentFocusLine) 1.05f else 1f, label = "scale")
-                        val alphaAnimation by animateFloatAsState(
-                            targetValue = if (isCurrentFocusLine) 1f else 0.4f,
-                            label = "alpha"
-                        )
-                        val blurRadius by animateDpAsState(
-                            targetValue = if (listState.isScrollInProgress && !isScrollProgrammatically) {
-                                0.dp
-                            } else {
-                                positionToFocusedLine.coerceAtMost(10f).dp
-                            },
-                            label = "blurAnimation"
-                        )
+                        val animatedScale = {
+                    if (isCurrentFocusLine) 1.05f else 1f
+                }
+                val alphaAnimation = {
+                    if (isCurrentFocusLine) 1f else 0.4f
+                }
+                val blurRadius = {
+                    if (listState.isScrollInProgress && !isScrollProgrammatically) {
+                        0.dp
+                    } else {
+                        positionToFocusedLine.coerceAtMost(10f).dp
+                    }
+                }
                         Box(
                             Modifier
                                 .fillMaxWidth()
                                 .clip(RoundedCornerShape(8.dp))
                                 .blur(
-                                    blurRadius,
+                                    blurRadius(),
                                     BlurredEdgeTreatment.Unbounded
                                 )
                                 .combinedClickable(onClick = { onLineClicked(line) }, onLongClick = { onLinePressed(line) })
                                 .graphicsLayer {
-                                    scaleX = animatedScale
-                                    scaleY = animatedScale
-                                    alpha = alphaAnimation
+                                    scaleX = animatedScale()
+                                    scaleY = animatedScale()
+                                    alpha = alphaAnimation()
                                     transformOrigin = TransformOrigin(0f, 1f)
                                 },
                         ) {
