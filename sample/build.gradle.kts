@@ -1,12 +1,62 @@
+import org.jetbrains.compose.desktop.application.dsl.TargetFormat
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import java.util.Properties
-import kotlin.apply
 
 plugins {
+    alias(libs.plugins.jetbrains.kotlin.multiplatform)
+    alias(libs.plugins.jetbrains.compose)
     alias(libs.plugins.android.application)
-    alias(libs.plugins.jetbrains.kotlin.android)
     alias(libs.plugins.compose.compiler)
-    alias(libs.plugins.kotlinx.serialization)
-    alias(libs.plugins.kotlin.symbol.processing)
+    alias(libs.plugins.maven.publish)
+}
+
+kotlin {
+    androidTarget {
+        compilerOptions {
+            jvmTarget = JvmTarget.JVM_21
+        }
+    }
+
+    jvm() {
+        compilerOptions {
+            jvmTarget = JvmTarget.JVM_21
+        }
+    }
+
+    sourceSets {
+        commonMain.dependencies {
+            implementation(compose.runtime)
+            implementation(compose.foundation)
+            implementation(compose.material3)
+            implementation(compose.ui)
+            implementation(compose.components.resources)
+            implementation(compose.components.uiToolingPreview)
+
+            implementation(libs.accompanist.lyrics.core)
+
+            implementation(project.dependencies.platform(libs.koin.bom))
+            implementation(libs.koin.compose)
+            implementation(libs.koin.compose.viewmodel)
+
+            implementation(project(":src"))
+        }
+
+        androidMain.dependencies {
+            implementation(libs.androidx.activity.compose)
+            implementation(libs.androidx.core.ktx)
+            implementation(libs.androidx.lifecycle.runtime.ktx)
+            implementation(libs.androidx.media3.exoplayer)
+            implementation(libs.androidx.media3.session)
+            implementation(libs.cloudy)
+
+            implementation(libs.androidx.lifecycle.viewmodel.compose)
+            implementation(libs.kotlinx.coroutines.guava)
+        }
+
+        jvmMain.dependencies {
+            implementation(compose.desktop.currentOs)
+        }
+    }
 }
 
 android {
@@ -33,15 +83,13 @@ android {
                 file.inputStream().use { load(it) }
             }
         }
-        create("release")  {
-            storeFile = rootProject.file(signingProps["RELEASE_STORE_FILE"] as String)
-            storePassword = signingProps["RELEASE_STORE_PASSWORD"] as String
-            keyAlias = signingProps["RELEASE_KEY_ALIAS"] as String
-            keyPassword = signingProps["RELEASE_KEY_PASSWORD"] as String
+        create("release") {
+            storeFile = signingProps["RELEASE_STORE_FILE"]?.let { rootProject.file(it as String) }
+            storePassword = signingProps["RELEASE_STORE_PASSWORD"] as String?
+            keyAlias = signingProps["RELEASE_KEY_ALIAS"] as String?
+            keyPassword = signingProps["RELEASE_KEY_PASSWORD"] as String?
             enableV1Signing = true
             enableV2Signing = true
-            enableV3Signing = true
-            enableV4Signing = true
         }
     }
 
@@ -59,13 +107,16 @@ android {
             signingConfig = signingConfigs.getByName("release")
         }
     }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_21
         targetCompatibility = JavaVersion.VERSION_21
     }
+
     buildFeatures {
         compose = true
     }
+
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
@@ -73,34 +124,25 @@ android {
     }
 }
 
-dependencies {
-    implementation(libs.androidx.core.ktx)
-    implementation(libs.androidx.lifecycle.runtime.ktx)
-    implementation(libs.androidx.lifecycle.viewmodel.compose)
-    implementation(libs.kotlinx.coroutines.guava)
+compose {
+    desktop {
+        application {
+            mainClass = "com.mocharealm.accompanist.sample.MainKt"
 
-    implementation(libs.androidx.activity.compose)
-
-    implementation(project(":src"))
-
-    implementation(libs.androidx.foundation)
-    implementation(libs.androidx.ui)
-    implementation(libs.androidx.ui.graphics)
-    implementation(libs.androidx.ui.tooling.preview)
-    implementation(libs.androidx.material3)
-    implementation(libs.androidx.media3.exoplayer)
-    implementation(libs.androidx.media3.session)
-    implementation(libs.accompanist.lyrics.core)
-
-    implementation(libs.cloudy)
-
-    implementation(platform(libs.koin.bom))
-    implementation(libs.koin.androidx.compose)
-
-    testImplementation(libs.junit)
-    androidTestImplementation(libs.androidx.junit)
-    androidTestImplementation(libs.androidx.espresso.core)
-    //androidTestImplementation(platform(libs.androidx.compose.bom))
-    androidTestImplementation(libs.androidx.ui.test.junit4)
-    debugImplementation(libs.androidx.ui.tooling)
+            nativeDistributions {
+                targetFormats(TargetFormat.Dmg, TargetFormat.Exe)
+            }
+        }
+    }
+    resources {
+        packageOfResClass = "com.mocharealm.accompanist.sample"
+        publicResClass = true
+        generateResClass = always
+        customDirectory(
+            sourceSetName = "commonMain",
+            directoryProvider = provider {
+                layout.projectDirectory.dir("src/commonMain/resources")
+            }
+        )
+    }
 }

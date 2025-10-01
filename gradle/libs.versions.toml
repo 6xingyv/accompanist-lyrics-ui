@@ -1,5 +1,5 @@
 [versions]
-agp = "8.12.0"
+agp = "8.13.0"
 kotlin = "2.2.10"
 coreKtx = "1.17.0"
 junit = "4.13.2"
@@ -9,7 +9,7 @@ lifecycleRuntimeKtx = "2.9.2"
 activityCompose = "1.10.1"
 media3Exoplayer = "1.8.0"
 media3Session = "1.8.0"
-compose = "1.9.0-beta03"
+compose = "1.9.0"
 kotlinx-serialization = "2.2.10"
 
 [libraries]
@@ -30,9 +30,10 @@ androidx-ui-test-junit4 = { group = "org.jetbrains.compose.ui", name = "ui-test-
 androidx-material3 = { group = "org.jetbrains.compose.material3", name = "material3",version.ref="compose"}
 androidx-media3-exoplayer = { group = "androidx.media3", name = "media3-exoplayer", version.ref = "media3Exoplayer" }
 androidx-media3-session = { group = "androidx.media3", name = "media3-session", version.ref = "media3Session" }
-accompanist-lyrics-core = { module = "com.mocharealm.accompanist:lyrics-core", version = "0.3.1" }
+accompanist-lyrics-core = { module = "com.mocharealm.accompanist:lyrics-core", version = "0.3.4" }
 koin-bom = { group = "io.insert-koin", name = "koin-bom", version = "4.1.0" }
-koin-androidx-compose = { group = "io.insert-koin", name = "koin-androidx-compose" }
+koin-compose = { group = "io.insert-koin", name = "koin-compose" }
+koin-compose-viewmodel = { group = "io.insert-koin", name = "koin-compose-viewmodel" }
 cloudy = { module = "com.github.skydoves:cloudy",version="0.2.7"}
 
 [plugins]
