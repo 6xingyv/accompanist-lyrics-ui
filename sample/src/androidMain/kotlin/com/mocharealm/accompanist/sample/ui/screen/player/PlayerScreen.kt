@@ -1,8 +1,11 @@
 package com.mocharealm.accompanist.sample.ui.screen.player
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.MarqueeSpacing
 import androidx.compose.foundation.background
+import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -40,6 +43,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.dropShadow
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.CompositingStrategy
@@ -191,11 +196,12 @@ fun MobilePlayerScreen(
                         fontWeight = FontWeight.Bold,
                         fontFamily = SFPro(),
                         lineHeight = 1.em,
-                        color = Color.White
+                        color = Color.White,
+                        modifier = Modifier.basicMarquee(spacing = MarqueeSpacing(20.dp))
                     )
                     Text(
                         uiState.currentMusicItem?.testTarget?.split(" [")[0] ?: "Unknown",
-                        Modifier.alpha(0.6f),
+                        Modifier.alpha(0.6f).basicMarquee(spacing = MarqueeSpacing(20.dp)),
                         fontFamily = SFPro(),
                         lineHeight = 1.em,
                         color = Color.White
@@ -262,6 +268,7 @@ fun PadPlayerScreen(
         Modifier
             .captionBarPadding()
             .statusBarsPadding()
+            .fillMaxWidth()
             .animateContentSize(),
         horizontalArrangement = Arrangement.Center,
     ) {
@@ -279,24 +286,36 @@ fun PadPlayerScreen(
                     uiState.backgroundState.bitmap,
                     null,
                     Modifier
-                        .clip(RoundedCornerShape(6.dp))
+                        .dropShadow(RoundedCornerShape(12.dp)) {
+                            radius = 10f
+                            color = Color.Black.copy(0.2f)
+                            offset = Offset(0f, 16f)
+                            spread = -10f
+                        }
                         .border(
                             1.dp,
                             Color.White.copy(0.2f),
-                            RoundedCornerShape(6.dp)
+                            RoundedCornerShape(12.dp)
                         )
+                        .clip(RoundedCornerShape(12.dp))
                         .fillMaxWidth()
                         .aspectRatio(1f)
                 )
             } else {
                 Box(
                     Modifier
-                        .clip(RoundedCornerShape(6.dp))
+                        .dropShadow(RoundedCornerShape(12.dp)) {
+                            radius = 10f
+                            color = Color.Black.copy(0.2f)
+                            offset = Offset(0f, 16f)
+                            spread = -10f
+                        }
                         .border(
                             1.dp,
                             Color.White.copy(0.2f),
-                            RoundedCornerShape(6.dp)
+                            RoundedCornerShape(12.dp)
                         )
+                        .clip(RoundedCornerShape(12.dp))
                         .fillMaxWidth()
                         .aspectRatio(1f)
                         .background(Color.White.copy(0.1f))
@@ -322,14 +341,15 @@ fun PadPlayerScreen(
                         fontWeight = FontWeight.Bold,
                         fontFamily = SFPro(),
                         lineHeight = 1.em,
-                        color = Color.White
+                        color = Color.White,
+                        modifier = Modifier.basicMarquee(spacing = MarqueeSpacing(20.dp))
                     )
                     Text(
                         uiState.currentMusicItem?.testTarget?.split(" [")[0] ?: "Unknown",
-                        Modifier.alpha(0.6f),
+                        Modifier.alpha(0.6f).basicMarquee(spacing = MarqueeSpacing(20.dp)),
                         fontFamily = SFPro(),
                         lineHeight = 1.em,
-                        color = Color.White
+                        color = Color.White,
                     )
                 }
                 Row(
@@ -350,36 +370,38 @@ fun PadPlayerScreen(
             }
 
         }
-        uiState.lyrics?.let { finalLyrics ->
-            KaraokeLyricsView(
-                listState = listState,
-                lyrics = finalLyrics,
-                currentPosition = animatedPosition,
-                onLineClicked = { line ->
-                    playerViewModel.seekTo(line.start.toLong())
-                },
-                onLinePressed = { line ->
-                    playerViewModel.onShareRequested()
-                    val context = ShareContext(
-                        lyrics = finalLyrics,
-                        initialLine = line as KaraokeLine,
-                        backgroundState = BackgroundVisualState(
-                            bitmap = uiState.backgroundState.bitmap,
-                            isBright = uiState.backgroundState.isBright
-                        )
-                    )
-                    shareViewModel.prepareForSharing(context)
-                    playerViewModel.onShareRequested()
-                },
-                modifier = Modifier
-                    .padding(horizontal = 12.dp)
-                    .padding(start = 60.dp, end = 60.dp)
-                    .weight(1f)
-                    .graphicsLayer {
-                        blendMode = BlendMode.Plus
-                        compositingStrategy = CompositingStrategy.Offscreen
+        AnimatedVisibility(uiState.lyrics != null) {
+            uiState.lyrics?.let { lyrics ->
+                KaraokeLyricsView(
+                    listState = listState,
+                    lyrics = lyrics,
+                    currentPosition = animatedPosition,
+                    onLineClicked = { line ->
+                        playerViewModel.seekTo(line.start.toLong())
                     },
-            )
+                    onLinePressed = { line ->
+                        playerViewModel.onShareRequested()
+                        val context = ShareContext(
+                            lyrics = lyrics,
+                            initialLine = line as KaraokeLine,
+                            backgroundState = BackgroundVisualState(
+                                bitmap = uiState.backgroundState.bitmap,
+                                isBright = uiState.backgroundState.isBright
+                            )
+                        )
+                        shareViewModel.prepareForSharing(context)
+                        playerViewModel.onShareRequested()
+                    },
+                    modifier = Modifier
+                        .padding(horizontal = 12.dp)
+                        .padding(start = 60.dp, end = 60.dp)
+                        .weight(1f)
+                        .graphicsLayer {
+                            blendMode = BlendMode.Plus
+                            compositingStrategy = CompositingStrategy.Offscreen
+                        },
+                )
+            }
         }
     }
 }

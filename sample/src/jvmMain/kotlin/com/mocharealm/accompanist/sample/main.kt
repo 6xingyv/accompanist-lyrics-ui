@@ -51,19 +51,9 @@ fun main() = application {
             lyrics = lyrics,
             currentPosition = currentTime.toLong(),
             onLineClicked = { line ->
+
             },
             onLinePressed = { line ->
-//                playerViewModel.onShareRequested()
-//                val context = ShareContext(
-//                    lyrics = finalLyrics,
-//                    initialLine = line as KaraokeLine,
-//                    backgroundState = BackgroundVisualState(
-//                        bitmap = uiState.backgroundState.bitmap,
-//                        isBright = uiState.backgroundState.isBright
-//                    )
-//                )
-//                shareViewModel.prepareForSharing(context)
-//                playerViewModel.onShareRequested()
             },
             modifier = Modifier
                 .padding(horizontal = 12.dp)

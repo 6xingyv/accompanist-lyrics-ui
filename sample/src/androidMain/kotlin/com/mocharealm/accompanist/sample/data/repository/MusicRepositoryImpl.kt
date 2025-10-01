@@ -27,12 +27,12 @@ class MusicRepositoryImpl(private val context: Context): MusicRepository {
                 "me-translation.lrc"
             ),
             //TODO： Fix playback error
-//            MusicItem(
-//                "Golden Hour (Acapella Version)",
-//                "TTML(AMLL) [Single Singer, With Accompaniment, Independent Punctuation]",
-//                MediaItem.fromUri("asset:///golden-hour.flac"),
-//                "golden-hour.ttml"
-//            ),
+            MusicItem(
+                "Golden Hour (Acapella Version)",
+                "TTML(AMLL) [Single Singer, With Accompaniment, Independent Punctuation]",
+                MediaItem.fromUri("asset:///golden-hour.m4a"),
+                "golden-hour.ttml"
+            ),
             MusicItem(
                 "好久没下雨了",
                 "TTML [Single Singer, With Breathing Dots, CJK]",

@@ -165,7 +165,7 @@ fun KaraokeLyricsView(
             isScrollProgrammatically = false
         }
     }
-    val firstLine = lyrics.lines[0]
+    val firstLine = lyrics.lines.firstOrNull() ?: SyncedLine("", null, 0, 0)
     val showDotInIntro = remember(firstLine, currentTimeMs) {
         (firstLine.start > 5000) && (currentTimeMs in 0 until firstLine.start)
     }

@@ -4,13 +4,17 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.AnimationSpec
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.sizeIn
+import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -18,6 +22,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
@@ -32,6 +37,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import com.mocharealm.accompanist.lyrics.ui.utils.copyHsl
+import com.mocharealm.accompanist.sample.ui.adaptive.WindowLayoutType
 import com.mocharealm.accompanist.sample.ui.utils.ScreenCornerDataDp
 import com.mocharealm.accompanist.sample.ui.utils.composable.CompatBackHandler
 import com.mocharealm.accompanist.sample.ui.utils.rememberScreenCornerDataDp
@@ -41,6 +47,49 @@ import kotlin.math.roundToInt
 
 @Composable
 fun ModalScaffold(
+    isModalOpen: Boolean,
+    onDismissRequest: () -> Unit,
+    modifier: Modifier = Modifier,
+    confirmDismiss: () -> Boolean = { true },
+    screenCornerDataDp: ScreenCornerDataDp = rememberScreenCornerDataDp(),
+    targetRadius: Dp = 16.dp,
+    animationSpec: AnimationSpec<Float> = tween(durationMillis = 400),
+    dismissThresholdFraction: Float = 0.5f,
+    modalContent: @Composable (dragHandleModifier: Modifier) -> Unit,
+    content: @Composable () -> Unit
+) {
+    when (WindowLayoutType.current) {
+        WindowLayoutType.Phone -> MobileModalScaffold(
+            isModalOpen = isModalOpen,
+            onDismissRequest = onDismissRequest,
+            modifier = modifier,
+            confirmDismiss = confirmDismiss,
+            screenCornerDataDp = screenCornerDataDp,
+            targetRadius = targetRadius,
+            animationSpec = animationSpec,
+            dismissThresholdFraction = dismissThresholdFraction,
+            modalContent = modalContent,
+            content = content
+        )
+
+        WindowLayoutType.Tablet,
+        WindowLayoutType.Desktop -> PadModalScaffold(
+            isModalOpen = isModalOpen,
+            onDismissRequest = onDismissRequest,
+            modifier = modifier,
+            confirmDismiss = confirmDismiss,
+            targetRadius = targetRadius,
+            animationSpec = animationSpec,
+            modalContent = modalContent,
+            content = content
+        )
+
+        WindowLayoutType.Tv -> {}
+    }
+}
+
+@Composable
+fun MobileModalScaffold(
     isModalOpen: Boolean,
     onDismissRequest: () -> Unit,
     modifier: Modifier = Modifier,
@@ -77,7 +126,6 @@ fun ModalScaffold(
     }
 
     CompatBackHandler(enabled = isModalOpen) { progressFlow ->
-        if (!confirmDismiss()) return@CompatBackHandler
         try {
             progressFlow.collect { backEvent ->
                 offsetY.snapTo(backEvent.progress * modalHeight)
@@ -188,6 +236,87 @@ fun ModalScaffold(
                 },
         ) {
             modalContent(dragHandleModifier)
+        }
+    }
+}
+
+@Composable
+fun PadModalScaffold(
+    isModalOpen: Boolean,
+    onDismissRequest: () -> Unit,
+    modifier: Modifier = Modifier,
+    confirmDismiss: () -> Boolean = { true },
+    targetRadius: Dp = 16.dp,
+    animationSpec: AnimationSpec<Float> = tween(durationMillis = 400),
+    modalContent: @Composable (dragHandleModifier: Modifier) -> Unit,
+    content: @Composable () -> Unit
+) {
+    val scope = rememberCoroutineScope()
+    val progress = remember { Animatable(if (isModalOpen) 0f else 1f) }
+
+    LaunchedEffect(isModalOpen) {
+        progress.animateTo(if (isModalOpen) 0f else 1f, animationSpec)
+    }
+
+    CompatBackHandler(enabled = isModalOpen) { progressFlow ->
+        if (!confirmDismiss()) return@CompatBackHandler
+        try {
+            progressFlow.collect { backEvent ->
+                progress.snapTo(backEvent.progress)
+            }
+            onDismissRequest()
+        } catch (_: CancellationException) {
+            scope.launch {
+                progress.animateTo(0f, animationSpec)
+            }
+        }
+    }
+
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .background(Color.Black)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+        ) {
+            content()
+        }
+
+        if (progress.value != 1f) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(lerp(0.4f, 0f, progress.value)))
+                    .clickable {
+                        if (confirmDismiss()) {
+                            scope.launch {
+                                progress.animateTo(1f, animationSpec)
+                            }
+                            onDismissRequest()
+                        }
+                    }
+            )
+        }
+
+        Box(
+            Modifier
+                .align(Alignment.Center)
+                .systemBarsPadding()
+                .padding(vertical = 20.dp)
+                .clip(RoundedCornerShape(targetRadius))
+                .background(
+                    if (isSystemInDarkTheme())
+                        Color.Black.copyHsl(lightness = 0.15f)
+                    else Color.White
+                )
+                .graphicsLayer {
+                    alpha = 1f - progress.value
+                }
+                .sizeIn(maxWidth = 420.dp)
+        ) {
+            modalContent(Modifier)
         }
     }
 }

@@ -15,7 +15,7 @@ expect fun CompatBackHandler(
 class UniBackEvent(
     val touchX: Float,
     val touchY: Float,
-    @FloatRange(from = 0.0, to = 1.0) val progress: Float,
+    val progress: Float,
     val swipeEdge: SwipeEdge
 ) {
     enum class SwipeEdge(val value: Int) {

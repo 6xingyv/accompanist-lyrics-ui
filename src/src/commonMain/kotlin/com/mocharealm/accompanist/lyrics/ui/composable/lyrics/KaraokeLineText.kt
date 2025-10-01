@@ -292,30 +292,24 @@ private fun createLineGradientBrush(
     if (totalWidth <= 0f) {
         val isFinished = currentTimeMs >= lineLayout.last().syllable.end
         val color = if (isFinished) activeColor else inactiveColor
-        return Brush.horizontalGradient(colors = listOf(color, color))
+        return Brush.horizontalGradient(listOf(color, color))
     }
 
     val firstSyllableStart = lineLayout.first().syllable.start
     val lastSyllableEnd = lineLayout.last().syllable.end
-    val lineDuration = (lastSyllableEnd - firstSyllableStart).toFloat()
-
-    val fadeInDuration = if (lineDuration < 2000) lineDuration * 0.1f else 0f
-    val fadeOutDuration = fadeInDuration
-    val fadeInEndTime = firstSyllableStart + fadeInDuration
-    val fadeOutStartTime = lastSyllableEnd - fadeOutDuration
 
     val lineProgress = run {
+        if (currentTimeMs <= firstSyllableStart) return Brush.horizontalGradient(listOf(inactiveColor, inactiveColor))
+        if (currentTimeMs >= lastSyllableEnd) return Brush.horizontalGradient(listOf(activeColor, activeColor))
+
         val activeSyllableLayout = lineLayout.find {
             currentTimeMs in it.syllable.start until it.syllable.end
         }
-
         val currentPixelPosition = when {
             activeSyllableLayout != null -> {
                 val syllableProgress = activeSyllableLayout.syllable.progress(currentTimeMs)
                 activeSyllableLayout.position.x + activeSyllableLayout.width * syllableProgress
             }
-
-            currentTimeMs >= lastSyllableEnd -> totalWidth
             else -> {
                 val lastFinished = lineLayout.lastOrNull { currentTimeMs >= it.syllable.end }
                 lastFinished?.let { it.position.x + it.width } ?: 0f
@@ -324,94 +318,27 @@ private fun createLineGradientBrush(
         (currentPixelPosition / totalWidth).coerceIn(0f, 1f)
     }
 
-    val fadeRange = run {
-            val fadeWidthPx = minFadeWidth
-            (fadeWidthPx / totalWidth).coerceAtMost(1f)
-        }
+    val fadeRange = (minFadeWidth / totalWidth).coerceAtMost(1f)
 
-    fun lerpColor(start: Color, end: Color, fraction: Float): Color {
-        return Color(
-            red = (start.red + (end.red - start.red) * fraction),
-            green = (start.green + (end.green - start.green) * fraction),
-            blue = (start.blue + (end.blue - start.blue) * fraction),
-            alpha = (start.alpha + (end.alpha - start.alpha) * fraction)
-        )
-    }
+    val fadeCenterStart = -fadeRange / 2f
+    val fadeCenterEnd = 1f + fadeRange / 2f
 
-    return when {
-        currentTimeMs >= lastSyllableEnd -> Brush.horizontalGradient(
-            colors = listOf(
-                activeColor,
-                activeColor
-            )
-        )
+    val fadeCenter = fadeCenterStart + (fadeCenterEnd - fadeCenterStart) * lineProgress
 
-        currentTimeMs < firstSyllableStart -> Brush.horizontalGradient(
-            colors = listOf(
-                inactiveColor,
-                inactiveColor
-            )
-        )
+    val fadeStart = fadeCenter - fadeRange / 2f
+    val fadeEnd = fadeCenter + fadeRange / 2f
 
-        currentTimeMs < fadeInEndTime -> {
-            val phaseProgress =
-                ((currentTimeMs - firstSyllableStart) / fadeInDuration).coerceIn(0f, 1f)
-            val dynamicFade = fadeRange * phaseProgress
-            val fadeStart = (lineProgress - dynamicFade / 2).coerceAtLeast(0f)
-            val fadeEnd = (lineProgress + dynamicFade / 2).coerceAtMost(1f)
-            Brush.horizontalGradient(
-                colorStops = arrayOf(
-                    0.0f to activeColor,
-                    fadeStart to activeColor,
-                    ((fadeStart + fadeEnd) / 2f) to lerpColor(
-                        activeColor,
-                        inactiveColor,
-                        phaseProgress
-                    ),
-                    fadeEnd to inactiveColor,
-                    1.0f to inactiveColor
-                ),
-                endX = totalWidth
-            )
-        }
+    val colorStops = arrayOf(
+        0.0f to activeColor,
+        fadeStart.coerceIn(0f, 1f) to activeColor,
+        fadeEnd.coerceIn(0f, 1f) to inactiveColor,
+        1.0f to inactiveColor
+    )
 
-        currentTimeMs > fadeOutStartTime -> {
-            val phaseProgress =
-                ((currentTimeMs - fadeOutStartTime) / fadeOutDuration).coerceIn(0f, 1f)
-            val dynamicFade = fadeRange * (1f - phaseProgress)
-            val fadeStart = (lineProgress - dynamicFade / 2).coerceAtLeast(0f)
-            val fadeEnd = (lineProgress + dynamicFade / 2).coerceAtMost(1f)
-            Brush.horizontalGradient(
-                colorStops = arrayOf(
-                    0.0f to activeColor,
-                    fadeStart to activeColor,
-                    ((fadeStart + fadeEnd) / 2f) to lerpColor(
-                        activeColor,
-                        inactiveColor,
-                        phaseProgress
-                    ),
-                    fadeEnd to inactiveColor,
-                    1.0f to inactiveColor
-                ),
-                endX = totalWidth
-            )
-        }
-
-        else -> {
-            val fadeStart = (lineProgress - fadeRange / 2).coerceAtLeast(0f)
-            val fadeEnd = (lineProgress + fadeRange / 2).coerceAtMost(1f)
-            Brush.horizontalGradient(
-                colorStops = arrayOf(
-                    0.0f to activeColor,
-                    fadeStart to activeColor,
-                    ((fadeStart + fadeEnd) / 2f) to lerpColor(activeColor, inactiveColor, 0.5f),
-                    fadeEnd to inactiveColor,
-                    1.0f to inactiveColor
-                ),
-                endX = totalWidth
-            )
-        }
-    }
+    return Brush.horizontalGradient(
+        colorStops = colorStops,
+        endX = totalWidth
+    )
 }
 
 
@@ -584,7 +511,7 @@ fun KaraokeLineText(
     val textMeasurer = rememberTextMeasurer()
 
     val animatedScale by animateFloatAsState(
-        targetValue = if (isFocused) 1.05f else 1f,
+        targetValue = if (isFocused) 1f else 0.98f,
         animationSpec = if (isFocused) {
             androidx.compose.animation.core.tween(
                 durationMillis = 600,

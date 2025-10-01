@@ -169,6 +169,7 @@ class PlayerViewModel(
         val controller = mediaController ?: return
         updateState { it.copy(showSelectionDialog = false, currentMusicItem = item) }
         controller.setMediaItem(item.mediaItem)
+        controller.repeatMode = Player.REPEAT_MODE_ALL
         controller.prepare()
         controller.play()
         loadLyricsFor(item)
