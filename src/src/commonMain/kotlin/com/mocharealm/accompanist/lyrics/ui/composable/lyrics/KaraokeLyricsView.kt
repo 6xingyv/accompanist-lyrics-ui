@@ -315,32 +315,34 @@ fun KaraokeLyricsView(
                     }
 
                     is SyncedLine -> {
-                        val animatedScale = {
-                    if (isCurrentFocusLine) 1.05f else 1f
-                }
-                val alphaAnimation = {
-                    if (isCurrentFocusLine) 1f else 0.4f
-                }
-                val blurRadius = {
-                    if (listState.isScrollInProgress && !isScrollProgrammatically) {
-                        0.dp
-                    } else {
-                        positionToFocusedLine.coerceAtMost(10f).dp
-                    }
-                }
+                        val animatedScale by animateFloatAsState(targetValue = if (isCurrentFocusLine) 1.05f else 1f, label = "scale")
+                        val alphaAnimation by animateFloatAsState(
+                            targetValue = if (isCurrentFocusLine) 1f else 0.4f,
+                            label = "alpha"
+                        )
+                        val blurRadius by animateDpAsState(
+                            targetValue = if (listState.isScrollInProgress && !isScrollProgrammatically) {
+                                0.dp
+                            } else {
+                                positionToFocusedLine.coerceAtMost(10f).dp
+                            },
+                            label = "blurAnimation"
+                        )
+
+
                         Box(
                             Modifier
                                 .fillMaxWidth()
                                 .clip(RoundedCornerShape(8.dp))
                                 .blur(
-                                    blurRadius(),
+                                    blurRadius,
                                     BlurredEdgeTreatment.Unbounded
                                 )
                                 .combinedClickable(onClick = { onLineClicked(line) }, onLongClick = { onLinePressed(line) })
                                 .graphicsLayer {
-                                    scaleX = animatedScale()
-                                    scaleY = animatedScale()
-                                    alpha = alphaAnimation()
+                                    scaleX = animatedScale
+                                    scaleY = animatedScale
+                                    alpha = alphaAnimation
                                     transformOrigin = TransformOrigin(0f, 1f)
                                 },
                         ) {
