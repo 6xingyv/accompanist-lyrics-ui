@@ -100,7 +100,8 @@ fun KaraokeLyricsView(
                 blendMode = BlendMode.DstIn
             )
         }
-    }
+    },
+    breathingDotsColor: Color = Color.White
 ) {
     val currentTimeMs by rememberUpdatedState(currentPosition.toInt())
 
@@ -268,6 +269,7 @@ fun KaraokeLyricsView(
                                     ),
                                 normalLineTextStyle = normalLineTextStyle,
                                 accompanimentLineTextStyle = accompanimentLineTextStyle,
+                                activeColor = textColor
                             )
                         } else {
                             val isCurrentFocusLine by rememberUpdatedState(
@@ -309,6 +311,7 @@ fun KaraokeLyricsView(
                                         .fillMaxWidth(if (isDuoView) 0.85f else 1f).alpha(0.8f),
                                     normalLineTextStyle = normalLineTextStyle,
                                     accompanimentLineTextStyle = accompanimentLineTextStyle,
+                                    activeColor = textColor
                                 )
                             }
                         }
@@ -376,7 +379,8 @@ fun KaraokeLyricsView(
                         alignment = (nextLine as? KaraokeLine)?.alignment ?: KaraokeAlignment.Start,
                         startTimeMs = line.end,
                         endTimeMs = nextLine!!.start,
-                        currentTimeMs = currentTimeMs
+                        currentTimeMs = currentTimeMs,
+                        breathingDotsColor = breathingDotsColor
                     )
                 }
             }
