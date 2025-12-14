@@ -195,7 +195,7 @@ fun KaraokeBreathingDots(
                 val startFade = (revealPosition - softEdgeWidth).coerceIn(0f, 1f)
                 val endFade = revealPosition.coerceIn(0f, 1f)
 
-                if (breathingDotsColor != Color.White) {
+                if (breathingDotsColor != Color.Black) {
                     val brush = Brush.horizontalGradient(
                         colorStops = arrayOf(
                             0f to Color.Black,
