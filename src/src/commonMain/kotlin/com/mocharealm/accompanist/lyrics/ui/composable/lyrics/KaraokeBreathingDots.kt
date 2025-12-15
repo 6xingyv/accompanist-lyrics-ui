@@ -34,6 +34,7 @@ data class KaraokeBreathingDotsDefaults(
     val preExitStillDuration: Int = 200,
     val preExitDipAndRiseDuration: Int = 3000,
     val exitDurationMs: Int = 200,
+    val breathingDotsColor: Color = Color.White
 )
 
 @Composable
@@ -44,7 +45,6 @@ fun KaraokeBreathingDots(
     currentTimeMs: Int,
     modifier: Modifier = Modifier,
     defaults: KaraokeBreathingDotsDefaults = KaraokeBreathingDotsDefaults(),
-    breathingDotsColor: Color = Color.White
 ) {
     Box(modifier) {
         val size = with(LocalDensity.current) { defaults.size.toPx() }
@@ -183,7 +183,7 @@ fun KaraokeBreathingDots(
                         }
 
                         drawCircle(
-                            color = breathingDotsColor.copy(alpha = dotAlpha * alpha),
+                            color = defaults.breathingDotsColor.copy(alpha = dotAlpha * alpha),
                             radius = size / 2,
                             center = Offset(size / 2 + (size + margin) * index, size / 2)
                         )
@@ -195,7 +195,7 @@ fun KaraokeBreathingDots(
                 val startFade = (revealPosition - softEdgeWidth).coerceIn(0f, 1f)
                 val endFade = revealPosition.coerceIn(0f, 1f)
 
-                if (breathingDotsColor != Color.Black) {
+                if (defaults.breathingDotsColor != Color.Black) {
                     val brush = Brush.horizontalGradient(
                         colorStops = arrayOf(
                             0f to Color.Black,
