@@ -628,17 +628,17 @@ fun KaraokeLineText(
             line.translation?.let { translation ->
                 val result = remember(translation) { textMeasurer.measure(translation) }
                 val color = activeColor.copy(0.6f)
-                val luminance = color.luminance() // 亮度
+                val luminance = color.luminance()
                 val textColor = if (luminance > 0.7f) {
-                    activeColor.copy(alpha = 0.8f).compositeOver(Color.Black) // 亮背景用深色
+                    activeColor.copy(alpha = 0.8f).compositeOver(Color.Black)
                 } else {
-                    activeColor.copy(alpha = 0.8f) // 暗背景用浅色
+                    activeColor.copy(alpha = 0.8f)
                 }
                 Canvas(modifier = Modifier.size(result.size.toDpSize())) {
                     drawText(
                         textLayoutResult = result,
                         color = textColor,
-                        blendMode = BlendMode.SrcOver
+                        blendMode = BlendMode.Plus
                     )
                 }
             }
