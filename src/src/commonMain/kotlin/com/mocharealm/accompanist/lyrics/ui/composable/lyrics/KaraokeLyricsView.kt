@@ -219,6 +219,7 @@ fun KaraokeLyricsView(
                         startTimeMs = 0,
                         endTimeMs = firstLine.start,
                         currentTimeMs = currentTimeMs,
+                        defaults = breathingDotsDefaults
                     )
                 }
             }
