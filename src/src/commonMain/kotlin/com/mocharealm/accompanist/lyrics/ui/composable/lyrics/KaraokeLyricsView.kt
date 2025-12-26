@@ -4,6 +4,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
@@ -101,7 +102,7 @@ fun KaraokeLyricsView(
             )
         }
     },
-    breathingDotsColor: Color = Color.White
+    breathingDotsDefaults: KaraokeBreathingDotsDefaults = KaraokeBreathingDotsDefaults()
 ) {
     val currentTimeMs by rememberUpdatedState(currentPosition.toInt())
 
@@ -218,6 +219,7 @@ fun KaraokeLyricsView(
                         startTimeMs = 0,
                         endTimeMs = firstLine.start,
                         currentTimeMs = currentTimeMs,
+                        defaults = breathingDotsDefaults
                     )
                 }
             }
@@ -380,7 +382,7 @@ fun KaraokeLyricsView(
                         startTimeMs = line.end,
                         endTimeMs = nextLine!!.start,
                         currentTimeMs = currentTimeMs,
-                        breathingDotsColor = breathingDotsColor
+                        defaults = breathingDotsDefaults
                     )
                 }
             }
