@@ -281,9 +281,10 @@ private fun calculateStaticLineLayout(
 private fun createLineGradientBrush(
     lineLayout: List<SyllableLayout>,
     currentTimeMs: Int,
+    activeColor: Color = Color.White
 ): Brush {
-    val activeColor = Color.White
-    val inactiveColor = Color.White.copy(alpha = 0.2f)
+    val activeColor = activeColor
+    val inactiveColor = activeColor.copy(alpha = 0.2f)
     val minFadeWidth = 100f
 
     if (lineLayout.isEmpty()) {
@@ -485,7 +486,7 @@ fun DrawScope.drawLine(
                 }
             }
 
-            val progressBrush = createLineGradientBrush(rowLayouts, currentTimeMs)
+            val progressBrush = createLineGradientBrush(rowLayouts, currentTimeMs, color)
             drawRect(
                 brush = progressBrush,
                 topLeft = layerBounds.topLeft,
@@ -638,8 +639,8 @@ fun KaraokeLineText(
                     drawText(
                         textLayoutResult = result,
                         color = textColor,
-                        blendMode = BlendMode.Plus
-                    )
+
+                        )
                 }
             }
         }
