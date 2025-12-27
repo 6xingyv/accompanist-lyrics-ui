@@ -30,14 +30,12 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Paint
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.TransformOrigin
-import androidx.compose.ui.graphics.compositeOver
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.drawscope.scale
 import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.TextStyle
@@ -629,17 +627,16 @@ fun KaraokeLineText(
             line.translation?.let { translation ->
                 val result = remember(translation) { textMeasurer.measure(translation) }
                 val color = activeColor.copy(0.6f)
-                val luminance = color.luminance()
-                val textColor = if (luminance > 0.7f) {
-                    activeColor.copy(alpha = 0.8f).compositeOver(Color.Black)
-                } else {
-                    activeColor.copy(alpha = 0.8f)
-                }
                 Canvas(modifier = Modifier.size(result.size.toDpSize())) {
                     drawText(
                         textLayoutResult = result,
-                        color = textColor,
+                        color = color,
                         blendMode = BlendMode.SrcOver
+                    )
+                    drawText(
+                        textLayoutResult = result,
+                        color = color,
+                        blendMode = BlendMode.Plus
                     )
                 }
             }
