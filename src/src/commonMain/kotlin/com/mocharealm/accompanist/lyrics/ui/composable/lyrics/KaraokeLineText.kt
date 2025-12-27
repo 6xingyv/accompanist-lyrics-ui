@@ -639,8 +639,8 @@ fun KaraokeLineText(
                     drawText(
                         textLayoutResult = result,
                         color = textColor,
-
-                        )
+                        blendMode = BlendMode.SrcOver
+                    )
                 }
             }
         }
