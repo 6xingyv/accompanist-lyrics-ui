@@ -50,13 +50,25 @@ private val devanagariBlocks: Set<Character.UnicodeBlock> by lazy {
 }
 
 actual fun Char.isCjk(): Boolean {
-    return Character.UnicodeBlock.of(this) in cjkBlocks
+    return try {
+        Character.UnicodeBlock.of(this) in cjkBlocks
+    } catch (e: Exception) {
+        false
+    }
 }
 
 actual fun Char.isArabic(): Boolean {
-    return Character.UnicodeBlock.of(this) in arabicBlocks
+    return try {
+        Character.UnicodeBlock.of(this) in arabicBlocks
+    } catch (e: Exception) {
+        false
+    }
 }
 
 actual fun Char.isDevanagari(): Boolean {
-    return Character.UnicodeBlock.of(this) in devanagariBlocks
+    return try {
+        Character.UnicodeBlock.of(this) in devanagariBlocks
+    } catch (e: Exception) {
+        false
+    }
 }
