@@ -23,9 +23,9 @@ kotlin {
     }
     androidLibrary {
         namespace = "com.mocharealm.accompanist.lyrics.ui"
-        compileSdk = 36
+        compileSdk = 37
 
-        minSdk = 29
+        minSdk = 21
 
         optimization {
             consumerKeepRules.apply {
