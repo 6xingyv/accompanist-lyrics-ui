@@ -379,17 +379,54 @@ impl LyricsRenderer {
                 continue;
             };
 
-            if let Some(typeface) = match_skia_typeface_for_face(face) {
-                self.skia_typefaces.insert(id, typeface);
-                stats.loaded_from_system += 1;
-                continue;
-            }
+            let want_weight = face.weight.0 as i32;
+            let dbg_family = face
+                .families
+                .first()
+                .map(|(n, _)| n.clone())
+                .unwrap_or_default();
+            let dbg_style = face.style;
+            let dbg_index = face.index;
+            let dbg_src = match &face.source {
+                fontdb::Source::File(p) => p.display().to_string(),
+                fontdb::Source::SharedFile(p, _) => p.display().to_string(),
+                fontdb::Source::Binary(_) => "<binary>".to_string(),
+            };
 
-            if let Some(typeface) = skia_typeface_from_face_source(face) {
-                self.skia_typefaces.insert(id, typeface);
-                stats.loaded_from_source += 1;
-            } else {
-                stats.failed_faces.push(describe_font_face(id, face));
+            // Skia's FontMgr resolves a family+style to its *closest* concrete
+            // face, which can be a different weight than the exact face
+            // cosmic-text shaped with (e.g. the 400 default instance of a variable
+            // font, or the nearest static weight). Drawing that while the advances
+            // were measured from the shaped (e.g. 700) face is the "measured bold,
+            // drawn thin" bug. If the weights disagree, load the exact face source.
+            let fontmgr = match_skia_typeface_for_face(face);
+            let fontmgr_weight: Option<i32> = fontmgr.as_ref().map(|t| *t.font_style().weight());
+            let (typeface, via) = match fontmgr {
+                Some(tf) if (*tf.font_style().weight() - want_weight).abs() <= 50 => {
+                    (Some(tf), "fontmgr")
+                }
+                fontmgr_match => match skia_typeface_from_face_source(face) {
+                    Some(tf) => (Some(tf), "source"),
+                    None => (fontmgr_match, "fontmgr-fallback"),
+                },
+            };
+            let skia_weight: Option<i32> = typeface.as_ref().map(|t| *t.font_style().weight());
+
+            info!(
+                "[FontTower] face id={:?} family={:?} cosmic_weight={} style={:?} index={} fontmgr_weight={:?} skia_weight={:?} via={} src={}",
+                id, dbg_family, want_weight, dbg_style, dbg_index, fontmgr_weight, skia_weight, via, dbg_src
+            );
+
+            match typeface {
+                Some(tf) => {
+                    self.skia_typefaces.insert(id, tf);
+                    if via == "source" {
+                        stats.loaded_from_source += 1;
+                    } else {
+                        stats.loaded_from_system += 1;
+                    }
+                }
+                None => stats.failed_faces.push(describe_font_face(id, face)),
             }
         }
 

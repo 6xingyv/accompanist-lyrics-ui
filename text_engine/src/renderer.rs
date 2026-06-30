@@ -721,6 +721,16 @@ impl LyricsRenderer {
         let visible_bottom = scroll_y + height as f32 + scene.config.keep_alive;
         let base_color = rgba_from_argb(scene.config.text_color);
 
+        // Blur anchor = the currently sung line's on-screen position (see the
+        // Android path for the rationale); focused lines are forced fully sharp.
+        let blur_anchor_y = {
+            let idx = scene.focus_anchor_index(current_time_ms);
+            dynamic_layouts
+                .get(idx)
+                .map(|layout| layout.top - scroll_y)
+                .unwrap_or(scene.config.keep_alive)
+        };
+
         for (line_index, line) in scene.lines.iter().enumerate() {
             let Some(dynamic_layout) = dynamic_layouts.get(line_index) else {
                 continue;
@@ -743,7 +753,11 @@ impl LyricsRenderer {
                 .unwrap_or(0.0);
             let distance_alpha =
                 scene.focus_alpha(line, current_time_ms) * dynamic_layout.text_visibility;
-            let blur_radius = scene.blur_radius_for_screen_y(y, scene.config.keep_alive);
+            let blur_radius = if scene.is_line_focused(line, current_time_ms) {
+                0.0
+            } else {
+                scene.blur_radius_for_screen_y(y, blur_anchor_y)
+            };
 
             if let Some(interlude) = &line.interlude {
                 if dynamic_layout.interlude_visibility > 0.001 {
@@ -921,6 +935,20 @@ impl LyricsRenderer {
         let visible_top = -keep_alive;
         let visible_bottom = height as f32 + keep_alive;
 
+        // Anchor the depth-of-field blur on the *currently sung* line's actual
+        // on-screen position — which springs/lags as the list scrolls — not the
+        // fixed keep-alive slot. With the fixed anchor, while the scroll spring is
+        // still catching up the active line sits off the anchor and gets blurred
+        // even though it's the focus. Falls back to keep_alive before the first
+        // line is focused.
+        let blur_anchor_y = {
+            let idx = scene.focus_anchor_index(current_time_ms);
+            dynamic_layouts
+                .get(idx)
+                .map(|layout| layout.top)
+                .unwrap_or(keep_alive)
+        };
+
         for (line_index, line) in scene.lines.iter().enumerate() {
             let Some(dynamic_layout) = dynamic_layouts.get(line_index) else {
                 continue;
@@ -943,7 +971,14 @@ impl LyricsRenderer {
                 .unwrap_or(0.0);
             let distance_alpha =
                 scene.focus_alpha(line, current_time_ms) * dynamic_layout.text_visibility;
-            let blur_radius = scene.blur_radius_for_screen_y(y, keep_alive) * blur_scale;
+            // The whole active cluster (the sung main line and its nested
+            // accompaniment, all with start<=t<=end) is always crisp; everything
+            // else blurs by its distance from the active line.
+            let blur_radius = if scene.is_line_focused(line, current_time_ms) {
+                0.0
+            } else {
+                scene.blur_radius_for_screen_y(y, blur_anchor_y) * blur_scale
+            };
 
             if let Some(interlude) = &line.interlude {
                 if dynamic_layout.interlude_visibility > 0.001 {

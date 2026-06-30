@@ -289,6 +289,7 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         surfaceTexture.setDefaultBufferSize(frameWidth, frameHeight)
 
         val surface = Surface(surfaceTexture)
+        requestHighestRefreshRate(surface)
         val enabled = engine.setRenderSurface(surface, frameWidth, frameHeight, frameWidth, frameHeight)
         if (enabled) {
             renderSurface = surface
@@ -297,6 +298,22 @@ class RustSkiaLyricsView @JvmOverloads constructor(
             surface.release()
             renderSurface = null
             gpuSurfaceReady = false
+        }
+    }
+
+    /**
+     * The lyrics animate continuously, so ask the system to run this surface at
+     * the display's highest refresh rate (e.g. 120Hz) instead of the default
+     * 60Hz. Hint only — the platform decides; it's a no-op on single-mode (60Hz)
+     * displays and on API < 30.
+     */
+    private fun requestHighestRefreshRate(surface: Surface) {
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.R) return
+        val maxRate = display?.supportedModes?.maxOfOrNull { it.refreshRate } ?: return
+        if (maxRate > 0f) {
+            runCatching {
+                surface.setFrameRate(maxRate, Surface.FRAME_RATE_COMPATIBILITY_DEFAULT)
+            }
         }
     }
 
