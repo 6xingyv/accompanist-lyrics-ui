@@ -217,30 +217,61 @@ impl LyricsRenderer {
             return;
         }
 
-        let mut paths: Vec<String> = Vec::new();
+        // Ask the NDK matcher which system font renders each new glyph.
+        let mut matched: Vec<(char, crate::system_fonts::SystemFont)> = Vec::new();
         if let Some(matcher) = self.font_matcher.as_mut() {
             matcher.set_style(attrs.weight, attrs.italic);
             for ch in to_match {
                 if let Some(font) = matcher.match_char(ch, family.as_deref()) {
-                    paths.push(font.path);
+                    matched.push((ch, font));
                 }
             }
         }
 
         let mut loaded_any = false;
-        for path in paths {
-            if self.loaded_system_paths.insert(path.clone())
-                && std::path::Path::new(&path).exists()
+        for (ch, font) in matched {
+            // Load the whole TTC once.
+            if self.loaded_system_paths.insert(font.path.clone())
+                && std::path::Path::new(&font.path).exists()
             {
                 self.font_system
                     .db_mut()
-                    .load_font_source(fontdb::Source::File(std::path::PathBuf::from(&path)));
+                    .load_font_source(fontdb::Source::File(std::path::PathBuf::from(&font.path)));
                 loaded_any = true;
+            }
+            // Map the glyph to the family of the exact face the matcher chose (its
+            // collection index within the TTC). The matcher already confirmed this
+            // face covers the glyph, so this is authoritative.
+            if let Some(family_name) = self.family_for_source(&font.path, font.collection_index) {
+                self.matched_char_family.insert(ch, family_name);
             }
         }
         if loaded_any {
             self.font_selection_cache.clear();
         }
+    }
+
+    /// Family name of the db face loaded from `path` at TTC `collection_index`.
+    #[cfg(target_os = "android")]
+    fn family_for_source(&self, path: &str, collection_index: u32) -> Option<String> {
+        self.font_system
+            .db()
+            .faces()
+            .find(|face| {
+                face.index == collection_index
+                    && match &face.source {
+                        fontdb::Source::File(p) => p.to_str() == Some(path),
+                        fontdb::Source::SharedFile(p, _) => p.to_str() == Some(path),
+                        fontdb::Source::Binary(_) => false,
+                    }
+            })
+            .and_then(|face| {
+                face.families
+                    .first()
+                    .map(|(name, _)| name.clone())
+                    .filter(|name| !name.is_empty())
+                    .or_else(|| Some(face.post_script_name.clone()).filter(|name| !name.is_empty()))
+            })
     }
 
     pub(super) fn register_loaded_face(
@@ -424,10 +455,6 @@ impl LyricsRenderer {
     }
 
     pub(super) fn select_family_for_cluster_uncached(&mut self, cluster: &str) -> Option<String> {
-        if self.font_stack.is_empty() {
-            return None;
-        }
-
         // The user's loaded font leads the tower: font_stack[0] is the primary
         // (custom) font, and if it can render this cluster it wins outright —
         // including for CJK, where the old code let hard-coded "Noto …" system
@@ -465,6 +492,18 @@ impl LyricsRenderer {
             let id = self.font_stack[index].id;
             if self.font_supports_cluster(id, cluster) {
                 return Some(self.font_stack[index].family_name.clone());
+            }
+        }
+
+        // Nothing in the user chain covers this cluster (e.g. CJK, or '…' with a
+        // Latin-only custom font). Use the system font the NDK matcher already
+        // resolved for this glyph — MiSans on Xiaomi, Noto elsewhere — so cosmic
+        // -text shapes with a family that actually has it, instead of one that
+        // doesn't and dropping to its hard-coded Roboto/Droid preset fallback.
+        #[cfg(target_os = "android")]
+        if let Some(ch) = cluster.chars().find(|c| !c.is_whitespace() && !c.is_control()) {
+            if let Some(family) = self.matched_char_family.get(&ch) {
+                return Some(family.clone());
             }
         }
 

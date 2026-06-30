@@ -304,6 +304,14 @@ impl TextEngine {
         (self.atlas_width, self.atlas_height)
     }
 
+    /// Load the platform's system fonts into the lyrics renderer's fallback pool
+    /// (Android only; see `LyricsRenderer::load_system_fonts`). Returns how many
+    /// font files were loaded.
+    #[cfg(target_os = "android")]
+    pub fn load_system_fonts(&mut self) -> usize {
+        self.renderer.load_system_fonts()
+    }
+
     pub fn set_lyrics_scene_json(&mut self, json: &str) -> String {
         self.renderer
             .set_scene_json(json)

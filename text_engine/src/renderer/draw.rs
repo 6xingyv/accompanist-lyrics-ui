@@ -2,8 +2,11 @@ use cosmic_text::fontdb;
 #[cfg(not(target_os = "android"))]
 use cosmic_text::{Color as CosmicColor, FontSystem, PhysicalGlyph, SwashCache};
 use skia_safe::{
-    font, gradient, BlurStyle, Color4f, Font, FontHinting, GlyphId, MaskFilter, Paint, Point,
-    Shader, TileMode, Typeface,
+    canvas::SaveLayerRec,
+    font, gradient,
+    image_filters::{self, CropRect},
+    BlurStyle, Color4f, Font, FontHinting, GlyphId, MaskFilter, Paint, Point, Rect, Shader,
+    TileMode, Typeface,
 };
 use std::collections::HashMap;
 use std::f32::consts::PI;
@@ -170,6 +173,41 @@ pub(super) fn draw_prepared_text_skia(
     blur_radius: f32,
     karaoke: Option<(i32, bool, &Vec<PreparedSyllable>)>,
 ) {
+    // Out-of-focus lines blur as ONE gaussian layer (a single offscreen pass for
+    // the whole line) instead of a `MaskFilter::blur` per glyph-batch (one pass
+    // each) — the per-batch passes were what stalled the GPU mid-song. The layer
+    // is bounded to the text plus the blur spread so the offscreen stays small.
+    // `image_filters::blur` and `MaskFilter::blur` both take sigma, so the blur
+    // amount is unchanged. Inner draws then run with zero blur (the layer does it).
+    let layer_blur = blur_radius > 0.1;
+    if layer_blur {
+        let mut min_x = f32::INFINITY;
+        let mut max_x = f32::NEG_INFINITY;
+        for row in &text.rows {
+            min_x = min_x.min(origin_x + row.min_x);
+            max_x = max_x.max(origin_x + row.max_x);
+        }
+        if !min_x.is_finite() {
+            min_x = origin_x;
+            max_x = origin_x + text.rows.first().map(|row| row.width).unwrap_or(0.0);
+        }
+        let pad = blur_radius * 3.0 + 4.0;
+        let bounds = Rect::new(
+            min_x - pad,
+            origin_y - pad,
+            max_x + pad,
+            origin_y + text.height + pad,
+        );
+        let mut layer_paint = Paint::default();
+        if let Some(filter) =
+            image_filters::blur((blur_radius, blur_radius), None, None, CropRect::NO_CROP_RECT)
+        {
+            layer_paint.set_image_filter(filter);
+        }
+        canvas.save_layer(&SaveLayerRec::default().bounds(&bounds).paint(&layer_paint));
+    }
+    let inner_blur = if layer_blur { 0.0 } else { blur_radius };
+
     for row in &text.rows {
         let (row_min_x, row_max_x) =
             row_x_bounds(row, origin_x).unwrap_or((origin_x, origin_x + row.width));
@@ -211,7 +249,7 @@ pub(super) fn draw_prepared_text_skia(
                 canvas,
                 typefaces,
                 base_color,
-                blur_radius,
+                inner_blur,
                 karaoke_shader.as_ref(),
             );
 
@@ -250,7 +288,7 @@ pub(super) fn draw_prepared_text_skia(
                 y,
                 base_color,
                 glyph_alpha,
-                blur_radius,
+                inner_blur,
                 BlurStyle::Normal,
                 effect.scale,
                 scale_pivot,
@@ -262,9 +300,13 @@ pub(super) fn draw_prepared_text_skia(
             canvas,
             typefaces,
             base_color,
-            blur_radius,
+            inner_blur,
             karaoke_shader.as_ref(),
         );
+    }
+
+    if layer_blur {
+        canvas.restore();
     }
 }
 
@@ -276,12 +318,7 @@ fn draw_skia_glyph_batch(
     blur_radius: f32,
     karaoke_shader: Option<&Shader>,
 ) {
-    let Some(typeface) = typefaces.get(&batch.key.font_id).cloned() else {
-        return;
-    };
-
     let font_size = f32::from_bits(batch.key.font_size_bits).max(1.0);
-    let font = make_skia_font(typeface, font_size);
     let alpha = f32::from_bits(batch.key.alpha_bits).clamp(0.0, 1.0);
     let mut paint = Paint::default();
     paint.set_anti_alias(true);
@@ -298,13 +335,15 @@ fn draw_skia_glyph_batch(
         }
     }
 
-    canvas.draw_glyphs_at(
-        &batch.glyphs,
-        &batch.positions[..],
-        Point::new(0.0, 0.0),
-        &font,
-        &paint,
-    );
+    with_skia_font(batch.key.font_id, font_size, typefaces, |font| {
+        canvas.draw_glyphs_at(
+            &batch.glyphs,
+            &batch.positions[..],
+            Point::new(0.0, 0.0),
+            font,
+            &paint,
+        );
+    });
 }
 
 fn draw_skia_glyph(
@@ -323,12 +362,7 @@ fn draw_skia_glyph(
     karaoke_shader: Option<&Shader>,
 ) {
     let cache_key = glyph.physical.cache_key;
-    let Some(typeface) = typefaces.get(&cache_key.font_id).cloned() else {
-        return;
-    };
-
     let font_size = f32::from_bits(cache_key.font_size_bits).max(1.0);
-    let font = make_skia_font(typeface, font_size);
 
     let mut paint = Paint::default();
     paint.set_anti_alias(true);
@@ -350,17 +384,47 @@ fn draw_skia_glyph(
 
     let glyphs: [GlyphId; 1] = [cache_key.glyph_id];
     let positions = [Point::new(x, y)];
-    if (scale - 1.0).abs() > 0.001 {
-        let (pivot_x, pivot_y) = scale_pivot.unwrap_or((x, y));
-        canvas.save();
-        canvas.translate((pivot_x, pivot_y));
-        canvas.scale((scale, scale));
-        canvas.translate((-pivot_x, -pivot_y));
-        canvas.draw_glyphs_at(&glyphs, &positions[..], Point::new(0.0, 0.0), &font, &paint);
-        canvas.restore();
-    } else {
-        canvas.draw_glyphs_at(&glyphs, &positions[..], Point::new(0.0, 0.0), &font, &paint);
+    with_skia_font(cache_key.font_id, font_size, typefaces, |font| {
+        if (scale - 1.0).abs() > 0.001 {
+            let (pivot_x, pivot_y) = scale_pivot.unwrap_or((x, y));
+            canvas.save();
+            canvas.translate((pivot_x, pivot_y));
+            canvas.scale((scale, scale));
+            canvas.translate((-pivot_x, -pivot_y));
+            canvas.draw_glyphs_at(&glyphs, &positions[..], Point::new(0.0, 0.0), font, &paint);
+            canvas.restore();
+        } else {
+            canvas.draw_glyphs_at(&glyphs, &positions[..], Point::new(0.0, 0.0), font, &paint);
+        }
+    });
+}
+
+/// A Skia `Font` is immutable for a given (typeface, size), so build each one
+/// once and reuse it across batches and frames instead of reconstructing it
+/// (an allocation plus six setters) on every draw call. Keyed by the
+/// process-global Skia typeface id, so the cache stays correct even when several
+/// renderer instances share the (single) render thread — unlike `fontdb::ID`,
+/// which is only unique within one renderer. The font is handed to `f` by
+/// reference and never cloned; `None` if the typeface isn't resolved yet.
+fn with_skia_font<R>(
+    font_id: fontdb::ID,
+    font_size: f32,
+    typefaces: &HashMap<fontdb::ID, Typeface>,
+    f: impl FnOnce(&Font) -> R,
+) -> Option<R> {
+    thread_local! {
+        static FONT_CACHE: std::cell::RefCell<HashMap<(u32, u32), Font>> =
+            std::cell::RefCell::new(HashMap::new());
     }
+    let typeface = typefaces.get(&font_id)?;
+    let key = (typeface.unique_id(), font_size.to_bits());
+    Some(FONT_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let font = cache
+            .entry(key)
+            .or_insert_with(|| make_skia_font(typeface.clone(), font_size));
+        f(font)
+    }))
 }
 
 fn make_skia_font(typeface: Typeface, font_size: f32) -> Font {

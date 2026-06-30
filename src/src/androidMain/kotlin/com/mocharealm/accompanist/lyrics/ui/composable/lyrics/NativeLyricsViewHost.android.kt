@@ -7,6 +7,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -48,6 +49,14 @@ internal actual fun NativeLyricsViewHost(
             translationLineHeightPx = normalLineTextStyle.fontSize.toPx() * 0.62f,
             phoneticFontSizePx = phoneticTextStyle.fontSize.toPx(),
             phoneticLineHeightPx = phoneticTextStyle.fontSize.toPx() * 1.25f,
+            normalFontWeight = normalLineTextStyle.fontWeight?.weight ?: 400,
+            normalFontItalic = normalLineTextStyle.fontStyle == FontStyle.Italic,
+            accompanimentFontWeight = accompanimentLineTextStyle.fontWeight?.weight ?: 400,
+            accompanimentFontItalic = accompanimentLineTextStyle.fontStyle == FontStyle.Italic,
+            translationFontWeight = 400,
+            translationFontItalic = false,
+            phoneticFontWeight = phoneticTextStyle.fontWeight?.weight ?: 400,
+            phoneticFontItalic = phoneticTextStyle.fontStyle == FontStyle.Italic,
             phoneticGapPx = 4.dp.toPx(),
             paddingXPx = 16.dp.toPx(),
             paddingYPx = 8.dp.toPx(),

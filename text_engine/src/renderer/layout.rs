@@ -933,18 +933,21 @@ impl LyricsRenderer {
     ) -> PreparedText {
         let metrics = Metrics::new(font_size, line_height);
         let text_attrs = self.text_attrs;
-        let font_spans = self.build_font_spans(spans, fallback_text);
-        // Lazily load any system fonts these spans need before shaping, so
-        // cosmic-text's fallback can resolve glyphs the user's fonts don't cover.
+        // Lazily load any system fonts this text needs and register them in the
+        // fallback pool BEFORE choosing per-cluster families — otherwise selection
+        // runs against the user chain only, locks in a family that can't render
+        // CJK/symbols, and the matched system font (e.g. MiSans) never gets used.
+        let spans: Vec<(&str, usize)> = spans.collect();
         #[cfg(target_os = "android")]
         {
-            for span in &font_spans {
-                self.ensure_fonts_for_text(&span.text, text_attrs);
+            for (text, _) in &spans {
+                self.ensure_fonts_for_text(text, text_attrs);
             }
-            if font_spans.is_empty() {
+            if spans.is_empty() {
                 self.ensure_fonts_for_text(fallback_text, text_attrs);
             }
         }
+        let font_spans = self.build_font_spans(spans.iter().copied(), fallback_text);
         let first_family_name = self.font_stack.first().map(|face| face.family_name.clone());
         let mut buffer = Buffer::new(&mut self.font_system, metrics);
         {

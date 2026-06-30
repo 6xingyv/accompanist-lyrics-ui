@@ -15,6 +15,15 @@ data class NativeLyricsRendererStyle(
     val translationLineHeightPx: Float,
     val phoneticFontSizePx: Float = translationFontSizePx,
     val phoneticLineHeightPx: Float = translationLineHeightPx,
+    // Font weight (100..900) and italic per text role — independent of size.
+    val normalFontWeight: Int = 400,
+    val normalFontItalic: Boolean = false,
+    val accompanimentFontWeight: Int = 400,
+    val accompanimentFontItalic: Boolean = false,
+    val translationFontWeight: Int = 400,
+    val translationFontItalic: Boolean = false,
+    val phoneticFontWeight: Int = 400,
+    val phoneticFontItalic: Boolean = false,
     val phoneticGapPx: Float = 4f,
     val paddingXPx: Float,
     val paddingYPx: Float,
@@ -51,17 +60,33 @@ fun SyncedLyrics.toNativeLyricsSceneJson(
         append(',')
         appendJsonField("normal_line_height", style.normalLineHeightPx)
         append(',')
+        appendJsonField("normal_font_weight", style.normalFontWeight)
+        append(',')
+        appendJsonField("normal_font_italic", style.normalFontItalic)
+        append(',')
         appendJsonField("accompaniment_font_size", style.accompanimentFontSizePx)
         append(',')
         appendJsonField("accompaniment_line_height", style.accompanimentLineHeightPx)
+        append(',')
+        appendJsonField("accompaniment_font_weight", style.accompanimentFontWeight)
+        append(',')
+        appendJsonField("accompaniment_font_italic", style.accompanimentFontItalic)
         append(',')
         appendJsonField("translation_font_size", style.translationFontSizePx)
         append(',')
         appendJsonField("translation_line_height", style.translationLineHeightPx)
         append(',')
+        appendJsonField("translation_font_weight", style.translationFontWeight)
+        append(',')
+        appendJsonField("translation_font_italic", style.translationFontItalic)
+        append(',')
         appendJsonField("phonetic_font_size", style.phoneticFontSizePx)
         append(',')
         appendJsonField("phonetic_line_height", style.phoneticLineHeightPx)
+        append(',')
+        appendJsonField("phonetic_font_weight", style.phoneticFontWeight)
+        append(',')
+        appendJsonField("phonetic_font_italic", style.phoneticFontItalic)
         append(',')
         appendJsonField("phonetic_gap", style.phoneticGapPx)
         append(',')

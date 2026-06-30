@@ -97,6 +97,22 @@ impl LyricsRenderer {
         self.engage_manual_scroll_blur(now);
     }
 
+    /// Drops a lingering manual-scroll offset when a seek lands (a discontinuous
+    /// playback-time jump), unless a finger is actively dragging. Without this the
+    /// stale offset is folded onto the seeked auto position and the list parks at
+    /// the wrong place after tapping a lyric you scrolled away to. Reuses the same
+    /// time-jump signal as the spring seek-glide; `last_spring_playback_ms` still
+    /// holds the previous frame's time when this runs.
+    pub(super) fn clear_manual_scroll_on_seek(&mut self, current_time_ms: i32) {
+        let seek_landed = self.last_spring_playback_ms.is_some_and(|last| {
+            let delta = current_time_ms - last;
+            delta < -LINE_LAYOUT_SEEK_BACKWARD_MS || delta > LINE_LAYOUT_SEEK_FORWARD_MS
+        });
+        if seek_landed && !self.manual_scroll.dragging {
+            self.reset_manual_scroll();
+        }
+    }
+
     pub(super) fn update_manual_scroll_target(&mut self, auto_scroll_y: f32, max_scroll_y: f32) -> f32 {
         let now = Instant::now();
         let dt = self
@@ -110,7 +126,9 @@ impl LyricsRenderer {
         if !self.manual_scroll.dragging {
             if self.manual_scroll.velocity.abs() > MANUAL_SCROLL_VELOCITY_EPSILON {
                 self.manual_scroll.offset += self.manual_scroll.velocity * dt;
-                self.manual_scroll.velocity *= (-MANUAL_SCROLL_FLING_FRICTION * dt).exp();
+                // iOS exponential deceleration: v *= rate^(elapsed_ms).
+                self.manual_scroll.velocity *=
+                    MANUAL_SCROLL_DECELERATION_RATE.powf(dt * 1000.0);
                 if self.manual_scroll.velocity.abs() <= MANUAL_SCROLL_VELOCITY_EPSILON {
                     self.manual_scroll.velocity = 0.0;
                     self.manual_scroll.hold_until =
@@ -426,8 +444,12 @@ fn rubber_band_scroll(raw_scroll_y: f32, max_scroll_y: f32) -> f32 {
 }
 
 fn rubber_band_distance(distance: f32) -> f32 {
+    // iOS rubber-band damping (ktiays/fluid-scroll): the further you pull past the
+    // edge, the harder it resists, asymptoting to `limit`. `c` softens the initial
+    // resistance so the first bit of overscroll still moves with the finger.
     let distance = distance.max(0.0);
-    MANUAL_SCROLL_RUBBER_BAND_LIMIT * distance / (distance + MANUAL_SCROLL_RUBBER_BAND_LIMIT)
+    let limit = MANUAL_SCROLL_RUBBER_BAND_LIMIT;
+    (1.0 - 1.0 / (distance / limit * MANUAL_SCROLL_RUBBER_BAND_COEFFICIENT + 1.0)) * limit
 }
 
 #[cfg(test)]

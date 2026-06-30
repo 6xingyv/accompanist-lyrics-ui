@@ -9,6 +9,8 @@ mod font;
 mod jvm;
 mod native;
 mod renderer;
+#[cfg(target_os = "android")]
+mod system_fonts;
 
 /// Initialize logger - call this early from JNI init
 #[cfg(target_os = "android")]

@@ -200,6 +200,26 @@ pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeTextE
     }
 }
 
+/// Enumerate the platform's system fonts (NDK) into the renderer's fallback pool.
+/// Returns the number of font files loaded (0 off Android). The user's own fonts
+/// must be configured first so they keep priority.
+#[no_mangle]
+pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeTextEngine_nativeLoadSystemFonts(
+    _env: JNIEnv,
+    _this: JObject,
+    handle: jlong,
+) -> jint {
+    #[cfg(target_os = "android")]
+    {
+        with_engine_mut(handle, 0, |engine| engine.load_system_fonts() as jint)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = handle;
+        0
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeTextEngine_nativeProcessText<
     'local,

@@ -30,6 +30,8 @@ actual class NativeTextEngine actual constructor(
 
         val primaryLoaded = config.primary?.let(::loadPrimarySource) ?: false
         val fallbackLoads = config.fallbacks.count(::loadFallbackSource)
+        // System fonts are pulled in lazily during shaping (NDK AFontMatcher),
+        // so we don't eagerly load the whole platform collection here.
         generationCounter++
         return primaryLoaded || fallbackLoads > 0
     }

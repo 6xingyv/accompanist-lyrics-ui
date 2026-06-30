@@ -14,9 +14,7 @@ import com.mocharealm.accompanist.lyrics.core.model.SyncedLyrics
 import com.mocharealm.accompanist.lyrics.text.NativeFontConfig
 import com.mocharealm.accompanist.lyrics.text.NativeFontSource
 import com.mocharealm.accompanist.lyrics.text.NativeTextEngine
-import com.mocharealm.accompanist.lyrics.text.prioritizeForNativeLyricsLocale
 import com.mocharealm.accompanist.lyrics.ui.composable.lyrics.getFontSource
-import com.mocharealm.accompanist.lyrics.ui.composable.lyrics.getSystemFallbackFontSources
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.roundToInt
@@ -28,10 +26,12 @@ class RustSkiaLyricsView @JvmOverloads constructor(
     defStyleAttr: Int = 0
 ) : TextureView(context, attrs, defStyleAttr), TextureView.SurfaceTextureListener {
     private val engine = NativeTextEngine(2048, 2048).apply {
+        // System fonts are now pulled in natively (NDK) inside configureFonts, so
+        // we only hand over the user's primary font here.
         configureFonts(
             NativeFontConfig(
                 primary = getFontSource(null, context),
-                fallbacks = getSystemFallbackFontSources(context)
+                fallbacks = emptyList()
             )
         )
     }
@@ -339,11 +339,12 @@ class RustSkiaLyricsView @JvmOverloads constructor(
 
     private fun applyCurrentFontConfig() {
         val fontBytes = configuredFontBytes
-        val locale = lyrics?.detectNativeLyricsLocale() ?: "en-US"
+        // Only the user's primary font; system fonts come from the NDK pool that
+        // configureFonts loads, and cosmic-text falls back by the scene's locale.
         engine.configureFonts(
             NativeFontConfig(
                 primary = fontBytes?.let { NativeFontSource(bytes = it) } ?: getFontSource(null, context),
-                fallbacks = getSystemFallbackFontSources(context).prioritizeForNativeLyricsLocale(locale)
+                fallbacks = emptyList()
             )
         )
         engineClosed = false
@@ -437,6 +438,11 @@ class RustSkiaLyricsView @JvmOverloads constructor(
             accompanimentLineHeightPx = 26f * scaledDensity,
             translationFontSizePx = 16f * scaledDensity,
             translationLineHeightPx = 21f * scaledDensity,
+            // Main + accompaniment lines are bold; translation/phonetic are regular.
+            normalFontWeight = 700,
+            accompanimentFontWeight = 700,
+            translationFontWeight = 400,
+            phoneticFontWeight = 400,
             paddingXPx = 16f * density,
             paddingYPx = 8f * density,
             keepAlivePx = 120f * density,
