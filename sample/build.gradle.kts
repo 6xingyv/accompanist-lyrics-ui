@@ -53,8 +53,11 @@ kotlin {
             implementation(libs.androidx.activity.compose)
             implementation(libs.androidx.core.ktx)
             implementation(libs.androidx.lifecycle.runtime.ktx)
+
             implementation(libs.androidx.media3.exoplayer)
             implementation(libs.androidx.media3.session)
+            implementation(files("src/androidMain/libs/lib-decoder-ffmpeg-release.aar"))
+
             implementation(libs.cloudy)
 
             implementation(libs.androidx.lifecycle.viewmodel.compose)
