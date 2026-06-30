@@ -1,8 +1,13 @@
+#[cfg(target_os = "android")]
+use crate::android_gpu::AndroidGpuRenderer;
 use crate::atlas::{AtlasManager, Rect};
 use crate::font::FontWrapper;
+use crate::renderer::LyricsRenderer;
 use rustybuzz::{Face, UnicodeBuffer};
 
 use serde::{Deserialize, Serialize};
+use std::ops::Deref;
+use unicode_segmentation::UnicodeSegmentation;
 
 #[derive(Serialize, Deserialize)]
 pub struct LayoutResult {
@@ -28,9 +33,9 @@ pub struct PendingUpload {
     pub data: Vec<u8>, // RGBA data
 }
 
-/// A run of consecutive characters that share the same font.
+/// A run of consecutive grapheme clusters that share the same font.
 struct TextRun {
-    chars: Vec<char>,
+    text: String,
     font_index: usize, // 0 = primary, 1+ = fallback
 }
 
@@ -38,13 +43,14 @@ pub struct TextEngine {
     atlas: AtlasManager,
     // Primary font
     font: Option<FontWrapper>,
-    font_data: Vec<u8>,
     // Fallback fonts (system fonts, etc.)
     fallback_fonts: Vec<FontWrapper>,
-    fallback_font_data: Vec<Vec<u8>>,
     pending_uploads: Vec<PendingUpload>,
     pub atlas_width: u32,
     pub atlas_height: u32,
+    renderer: LyricsRenderer,
+    #[cfg(target_os = "android")]
+    gpu_renderer: Option<AndroidGpuRenderer>,
 }
 
 impl TextEngine {
@@ -52,38 +58,122 @@ impl TextEngine {
         Self {
             atlas: AtlasManager::new(atlas_width, atlas_height),
             font: None,
-            font_data: Vec::new(),
             fallback_fonts: Vec::new(),
-            fallback_font_data: Vec::new(),
             pending_uploads: Vec::new(),
             atlas_width,
             atlas_height,
+            renderer: LyricsRenderer::new(),
+            #[cfg(target_os = "android")]
+            gpu_renderer: None,
         }
     }
 
-    pub fn load_font(&mut self, font_bytes: Vec<u8>) {
+    pub fn load_font_with_index(&mut self, font_bytes: Vec<u8>, face_index: u32) {
+        self.reset_glyph_cache();
+        self.renderer
+            .load_font_bytes(font_bytes.clone(), face_index);
+
         // Init FontWrapper for primary font
         info!("Loading PRIMARY font: {} bytes", font_bytes.len());
-        if let Some(wrapper) = FontWrapper::from_bytes(&font_bytes, 0) {
+        if let Some(wrapper) = FontWrapper::from_bytes_with_index(&font_bytes, 0, face_index) {
             self.font = Some(wrapper);
             info!("PRIMARY font loaded successfully");
         } else {
             warn!("ERROR: Failed to load primary font!");
+            self.font = None;
         }
-        self.font_data = font_bytes;
     }
 
-    /// Load a fallback font (e.g., system font for missing glyphs)
-    pub fn load_fallback_font(&mut self, font_bytes: Vec<u8>) {
+    pub fn load_font_from_path(&mut self, path: &str, face_index: u32) -> bool {
+        use memmap2::MmapOptions;
+
+        let file = match std::fs::File::open(path) {
+            Ok(file) => file,
+            Err(e) => {
+                warn!("Failed to open primary font path {}: {:?}", path, e);
+                return false;
+            }
+        };
+
+        let mmap = match unsafe { MmapOptions::new().map(&file) } {
+            Ok(mmap) => mmap,
+            Err(e) => {
+                warn!("Failed to mmap primary font path {}: {:?}", path, e);
+                return false;
+            }
+        };
+
+        self.reset_glyph_cache();
+        self.renderer.load_font_path(path, face_index);
+        if let Some(wrapper) = FontWrapper::from_mmap_with_index(mmap, 0, face_index) {
+            self.font = Some(wrapper);
+            true
+        } else {
+            self.font = None;
+            warn!("Failed to parse primary font path {}", path);
+            false
+        }
+    }
+
+    /// Load the primary font from a file descriptor using memory mapping.
+    /// The fd is duplicated internally so the caller can close it after this call.
+    #[cfg(unix)]
+    pub fn load_font_from_fd(
+        &mut self,
+        fd: i32,
+        offset: u64,
+        length: Option<usize>,
+        face_index: u32,
+    ) -> bool {
+        use memmap2::MmapOptions;
+        use std::os::unix::io::FromRawFd;
+
+        let dup_fd = unsafe { libc::dup(fd) };
+        if dup_fd < 0 {
+            return false;
+        }
+
+        let file = unsafe { std::fs::File::from_raw_fd(dup_fd) };
+        let mmap = match unsafe { MmapOptions::new().map(&file) } {
+            Ok(mmap) => mmap,
+            Err(e) => {
+                warn!("Failed to mmap primary font fd: {:?}", e);
+                return false;
+            }
+        };
+
+        self.reset_glyph_cache();
+        let font_len = length.unwrap_or_else(|| mmap.len().saturating_sub(offset as usize));
+        let font_start = offset as usize;
+        let font_end = font_start.saturating_add(font_len).min(mmap.len());
+        if font_start < font_end {
+            self.renderer
+                .load_font_bytes(mmap[font_start..font_end].to_vec(), face_index);
+        }
+        if let Some(wrapper) =
+            FontWrapper::from_mmap_with_range(mmap, 0, face_index, offset as usize, length)
+        {
+            self.font = Some(wrapper);
+            true
+        } else {
+            self.font = None;
+            warn!("Failed to parse primary font from fd");
+            false
+        }
+    }
+
+    pub fn load_fallback_font_with_index(&mut self, font_bytes: Vec<u8>, face_index: u32) {
         let font_id = self.fallback_fonts.len() + 1; // 0 is primary
         info!(
             "Loading FALLBACK font #{}: {} bytes",
             font_id,
             font_bytes.len()
         );
-        if let Some(wrapper) = FontWrapper::from_bytes(&font_bytes, font_id) {
+        if let Some(wrapper) = FontWrapper::from_bytes_with_index(&font_bytes, font_id, face_index)
+        {
+            self.reset_glyph_cache();
+            self.renderer.load_font_bytes(font_bytes, face_index);
             self.fallback_fonts.push(wrapper);
-            self.fallback_font_data.push(font_bytes);
             info!(
                 "FALLBACK font #{} loaded, total fallbacks: {}",
                 font_id,
@@ -94,12 +184,49 @@ impl TextEngine {
         }
     }
 
+    pub fn load_fallback_font_from_path(&mut self, path: &str, face_index: u32) -> bool {
+        use memmap2::MmapOptions;
+
+        let font_id = self.fallback_fonts.len() + 1;
+        let file = match std::fs::File::open(path) {
+            Ok(file) => file,
+            Err(e) => {
+                warn!("Failed to open fallback font path {}: {:?}", path, e);
+                return false;
+            }
+        };
+
+        let mmap = match unsafe { MmapOptions::new().map(&file) } {
+            Ok(mmap) => mmap,
+            Err(e) => {
+                warn!("Failed to mmap fallback font path {}: {:?}", path, e);
+                return false;
+            }
+        };
+
+        if let Some(wrapper) = FontWrapper::from_mmap_with_index(mmap, font_id, face_index) {
+            self.reset_glyph_cache();
+            self.renderer.load_font_path(path, face_index);
+            self.fallback_fonts.push(wrapper);
+            true
+        } else {
+            warn!("Failed to parse fallback font path {}", path);
+            false
+        }
+    }
+
     /// Load a fallback font from a file descriptor using memory mapping.
     /// This is more memory-efficient as it doesn't copy the entire font into RAM.
     /// The fd is duplicated internally so the caller can close it after this call.
     #[cfg(unix)]
-    pub fn load_fallback_font_from_fd(&mut self, fd: i32) -> bool {
-        use memmap2::Mmap;
+    pub fn load_fallback_font_from_fd(
+        &mut self,
+        fd: i32,
+        offset: u64,
+        length: Option<usize>,
+        face_index: u32,
+    ) -> bool {
+        use memmap2::MmapOptions;
         use std::os::unix::io::FromRawFd;
 
         let font_id = self.fallback_fonts.len() + 1;
@@ -120,21 +247,28 @@ impl TextEngine {
         // Create a File from the duplicated FD
         let file = unsafe { std::fs::File::from_raw_fd(dup_fd) };
 
-        // Memory-map the file
-        let mmap = match unsafe { Mmap::map(&file) } {
+        // Memory-map the file and slice by offset/length inside FontWrapper.
+        let mmap = match unsafe { MmapOptions::new().map(&file) } {
             Ok(m) => m,
-            Err(e) => {
+            Err(_e) => {
                 #[cfg(debug_assertions)]
-                eprintln!("[TextEngine] Failed to mmap: {:?}", e);
+                eprintln!("[TextEngine] Failed to mmap: {:?}", _e);
                 return false;
             }
         };
 
         // Create FontWrapper from mmap
-        if let Some(wrapper) = FontWrapper::from_mmap(mmap, font_id) {
-            // We need to keep the font data reference for rustybuzz shaping
-            // Since FontWrapper now owns the mmap, we store an empty vec as placeholder
-            self.fallback_font_data.push(Vec::new());
+        let font_len = length.unwrap_or_else(|| mmap.len().saturating_sub(offset as usize));
+        let font_start = offset as usize;
+        let font_end = font_start.saturating_add(font_len).min(mmap.len());
+        if font_start < font_end {
+            self.renderer
+                .load_font_bytes(mmap[font_start..font_end].to_vec(), face_index);
+        }
+        if let Some(wrapper) =
+            FontWrapper::from_mmap_with_range(mmap, font_id, face_index, offset as usize, length)
+        {
+            self.reset_glyph_cache();
             self.fallback_fonts.push(wrapper);
             #[cfg(debug_assertions)]
             eprintln!(
@@ -150,14 +284,16 @@ impl TextEngine {
         }
     }
 
-    /// Clear all fallback fonts
-    pub fn clear_fallback_fonts(&mut self) {
-        self.fallback_fonts.clear();
-        self.fallback_font_data.clear();
-    }
-
     pub fn get_pending_uploads(&mut self) -> Vec<PendingUpload> {
         std::mem::take(&mut self.pending_uploads)
+    }
+
+    pub fn pending_uploads(&self) -> &[PendingUpload] {
+        &self.pending_uploads
+    }
+
+    pub fn clear_pending_uploads(&mut self) {
+        self.pending_uploads.clear();
     }
 
     pub fn has_pending_uploads(&self) -> bool {
@@ -168,14 +304,108 @@ impl TextEngine {
         (self.atlas_width, self.atlas_height)
     }
 
-    /// Clear all cached data and reset the engine.
-    /// Call this when switching fonts or to free memory.
-    pub fn clear(&mut self) {
+    pub fn set_lyrics_scene_json(&mut self, json: &str) -> String {
+        self.renderer
+            .set_scene_json(json)
+            .and_then(|metrics| serde_json::to_string(&metrics).map_err(|e| e.to_string()))
+            .unwrap_or_else(|error| format!(r#"{{"error":{}}}"#, serde_json::json!(error)))
+    }
+
+    pub fn get_lyrics_renderer_metrics_json(&self) -> String {
+        self.renderer.metrics_json()
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub fn render_lyrics_frame_into(&mut self, current_time_ms: i32, pixels: &mut [u8]) -> i32 {
+        self.renderer.render_frame_into(current_time_ms, pixels)
+    }
+
+    #[cfg(target_os = "android")]
+    pub unsafe fn set_android_render_surface(
+        &mut self,
+        env: *mut jni::sys::JNIEnv,
+        surface: jni::sys::jobject,
+        surface_width: u32,
+        surface_height: u32,
+        frame_width: u32,
+        frame_height: u32,
+    ) -> bool {
+        self.gpu_renderer = None;
+        match AndroidGpuRenderer::from_java_surface(
+            env,
+            surface,
+            surface_width,
+            surface_height,
+            frame_width,
+            frame_height,
+        ) {
+            Ok(renderer) => {
+                self.gpu_renderer = Some(renderer);
+                true
+            }
+            Err(error) => {
+                warn!("Failed to create Android GPU lyrics surface: {}", error);
+                false
+            }
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    pub fn clear_android_render_surface(&mut self) {
+        if let Some(renderer) = self.gpu_renderer.as_mut() {
+            if let Err(error) = renderer.clear() {
+                warn!("Failed to clear Android GPU lyrics surface: {}", error);
+            }
+        }
+        self.gpu_renderer = None;
+    }
+
+    #[cfg(target_os = "android")]
+    pub fn render_lyrics_frame_to_android_surface(&mut self, current_time_ms: i32) -> i32 {
+        let Some(mut gpu_renderer) = self.gpu_renderer.take() else {
+            return -20;
+        };
+
+        let mut render_result = 0;
+        let present_result = gpu_renderer.draw_frame(|canvas| {
+            render_result = self
+                .renderer
+                .render_frame_to_canvas(current_time_ms, canvas);
+        });
+        self.gpu_renderer = Some(gpu_renderer);
+        if let Err(error) = present_result {
+            warn!("Failed to render Android GPU lyrics frame: {}", error);
+            return -21;
+        }
+        render_result
+    }
+
+    pub fn hit_test_lyrics_line(&self, x: f32, y: f32, current_time_ms: i32) -> i32 {
+        self.renderer.hit_test_line(x, y, current_time_ms)
+    }
+
+    pub fn begin_lyrics_scroll(&mut self) {
+        self.renderer.begin_manual_scroll();
+    }
+
+    pub fn scroll_lyrics_by(&mut self, delta_y: f32) {
+        self.renderer.scroll_manual_by(delta_y);
+    }
+
+    pub fn end_lyrics_scroll(&mut self, velocity_y: f32) {
+        self.renderer.end_manual_scroll(velocity_y);
+    }
+
+    pub fn cancel_lyrics_scroll(&mut self) {
+        self.renderer.cancel_manual_scroll();
+    }
+
+    pub fn reset_lyrics_scroll(&mut self) {
+        self.renderer.reset_manual_scroll();
+    }
+
+    fn reset_glyph_cache(&mut self) {
         self.atlas = AtlasManager::new(self.atlas_width, self.atlas_height);
-        self.font = None;
-        self.font_data = Vec::new();
-        self.fallback_fonts.clear();
-        self.fallback_font_data.clear();
         self.pending_uploads.clear();
     }
 
@@ -193,12 +423,11 @@ impl TextEngine {
             descent: 0.0,
         };
 
-        if self.font_data.is_empty() {
+        if self.font.is_none() {
             return empty_result;
         }
 
-        let text_chars: Vec<char> = text.chars().collect();
-        if text_chars.is_empty() {
+        if text.is_empty() {
             return empty_result;
         }
 
@@ -206,21 +435,13 @@ impl TextEngine {
         let weight_key = ((weight / 100.0).round() * 100.0) as u32;
 
         info!("========= PROCESSING TEXT =========");
-        info!("Input: \"{}\" ({} chars)", text, text_chars.len());
+        info!("Input: \"{}\" ({} chars)", text, text.chars().count());
         info!(
             "Font tower: 1 primary + {} fallbacks",
             self.fallback_fonts.len()
         );
 
-        // ===========================================
-        // Phase 1: Assign each character to a font
-        // ===========================================
-        let font_assignments = self.assign_fonts_to_chars(&text_chars);
-
-        // ===========================================
-        // Phase 2: Group into runs and shape each
-        // ===========================================
-        let runs = Self::group_into_runs(&text_chars, &font_assignments);
+        let runs = self.group_into_runs(text);
 
         info!("Grouped into {} runs", runs.len());
 
@@ -236,7 +457,7 @@ impl TextEngine {
         let mut max_height: f32 = 0.0;
 
         for run in runs {
-            let run_text: String = run.chars.iter().collect();
+            let run_text = run.text;
             let font_idx = run.font_index;
 
             let font_name = if font_idx == 0 {
@@ -246,20 +467,12 @@ impl TextEngine {
             };
             info!("Run: font={} text=\"{}\"", font_name, run_text);
 
-            // Get font data for this run
-            let font_data_ref: &[u8] = if font_idx == 0 {
-                &self.font_data
-            } else {
-                let fb_idx = font_idx - 1;
-                if fb_idx < self.fallback_fonts.len() {
-                    &self.fallback_fonts[fb_idx].font_data
-                } else {
-                    continue;
-                }
+            let Some((font_data_ref, face_index)) = self.font_data_for_index(font_idx) else {
+                continue;
             };
 
             // Create Face for shaping
-            let mut face = match Face::from_slice(font_data_ref, 0) {
+            let mut face = match Face::from_slice(font_data_ref, face_index) {
                 Some(f) => f,
                 None => continue,
             };
@@ -325,8 +538,15 @@ impl TextEngine {
                                     height: h,
                                     data: bitmap,
                                 });
+                                let drawable_rect = Rect {
+                                    x: alloc_rect.x,
+                                    y: alloc_rect.y,
+                                    width: w,
+                                    height: h,
+                                };
                                 let info = crate::atlas::GlyphInfo {
-                                    rect: alloc_rect,
+                                    rect: drawable_rect,
+                                    allocated_rect: alloc_rect,
                                     x_bearing: xmin,
                                     y_bearing: ymin,
                                     last_used: 0, // Will be set by cache_glyph_with_weight
@@ -340,21 +560,17 @@ impl TextEngine {
                                 );
                                 info
                             } else {
-                                crate::atlas::GlyphInfo {
-                                    rect: Rect {
-                                        x: 0,
-                                        y: 0,
-                                        width: 0,
-                                        height: 0,
-                                    },
-                                    x_bearing: 0.0,
-                                    y_bearing: 0.0,
-                                    last_used: 0,
-                                }
+                                Self::empty_glyph_info()
                             }
                         } else {
                             crate::atlas::GlyphInfo {
                                 rect: Rect {
+                                    x: 0,
+                                    y: 0,
+                                    width: 0,
+                                    height: 0,
+                                },
+                                allocated_rect: Rect {
                                     x: 0,
                                     y: 0,
                                     width: 0,
@@ -366,17 +582,7 @@ impl TextEngine {
                             }
                         }
                     } else {
-                        crate::atlas::GlyphInfo {
-                            rect: Rect {
-                                x: 0,
-                                y: 0,
-                                width: 0,
-                                height: 0,
-                            },
-                            x_bearing: 0.0,
-                            y_bearing: 0.0,
-                            last_used: 0,
-                        }
+                        Self::empty_glyph_info()
                     }
                 };
 
@@ -414,82 +620,94 @@ impl TextEngine {
         }
     }
 
-    /// Assign each character to a font based on glyph coverage.
-    fn assign_fonts_to_chars(&self, chars: &[char]) -> Vec<usize> {
-        let mut assignments = Vec::with_capacity(chars.len());
-        let primary_face = Face::from_slice(&self.font_data, 0);
-        let mut missing_chars: Vec<char> = Vec::new();
-
-        for &ch in chars {
-            // Try primary font first
-            if let Some(ref face) = primary_face {
-                if let Some(gid) = face.glyph_index(ch) {
-                    if gid.0 != 0 {
-                        assignments.push(0);
-                        continue;
-                    }
-                }
-            }
-
-            // Try fallback fonts
-            let mut assigned = 0usize;
-            for (fb_idx, fb_wrapper) in self.fallback_fonts.iter().enumerate() {
-                if let Some(fb_face) = Face::from_slice(&fb_wrapper.font_data, 0) {
-                    if let Some(gid) = fb_face.glyph_index(ch) {
-                        if gid.0 != 0 {
-                            assigned = fb_idx + 1;
-                            break;
-                        }
-                    }
-                }
-            }
-
-            if assigned == 0 {
-                // No font has this glyph!
-                missing_chars.push(ch);
-            }
-            assignments.push(assigned);
+    fn font_data_for_index(&self, font_idx: usize) -> Option<(&[u8], u32)> {
+        if font_idx == 0 {
+            self.font
+                .as_ref()
+                .map(|font| (font.font_data.deref(), font.face_index))
+        } else {
+            self.fallback_fonts
+                .get(font_idx - 1)
+                .map(|font| (font.font_data.deref(), font.face_index))
         }
-
-        if !missing_chars.is_empty() {
-            warn!(
-                "WARNING: {} chars have NO GLYPH in any font:",
-                missing_chars.len()
-            );
-            for ch in &missing_chars {
-                warn!("  - '{}' (U+{:04X})", ch, *ch as u32);
-            }
-        }
-
-        assignments
     }
 
-    /// Group consecutive characters with the same font assignment into runs.
-    fn group_into_runs(chars: &[char], font_assignments: &[usize]) -> Vec<TextRun> {
-        if chars.is_empty() {
-            return Vec::new();
+    fn empty_glyph_info() -> crate::atlas::GlyphInfo {
+        crate::atlas::GlyphInfo {
+            rect: Rect {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+            },
+            allocated_rect: Rect {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+            },
+            x_bearing: 0.0,
+            y_bearing: 0.0,
+            last_used: 0,
         }
+    }
 
+    fn group_into_runs(&self, text: &str) -> Vec<TextRun> {
         let mut runs = Vec::new();
-        let mut current_font = font_assignments[0];
-        let mut current_chars = vec![chars[0]];
+        let mut current_font: Option<usize> = None;
+        let mut current_text = String::new();
 
-        for i in 1..chars.len() {
-            if font_assignments[i] == current_font {
-                current_chars.push(chars[i]);
-            } else {
-                runs.push(TextRun {
-                    chars: current_chars,
-                    font_index: current_font,
-                });
-                current_font = font_assignments[i];
-                current_chars = vec![chars[i]];
+        for cluster in UnicodeSegmentation::graphemes(text, true) {
+            let font_index = self.select_font_for_cluster(cluster);
+            match current_font {
+                Some(idx) if idx == font_index => current_text.push_str(cluster),
+                Some(idx) => {
+                    runs.push(TextRun {
+                        text: std::mem::take(&mut current_text),
+                        font_index: idx,
+                    });
+                    current_text.push_str(cluster);
+                    current_font = Some(font_index);
+                }
+                None => {
+                    current_text.push_str(cluster);
+                    current_font = Some(font_index);
+                }
             }
         }
-        runs.push(TextRun {
-            chars: current_chars,
-            font_index: current_font,
-        });
+
+        if let Some(idx) = current_font {
+            runs.push(TextRun {
+                text: current_text,
+                font_index: idx,
+            });
+        }
+
         runs
+    }
+
+    fn select_font_for_cluster(&self, cluster: &str) -> usize {
+        for font_idx in 0..=self.fallback_fonts.len() {
+            if let Some((data, face_index)) = self.font_data_for_index(font_idx) {
+                if Self::font_shapes_cluster(data, face_index, cluster) {
+                    return font_idx;
+                }
+            }
+        }
+
+        warn!("WARNING: cluster has NO GLYPH in any font: {:?}", cluster);
+        0
+    }
+
+    fn font_shapes_cluster(data: &[u8], face_index: u32, cluster: &str) -> bool {
+        let Some(face) = Face::from_slice(data, face_index) else {
+            return false;
+        };
+
+        let mut buffer = UnicodeBuffer::new();
+        buffer.push_str(cluster);
+        let glyph_buffer = rustybuzz::shape(&face, &[], buffer);
+        let glyph_infos = glyph_buffer.glyph_infos();
+        !glyph_infos.is_empty() && glyph_infos.iter().all(|info| info.glyph_id != 0)
     }
 }

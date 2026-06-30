@@ -1,281 +1,237 @@
 package com.mocharealm.accompanist.lyrics.ui.composable.lyrics
 
 import android.content.Context
-import android.graphics.Typeface
 import android.graphics.fonts.Font
+import android.graphics.fonts.FontStyle
 import android.graphics.fonts.SystemFonts
-import android.os.LocaleList
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontListFontFamily
-import java.io.File
-import java.util.Locale
+import com.mocharealm.accompanist.lyrics.text.NativeFontAxis
+import com.mocharealm.accompanist.lyrics.text.NativeFontSource
+import org.lsposed.hiddenapibypass.HiddenApiBypass
 
 @Composable
 actual fun getPlatformContext(): Any? {
     return LocalContext.current
 }
 
-/**
- * Get font bytes from FontFamily on Android.
- * Supports:
- * - Resource fonts (e.g. FontFamily(Font(R.font.my_font)))
- * - System default fonts as fallback
- */
-actual fun getFontBytes(fontFamily: FontFamily?, platformContext: Any?): ByteArray? {
-    val context = platformContext as? Context ?: return getSystemDefaultFontBytes()
+actual fun getFontSource(fontFamily: FontFamily?, platformContext: Any?): NativeFontSource? {
+    val context = platformContext as? Context
 
-    // Try to extract font from FontFamily
-    if (fontFamily is FontListFontFamily) {
-        val fonts = fontFamily.fonts
-        if (fonts.isNotEmpty()) {
-            val font = fonts.first()
-            // Check if it's a resource font
-            try {
-                // Use reflection to get the resource ID if it's a ResourceFont
-                val resIdField = font.javaClass.getDeclaredField("resId")
-                resIdField.isAccessible = true
-                val resId = resIdField.getInt(font)
-                if (resId != 0) {
-                    return context.resources.openRawResource(resId).use { it.readBytes() }
-                }
-            } catch (e: Exception) {
-                // Not a resource font or reflection failed
-            }
-
-            // Check if it's an asset font
-            try {
-                val pathField = font.javaClass.getDeclaredField("path")
-                pathField.isAccessible = true
-                val path = pathField.get(font) as? String
-                if (path != null) {
-                    return context.assets.open(path).use { it.readBytes() }
-                }
-            } catch (e: Exception) {
-                // Not an asset font or reflection failed
-            }
+    if (context != null && fontFamily is FontListFontFamily) {
+        val font = fontFamily.fonts.firstOrNull()
+        if (font != null) {
+            readResourceFont(context, font)?.let { return it }
+            readAssetFont(context, font)?.let { return it }
         }
     }
 
-    // Fallback to system fonts
-    return getSystemDefaultFontBytes()
+    return getAndroidDefaultFontSource()
 }
 
-/**
- * Get system fallback font files for missing glyphs.
- * Returns fonts in priority order:
- * 1. System default font (vendor's default, e.g., MiSans, OppoSans, Roboto)
- * 2. Current locale font (if different from default)
- * 3. Fonts for other common locales (zh-CN, zh-TW, ja, ko, en)
- *
- * This uses dynamic discovery via SystemFonts API - no hardcoded font names.
- */
-private val cachedSystemFallbackFonts: List<ByteArray> by lazy {
-    android.util.Log.d("FontFallback", "Initializing global fallback font cache...")
-    val start = System.currentTimeMillis()
-    val fonts = getSystemFallbackFontFiles().mapNotNull { file ->
-        try {
-            file.readBytes()
-        } catch (e: Exception) {
-            android.util.Log.e("FontFallback", "Failed to read: ${file.absolutePath}", e)
+actual fun getSystemFallbackFontSources(platformContext: Any?): List<NativeFontSource> {
+    return androidSystemFontSources
+}
+
+private val androidSystemFontSources: List<NativeFontSource> by lazy {
+    readAndroidSystemFonts()
+        .dedupeByFontFace()
+}
+
+private fun readAndroidSystemFonts(): List<NativeFontSource> {
+    return readAndroidFallbackFontsFromSystemFallback()
+        .ifEmpty { readAvailableAndroidFonts() }
+}
+
+private fun readAndroidFallbackFontsFromSystemFallback(): List<NativeFontSource> {
+    return try {
+        val systemFontsClass = Class.forName("android.graphics.fonts.SystemFonts")
+        val configMethodNames = listOf(
+            "getSystemPreinstalledFontConfigFromLegacyXml",
+            "getSystemPreinstalledFontConfig"
+        )
+
+        for (methodName in configMethodNames) {
+            val fontConfig = try {
+                HiddenApiBypass.invoke(systemFontsClass, null, methodName)
+            } catch (_: Throwable) {
+                null
+            } ?: continue
+            val sources = readAndroidFallbackFontsFromFontConfig(systemFontsClass, fontConfig)
+            if (sources.isNotEmpty()) {
+                return sources
+            }
+        }
+        emptyList()
+    } catch (_: Throwable) {
+        emptyList()
+    }
+}
+
+private fun readAndroidFallbackFontsFromFontConfig(
+    systemFontsClass: Class<*>,
+    fontConfig: Any
+): List<NativeFontSource> {
+    val fallback = try {
+        HiddenApiBypass.invoke(
+            systemFontsClass,
+            null,
+            "buildSystemFallback",
+            fontConfig
+        ) as? Map<*, *>
+    } catch (_: Throwable) {
+        null
+    } ?: return emptyList()
+
+    val familyNames = orderedAndroidFamilyNames(fallback)
+    return familyNames.flatMap { familyName ->
+        fallback[familyName]
+            .asFontFamilySequence()
+            .flatMap { fontFamily ->
+                readFontsFromAndroidFontFamily(fontFamily, familyName).asSequence()
+            }
+            .toList()
+    }
+}
+
+private fun readAvailableAndroidFonts(): List<NativeFontSource> {
+    return try {
+        SystemFonts.getAvailableFonts().mapNotNull { font ->
+            font.toNativeFontSource(fallbackFor = null)
+        }
+    } catch (_: Throwable) {
+        emptyList()
+    }
+}
+
+private fun orderedAndroidFamilyNames(fallback: Map<*, *>): List<String> {
+    val keys = fallback.keys.mapNotNull { it as? String }
+    val preferred = listOf("sans-serif", "serif", "monospace")
+    return buildList {
+        preferred.forEach { name ->
+            if (name in keys) add(name)
+        }
+        keys.forEach { name ->
+            if (name !in this) add(name)
+        }
+    }
+}
+
+private fun Any?.asFontFamilySequence(): Sequence<Any> {
+    return when {
+        this == null -> emptySequence()
+        this is Array<*> -> asSequence().filterNotNull()
+        this is Iterable<*> -> asSequence().filterNotNull()
+        javaClass.isArray -> (0 until java.lang.reflect.Array.getLength(this))
+            .asSequence()
+            .mapNotNull { index -> java.lang.reflect.Array.get(this, index) }
+        else -> emptySequence()
+    }
+}
+
+private fun readFontsFromAndroidFontFamily(fontFamily: Any, familyName: String): List<NativeFontSource> {
+    return try {
+        val size = fontFamily.javaClass.getMethod("getSize").invoke(fontFamily) as? Int
+            ?: return emptyList()
+        val getFont = fontFamily.javaClass.getMethod("getFont", Int::class.javaPrimitiveType)
+        (0 until size).mapNotNull { index ->
+            (getFont.invoke(fontFamily, index) as? Font)
+                ?.toNativeFontSource(fallbackFor = familyName)
+        }
+    } catch (_: Throwable) {
+        emptyList()
+    }
+}
+
+private fun Font.toNativeFontSource(fallbackFor: String?): NativeFontSource? {
+    val file = file ?: return null
+    if (!file.exists() || !file.canRead()) return null
+
+    return NativeFontSource(
+        path = file.absolutePath,
+        ttcIndex = ttcIndex,
+        weight = style.weight,
+        italic = style.slant == FontStyle.FONT_SLANT_ITALIC,
+        axes = axes?.mapNotNull { axis ->
+            val tag = axis.tag ?: return@mapNotNull null
+            if (tag.length == 4) NativeFontAxis(tag, axis.styleValue) else null
+        }.orEmpty(),
+        languageTags = localeList.toLanguageTags()
+            .split(",")
+            .map { it.trim() }
+            .filter { it.isNotEmpty() },
+        fallbackFor = fallbackFor,
+        sourceId = buildString {
+            append("android-system:")
+            if (fallbackFor != null) {
+                append(fallbackFor)
+                append(":")
+            }
+            append(file.absolutePath)
+            append("#")
+            append(ttcIndex)
+        }
+    )
+}
+
+private fun getAndroidDefaultFontSource(): NativeFontSource? {
+    fun NativeFontSource.isNormalUpright(): Boolean {
+        return weight == FontStyle.FONT_WEIGHT_NORMAL && !italic
+    }
+
+    return androidSystemFontSources.firstOrNull { source ->
+        source.fallbackFor == "sans-serif" && source.isNormalUpright() && source.languageTags.isEmpty()
+    } ?: androidSystemFontSources.firstOrNull { source ->
+        source.fallbackFor == "sans-serif" && source.isNormalUpright()
+    } ?: androidSystemFontSources.firstOrNull { source ->
+        source.isNormalUpright() &&
+            listOfNotNull(source.path, source.sourceId).any { it.contains("Roboto", ignoreCase = true) }
+    } ?: androidSystemFontSources.firstOrNull { source ->
+        source.isNormalUpright() && source.languageTags.isEmpty()
+    } ?: androidSystemFontSources.firstOrNull()
+}
+
+private fun readResourceFont(context: Context, font: androidx.compose.ui.text.font.Font): NativeFontSource? {
+    return try {
+        val resIdField = font.javaClass.getDeclaredField("resId")
+        resIdField.isAccessible = true
+        val resId = resIdField.getInt(font)
+        if (resId != 0) {
+            NativeFontSource(
+                resourceId = resId,
+                sourceId = "android-resource:${context.packageName}:$resId",
+                platformContext = context.applicationContext
+            )
+        } else {
             null
         }
-    }
-    android.util.Log.d("FontFallback", "Cached ${fonts.size} fallback fonts in ${System.currentTimeMillis() - start}ms")
-    fonts
-}
-
-/**
- * Get system fallback font files for missing glyphs.
- * Returns fonts in priority order.
- * Cached globally to avoid repeated IO and parsing.
- */
-actual fun getSystemFallbackFontBytes(platformContext: Any?): List<ByteArray> {
-    return cachedSystemFallbackFonts
-}
-
-/**
- * Get system fallback font files by parsing Android font configuration XML.
- * This parses font_fallback.xml (modern) or fonts.xml (legacy) for reliable discovery.
- * Much more reliable than SystemFonts API, especially for OEM systems (MIUI, etc).
- */
-fun getSystemFallbackFontFiles(): List<File> {
-    val result = mutableListOf<File>()
-    val addedPaths = mutableSetOf<String>()
-    
-    // Helper to add a font file if not already added
-    fun addFont(path: String): Boolean {
-        if (path in addedPaths) return false
-        
-        // Try multiple font directories
-        val possiblePaths = listOf(
-            "/system/fonts/$path",
-            "/product/fonts/$path",
-            "/system_ext/fonts/$path"
-        )
-        
-        for (fullPath in possiblePaths) {
-            val file = File(fullPath)
-            if (file.exists() && file.canRead()) {
-                addedPaths.add(path)
-                result.add(file)
-                android.util.Log.d("FontFallback", "Added fallback font: $fullPath")
-                return true
-            }
-        }
-        return false
-    }
-    
-    // Target language tags to search for in font XML
-    // Order matters: first found will be tried first
-    val targetLangTags = listOf(
-        null,           // Default sans-serif (no lang attribute) - first priority
-        "und-Arab",     // Arabic script (covers Arabic, Persian, Urdu)
-        "zh-Hans",      // Simplified Chinese
-        "zh-Hant",      // Traditional Chinese
-        "ja",           // Japanese
-        "ko",           // Korean
-        "und-Hebr",     // Hebrew script
-        "und-Thai",     // Thai script
-        "und-Deva",     // Devanagari (Hindi, Sanskrit, etc.)
-        "ru"            // Russian (Cyrillic)
-    )
-    
-    // Parse font XML files
-    val fontFallbackXml = File("/system/etc/font_fallback.xml")
-    val fontsXml = File("/system/etc/fonts.xml")
-    
-    // Try modern font_fallback.xml first, then legacy fonts.xml
-    val xmlFile = if (fontFallbackXml.exists()) fontFallbackXml else fontsXml
-    
-    if (xmlFile.exists()) {
-        android.util.Log.d("FontFallback", "Parsing font config: ${xmlFile.absolutePath}")
-        
-        for (langTag in targetLangTags) {
-            val fonts = parseFontXmlForLang(xmlFile, langTag)
-            for (fontPath in fonts) {
-                addFont(fontPath)
-            }
-        }
-    } else {
-        android.util.Log.w("FontFallback", "No font XML found, falling back to SystemFonts API")
-        // Fallback to SystemFonts API if no XML available
-        val availableFonts = SystemFonts.getAvailableFonts()
-        for (font in availableFonts.take(10)) {
-            font.file?.let { file ->
-                if (file.absolutePath !in addedPaths) {
-                    addedPaths.add(file.absolutePath)
-                    result.add(file)
-                }
-            }
-        }
-    }
-    
-    android.util.Log.d("FontFallback", "Total fallback fonts: ${result.size}")
-    return result
-}
-
-/**
- * Parse font XML file and extract font paths for a specific language tag.
- * @param xmlFile The font configuration XML file
- * @param targetLang The language tag to match (e.g., "und-Arab", "zh-Hans"), or null for default sans-serif
- */
-private fun parseFontXmlForLang(xmlFile: File, targetLang: String?): List<String> {
-    val paths = mutableListOf<String>()
-    
-    try {
-        val factory = org.xmlpull.v1.XmlPullParserFactory.newInstance()
-        val parser = factory.newPullParser()
-        parser.setInput(xmlFile.inputStream(), "UTF-8")
-        
-        var inTargetFamily = false
-        var inFontElement = false
-        var currentFontText = StringBuilder()
-        var eventType = parser.eventType
-        
-        while (eventType != org.xmlpull.v1.XmlPullParser.END_DOCUMENT) {
-            when (eventType) {
-                org.xmlpull.v1.XmlPullParser.START_TAG -> {
-                    when (parser.name) {
-                        "family" -> {
-                            val familyName = parser.getAttributeValue(null, "name")
-                            val familyLang = parser.getAttributeValue(null, "lang")
-                            
-                            inTargetFamily = if (targetLang == null) {
-                                // Looking for default sans-serif (no lang, name="sans-serif")
-                                familyLang == null && familyName == "sans-serif"
-                            } else {
-                                // Looking for specific language
-                                familyLang?.contains(targetLang) == true
-                            }
-                        }
-                        "font" -> {
-                            if (inTargetFamily) {
-                                inFontElement = true
-                                currentFontText = StringBuilder()
-                            }
-                        }
-                        // Skip other tags like <axis>, they're self-closing or nested
-                    }
-                }
-                org.xmlpull.v1.XmlPullParser.TEXT -> {
-                    if (inFontElement) {
-                        currentFontText.append(parser.text)
-                    }
-                }
-                org.xmlpull.v1.XmlPullParser.END_TAG -> {
-                    when (parser.name) {
-                        "font" -> {
-                            if (inFontElement) {
-                                val fileName = currentFontText.toString().trim()
-                                if (fileName.isNotEmpty() && fileName.endsWith(".ttf", ignoreCase = true) 
-                                    || fileName.endsWith(".otf", ignoreCase = true) 
-                                    || fileName.endsWith(".ttc", ignoreCase = true)) {
-                                    paths.add(fileName)
-                                }
-                                inFontElement = false
-                            }
-                        }
-                        "family" -> {
-                            inTargetFamily = false
-                        }
-                    }
-                }
-            }
-            eventType = parser.next()
-        }
-    } catch (e: Exception) {
-        android.util.Log.e("FontFallback", "Error parsing ${xmlFile.name}: ${e.message}")
-    }
-    
-    if (paths.isNotEmpty()) {
-        android.util.Log.d("FontFallback", "Found ${paths.size} fonts for lang=$targetLang: ${paths.take(3)}...")
-    }
-    
-    return paths
-}
-
-/**
- * Get system default font bytes.
- * Uses dynamic discovery to find the system's default font.
- */
-private fun getSystemDefaultFontBytes(): ByteArray? {
-    val availableFonts = SystemFonts.getAvailableFonts()
-
-    // Find the best match for system default (weight 400, non-italic, generic)
-    val defaultFont = availableFonts.filter { font ->
-        font.style.weight == 400 && font.style.slant == 0
-    }.minByOrNull { font ->
-        // Prefer fonts without specific locale restrictions
-        val locales = font.localeList
-        if (locales.isEmpty) 0 else locales.size()
-    }
-
-    return try {
-        defaultFont?.file?.readBytes()
-    } catch (e: Exception) {
-        android.util.Log.e("FontFallback", "Failed to read default font", e)
+    } catch (_: Throwable) {
         null
+    }
+}
+
+private fun readAssetFont(context: Context, font: androidx.compose.ui.text.font.Font): NativeFontSource? {
+    return try {
+        val pathField = font.javaClass.getDeclaredField("path")
+        pathField.isAccessible = true
+        val path = pathField.get(font) as? String ?: return null
+        NativeFontSource(
+            assetPath = path,
+            sourceId = "android-asset:${context.packageName}:$path",
+            platformContext = context.applicationContext
+        )
+    } catch (_: Throwable) {
+        null
+    }
+}
+
+private fun List<NativeFontSource>.dedupeByFontFace(): List<NativeFontSource> {
+    val seen = mutableSetOf<String>()
+    return filter { source ->
+        val path = source.path ?: return@filter true
+        val axisKey = source.axes.joinToString(";") { "${it.tag}:${it.value}" }
+        seen.add("$path#${source.ttcIndex}#${source.weight}#${source.italic}#$axisKey")
     }
 }

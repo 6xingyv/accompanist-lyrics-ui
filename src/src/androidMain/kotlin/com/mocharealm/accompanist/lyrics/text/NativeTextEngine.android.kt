@@ -2,83 +2,325 @@ package com.mocharealm.accompanist.lyrics.text
 
 import android.content.Context
 import android.content.res.AssetFileDescriptor
+import android.os.ParcelFileDescriptor
+import android.view.Surface
 import java.io.File
-import java.io.FileInputStream
 import java.nio.ByteBuffer
 
-actual class NativeTextEngine {
-    
+actual class NativeTextEngine actual constructor(
+    actual val atlasWidth: Int,
+    actual val atlasHeight: Int
+) {
+
     companion object {
         init {
-            // Ensure the library is loaded on class access
             System.loadLibrary("text_engine")
         }
     }
 
-    actual external fun init(atlasWidth: Int, atlasHeight: Int)
-    actual external fun loadFont(bytes: ByteArray)
-    actual external fun loadFallbackFont(bytes: ByteArray)
-    actual external fun clearFallbackFonts()
-    
-    // File descriptor-based font loading (more memory efficient)
-    external fun loadFallbackFontFd(fd: Int): Boolean
+    private var handle: Long = nativeCreate(atlasWidth, atlasHeight)
 
-    actual external fun processText(text: String, sizeFn: Float, weight: Float): String
-    actual external fun hasPendingUploads(): Boolean
-    actual external fun getPendingUploads(): String
-    actual external fun getAtlasSize(): String
-    
-    // Zero-copy DirectByteBuffer API (platform-specific, not in expect)
-    external fun processTextDirect(text: String, sizePx: Float, weight: Float, buffer: ByteBuffer): Int
-    external fun getPendingUploadsDirect(buffer: ByteBuffer): Int
-    
-    // Resource management
-    actual external fun destroy()
-}
+    private var generationCounter: Int = 0
+    actual internal val generation: Int
+        get() = generationCounter
 
-/**
- * Loads a fallback font from Android assets using zero-copy file descriptor.
- * More memory efficient than loading entire font into ByteArray.
- * 
- * @param context Android context for accessing assets
- * @param assetPath Path to font file in assets (e.g., "fonts/NotoSansCJK.otf")
- * @return true if font loaded successfully
- */
-fun NativeTextEngine.loadFallbackFontFromAsset(context: Context, assetPath: String): Boolean {
-    return try {
-        val afd: AssetFileDescriptor = context.assets.openFd(assetPath)
-        val fd = afd.parcelFileDescriptor.fd
-        val result = loadFallbackFontFd(fd)
-        afd.close()
-        result
-    } catch (e: Exception) {
-        // Asset might be compressed, fall back to ByteArray method
-        try {
-            val bytes = context.assets.open(assetPath).use { it.readBytes() }
-            loadFallbackFont(bytes)
-            true
-        } catch (e2: Exception) {
-            false
+    actual fun configureFonts(config: NativeFontConfig): Boolean {
+        ensureHandle()
+        nativeInit(handle, atlasWidth, atlasHeight)
+
+        val primaryLoaded = config.primary?.let(::loadPrimarySource) ?: false
+        val fallbackLoads = config.fallbacks.count(::loadFallbackSource)
+        generationCounter++
+        return primaryLoaded || fallbackLoads > 0
+    }
+
+    actual fun processText(text: String, sizePx: Float, weight: Float): String {
+        ensureHandle()
+        return nativeProcessText(handle, text, sizePx, weight)
+    }
+
+    actual fun hasPendingUploads(): Boolean {
+        return handle != 0L && nativeHasPendingUploads(handle)
+    }
+
+    actual internal fun getPendingUploadsJson(): String {
+        return if (handle != 0L) nativeGetPendingUploads(handle) else "[]"
+    }
+
+    actual fun getAtlasSize(): String {
+        return if (handle != 0L) nativeGetAtlasSize(handle) else """{"width":0,"height":0}"""
+    }
+
+    actual fun setLyricsScene(sceneJson: String): String {
+        ensureHandle()
+        return nativeSetLyricsScene(handle, sceneJson)
+    }
+
+    actual fun getLyricsRendererMetrics(): String {
+        return if (handle != 0L) nativeGetLyricsRendererMetrics(handle) else "{}"
+    }
+
+    fun processTextDirect(text: String, sizePx: Float, weight: Float, buffer: ByteBuffer): Int {
+        ensureHandle()
+        return nativeProcessTextDirect(handle, text, sizePx, weight, buffer)
+    }
+
+    fun getPendingUploadsDirect(buffer: ByteBuffer): Int {
+        return if (handle != 0L) nativeGetPendingUploadsDirect(handle, buffer) else -1
+    }
+
+    fun setRenderSurface(
+        surface: Surface,
+        surfaceWidth: Int,
+        surfaceHeight: Int,
+        frameWidth: Int,
+        frameHeight: Int
+    ): Boolean {
+        ensureHandle()
+        return nativeSetRenderSurface(handle, surface, surfaceWidth, surfaceHeight, frameWidth, frameHeight)
+    }
+
+    fun clearRenderSurface() {
+        if (handle != 0L) {
+            nativeClearRenderSurface(handle)
         }
     }
-}
 
-/**
- * Loads a fallback font from a file path using zero-copy file descriptor.
- * 
- * @param filePath Absolute path to font file
- * @return true if font loaded successfully
- */
-fun NativeTextEngine.loadFallbackFontFromFile(filePath: String): Boolean {
-    return try {
-        val file = File(filePath)
-        val fis = FileInputStream(file)
-        val fd = fis.fd.hashCode() // Note: This is a hack, proper FD would need ParcelFileDescriptor
-        val result = loadFallbackFontFd(fd)
-        fis.close()
-        result
-    } catch (e: Exception) {
-        false
+    fun renderLyricsFrameToSurface(currentTimeMs: Int): Int {
+        ensureHandle()
+        return nativeRenderLyricsFrameToSurface(handle, currentTimeMs)
     }
-}
 
+    fun beginLyricsScroll() {
+        if (handle != 0L) nativeBeginLyricsScroll(handle)
+    }
+
+    fun scrollLyricsBy(deltaYPx: Float) {
+        if (handle != 0L) nativeScrollLyricsBy(handle, deltaYPx)
+    }
+
+    fun endLyricsScroll(velocityYPx: Float) {
+        if (handle != 0L) nativeEndLyricsScroll(handle, velocityYPx)
+    }
+
+    fun cancelLyricsScroll() {
+        if (handle != 0L) nativeCancelLyricsScroll(handle)
+    }
+
+    fun resetLyricsScroll() {
+        if (handle != 0L) nativeResetLyricsScroll(handle)
+    }
+
+    fun hitTestLyricsLine(x: Float, y: Float, currentTimeMs: Int): Int {
+        return if (handle != 0L) nativeHitTestLyricsLine(handle, x, y, currentTimeMs) else -1
+    }
+
+    actual fun close() {
+        val currentHandle = handle
+        if (currentHandle != 0L) {
+            nativeDestroy(currentHandle)
+            handle = 0L
+            generationCounter++
+        }
+    }
+
+    private fun ensureHandle() {
+        if (handle == 0L) {
+            handle = nativeCreate(atlasWidth, atlasHeight)
+            generationCounter++
+        }
+    }
+
+    private fun loadPrimarySource(source: NativeFontSource): Boolean {
+        loadAndroidDescriptorSource(source, ::nativeLoadFontFd, ::nativeLoadFontPath)?.let {
+            return it
+        }
+
+        val bytes = source.bytes
+        val path = source.path
+        return when {
+            bytes != null -> nativeLoadFont(handle, bytes, source.ttcIndex)
+            !path.isNullOrBlank() -> nativeLoadFontPath(handle, path, source.ttcIndex)
+            else -> false
+        }
+    }
+
+    private fun loadFallbackSource(source: NativeFontSource): Boolean {
+        loadAndroidDescriptorSource(source, ::nativeLoadFallbackFontFd, ::nativeLoadFallbackFontPath)?.let {
+            return it
+        }
+
+        val bytes = source.bytes
+        val path = source.path
+        return when {
+            bytes != null -> nativeLoadFallbackFont(handle, bytes, source.ttcIndex)
+            !path.isNullOrBlank() -> nativeLoadFallbackFontPath(handle, path, source.ttcIndex)
+            else -> false
+        }
+    }
+
+    private fun loadAndroidDescriptorSource(
+        source: NativeFontSource,
+        fdLoader: (Long, Int, Long, Long, Int) -> Boolean,
+        pathLoader: (Long, String, Int) -> Boolean
+    ): Boolean? {
+        val context = source.platformContext as? Context ?: return null
+        val appContext = context.applicationContext
+
+        source.resourceId?.let { resId ->
+            try {
+                appContext.resources.openRawResourceFd(resId)?.use { afd ->
+                    return loadAssetFileDescriptor(source, afd, fdLoader)
+                }
+            } catch (_: Exception) {
+                // Compressed resources cannot be opened as an fd range; stream them to cache below.
+            }
+
+            val extractedPath = copyResourceFontToCache(appContext, resId) ?: return false
+            return pathLoader(handle, extractedPath, source.ttcIndex)
+        }
+
+        source.assetPath?.let { assetPath ->
+            try {
+                appContext.assets.openFd(assetPath).use { afd ->
+                    return loadAssetFileDescriptor(source, afd, fdLoader)
+                }
+            } catch (_: Exception) {
+                val extractedPath = copyAssetFontToCache(appContext, assetPath) ?: return false
+                return pathLoader(handle, extractedPath, source.ttcIndex)
+            }
+        }
+
+        return null
+    }
+
+    private fun loadAssetFileDescriptor(
+        source: NativeFontSource,
+        afd: AssetFileDescriptor,
+        fdLoader: (Long, Int, Long, Long, Int) -> Boolean
+    ): Boolean {
+        return ParcelFileDescriptor.dup(afd.fileDescriptor).use { pfd ->
+            fdLoader(
+                handle,
+                pfd.fd,
+                afd.startOffset,
+                afd.length,
+                source.ttcIndex
+            )
+        }
+    }
+
+    private fun copyAssetFontToCache(context: Context, assetPath: String): String? {
+        val outputFile = cacheFontFile(context, "asset-${assetPath.hashCode()}-${File(assetPath).name}")
+        if (outputFile.exists() && outputFile.length() > 0L) return outputFile.absolutePath
+
+        return try {
+            outputFile.parentFile?.mkdirs()
+            val tempFile = File(outputFile.parentFile, "${outputFile.name}.tmp")
+            context.assets.open(assetPath).use { input ->
+                tempFile.outputStream().use { output -> input.copyTo(output) }
+            }
+            if (tempFile.renameTo(outputFile) || tempFile.copyTo(outputFile, overwrite = true).exists()) {
+                tempFile.delete()
+                outputFile.absolutePath
+            } else {
+                null
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun copyResourceFontToCache(context: Context, resourceId: Int): String? {
+        val outputFile = cacheFontFile(context, "resource-$resourceId.font")
+        if (outputFile.exists() && outputFile.length() > 0L) return outputFile.absolutePath
+
+        return try {
+            outputFile.parentFile?.mkdirs()
+            val tempFile = File(outputFile.parentFile, "${outputFile.name}.tmp")
+            context.resources.openRawResource(resourceId).use { input ->
+                tempFile.outputStream().use { output -> input.copyTo(output) }
+            }
+            if (tempFile.renameTo(outputFile) || tempFile.copyTo(outputFile, overwrite = true).exists()) {
+                tempFile.delete()
+                outputFile.absolutePath
+            } else {
+                null
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun cacheFontFile(context: Context, fileName: String): File {
+        val safeName = fileName.replace(Regex("""[^A-Za-z0-9._-]"""), "_")
+        return File(File(context.cacheDir, "lyrics-fonts"), safeName)
+    }
+
+    private external fun nativeCreate(atlasWidth: Int, atlasHeight: Int): Long
+    private external fun nativeDestroy(handle: Long)
+    private external fun nativeInit(handle: Long, atlasWidth: Int, atlasHeight: Int)
+    private external fun nativeLoadFont(handle: Long, bytes: ByteArray, faceIndex: Int): Boolean
+    private external fun nativeLoadFontPath(handle: Long, path: String, faceIndex: Int): Boolean
+    private external fun nativeLoadFontFd(
+        handle: Long,
+        fd: Int,
+        offset: Long,
+        length: Long,
+        faceIndex: Int
+    ): Boolean
+
+    private external fun nativeLoadFallbackFont(handle: Long, bytes: ByteArray, faceIndex: Int): Boolean
+    private external fun nativeLoadFallbackFontPath(handle: Long, path: String, faceIndex: Int): Boolean
+    private external fun nativeLoadFallbackFontFd(
+        handle: Long,
+        fd: Int,
+        offset: Long,
+        length: Long,
+        faceIndex: Int
+    ): Boolean
+
+    private external fun nativeProcessText(handle: Long, text: String, sizePx: Float, weight: Float): String
+    private external fun nativeHasPendingUploads(handle: Long): Boolean
+    private external fun nativeGetPendingUploads(handle: Long): String
+    private external fun nativeGetAtlasSize(handle: Long): String
+    private external fun nativeSetLyricsScene(handle: Long, sceneJson: String): String
+    private external fun nativeGetLyricsRendererMetrics(handle: Long): String
+    private external fun nativeProcessTextDirect(
+        handle: Long,
+        text: String,
+        sizePx: Float,
+        weight: Float,
+        buffer: ByteBuffer
+    ): Int
+
+    private external fun nativeGetPendingUploadsDirect(handle: Long, buffer: ByteBuffer): Int
+    private external fun nativeSetRenderSurface(
+        handle: Long,
+        surface: Surface,
+        surfaceWidth: Int,
+        surfaceHeight: Int,
+        frameWidth: Int,
+        frameHeight: Int
+    ): Boolean
+
+    private external fun nativeClearRenderSurface(handle: Long)
+
+    private external fun nativeRenderLyricsFrameToSurface(
+        handle: Long,
+        currentTimeMs: Int
+    ): Int
+
+    private external fun nativeBeginLyricsScroll(handle: Long)
+    private external fun nativeScrollLyricsBy(handle: Long, deltaYPx: Float)
+    private external fun nativeEndLyricsScroll(handle: Long, velocityYPx: Float)
+    private external fun nativeCancelLyricsScroll(handle: Long)
+    private external fun nativeResetLyricsScroll(handle: Long)
+
+    private external fun nativeHitTestLyricsLine(
+        handle: Long,
+        x: Float,
+        y: Float,
+        currentTimeMs: Int
+    ): Int
+}

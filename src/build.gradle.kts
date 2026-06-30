@@ -95,6 +95,7 @@ kotlin {
             }
         }
         androidMain.dependencies {
+            implementation(libs.hiddenapibypass)
         }
     }
 }
@@ -173,8 +174,7 @@ abstract class BuildRustAndroidTask @Inject constructor(
     fun build() {
         val abiMap = mapOf(
             "arm64-v8a" to "aarch64-linux-android",
-            "x86_64" to "x86_64-linux-android",
-            "armeabi-v7a" to "armv7-linux-androideabi"
+            "x86_64" to "x86_64-linux-android"
         )
 
         abiMap.forEach { (abi, target) ->
@@ -224,9 +224,20 @@ abstract class BuildRustJvmTask @Inject constructor(
             osName.contains("mac") -> "dylib" to "lib"
             else -> "so" to "lib"
         }
+        val osId = when {
+            osName.contains("win") -> "windows"
+            osName.contains("mac") -> "macos"
+            else -> "linux"
+        }
+        val archName = System.getProperty("os.arch").lowercase()
+        val archId = when (archName) {
+            "amd64", "x86_64" -> "x86_64"
+            "aarch64", "arm64" -> "arm64"
+            else -> archName
+        }
 
         // Ensure output directory exists
-        val outputDir = resourcesDir.get().dir("natives").asFile
+        val outputDir = resourcesDir.get().dir("natives/$osId-$archId").asFile
         if (!outputDir.exists()) {
             outputDir.mkdirs()
         }
@@ -234,7 +245,7 @@ abstract class BuildRustJvmTask @Inject constructor(
         fs.copy {
             from(rustProjectDir.get().dir("target/release"))
             include("$prefix${libName.get()}.$ext")
-            into(resourcesDir.get().dir("natives"))
+            into(resourcesDir.get().dir("natives/$osId-$archId"))
         }
     }
 }

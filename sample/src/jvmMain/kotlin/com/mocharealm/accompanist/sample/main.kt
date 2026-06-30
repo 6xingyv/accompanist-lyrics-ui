@@ -25,7 +25,7 @@ import com.mocharealm.accompanist.lyrics.core.parser.AutoParser
 import com.mocharealm.accompanist.lyrics.ui.composable.lyrics.KaraokeLyricsView
 import org.koin.core.context.startKoin
 
-val parser = AutoParser.Builder().build()
+val parser = AutoParser()
 
 fun main() = application {
     startKoin {
@@ -49,7 +49,7 @@ fun main() = application {
         KaraokeLyricsView(
             listState = listState,
             lyrics = lyrics,
-            currentPosition = currentTime.toLong(),
+            currentPosition = { currentTime.toInt() },
             onLineClicked = { line ->
 
             },

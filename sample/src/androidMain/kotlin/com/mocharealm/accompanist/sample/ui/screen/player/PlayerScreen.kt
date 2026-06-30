@@ -63,10 +63,11 @@ import androidx.compose.ui.text.style.TextMotion
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem
 import com.mocharealm.accompanist.lyrics.core.model.SyncedLyrics
 import com.mocharealm.accompanist.lyrics.core.model.karaoke.KaraokeLine
-import com.mocharealm.accompanist.lyrics.ui.composable.lyrics.KaraokeLyricsView
+import com.mocharealm.accompanist.lyrics.ui.renderer.RustSkiaLyricsView
 import com.mocharealm.accompanist.sample.Res
 import com.mocharealm.accompanist.sample.domain.model.MusicItem
 import com.mocharealm.accompanist.sample.empty
@@ -589,27 +590,22 @@ fun PlayerLyrics(
 ) {
     if (lyrics == null) return
 
-    KaraokeLyricsView(
-        listState = listState,
-        lyrics = lyrics,
-        currentPosition = currentPosition,
-        onLineClicked = { line -> onSeekTo(line.start) },
-        onLinePressed = { line -> onShare(line as KaraokeLine) },
-        normalLineTextStyle = LocalTextStyle.current.copy(
-            fontSize = 34.sp,
-            fontFamily = SFPro(),
-            fontWeight = FontWeight.Bold,
-            textMotion = TextMotion.Animated,
-        ),
-        accompanimentLineTextStyle = LocalTextStyle.current.copy(
-            fontSize = 20.sp,
-            fontFamily = SFPro(),
-            fontWeight = FontWeight.Bold,
-            textMotion = TextMotion.Animated,
-        ),
-        modifier = modifier.graphicsLayer {
-            blendMode = BlendMode.Plus
-            compositingStrategy = CompositingStrategy.Offscreen
+    AndroidView(
+        factory = { context ->
+            RustSkiaLyricsView(context).apply {
+                setLyrics(lyrics)
+                setCurrentPosition(currentPosition())
+            }
         },
+        update = { view ->
+            view.setLyrics(lyrics)
+            view.setCurrentPosition(currentPosition())
+        },
+        modifier = modifier
+            .fillMaxSize()
+            .graphicsLayer {
+                blendMode = BlendMode.Plus
+                compositingStrategy = CompositingStrategy.Offscreen
+            },
     )
 }

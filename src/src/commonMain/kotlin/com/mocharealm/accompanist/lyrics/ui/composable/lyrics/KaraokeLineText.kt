@@ -11,6 +11,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -41,9 +43,11 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.mocharealm.accompanist.lyrics.core.model.karaoke.KaraokeAlignment
 import com.mocharealm.accompanist.lyrics.core.model.karaoke.KaraokeLine
+import com.mocharealm.accompanist.lyrics.text.NativeFontConfig
+import com.mocharealm.accompanist.lyrics.text.NativeFontSource
 import com.mocharealm.accompanist.lyrics.text.NativeTextEngine
 import com.mocharealm.accompanist.lyrics.text.SdfAtlasManager
-import com.mocharealm.accompanist.lyrics.text.parsePendingUploads
+import com.mocharealm.accompanist.lyrics.text.drainPendingUploads
 import com.mocharealm.accompanist.lyrics.text.rememberSdfAtlasManager
 import com.mocharealm.accompanist.lyrics.ui.utils.LayerPaint
 import com.mocharealm.accompanist.lyrics.ui.utils.easing.Bounce
@@ -503,9 +507,10 @@ fun KaraokeLineText(
             val platformContext = getPlatformContext()
             val fontResourceBytes = rememberFontResourceBytes(fontResource)
             val availableWidthPx = with(density) { maxWidth.toPx() }
+            val isAccompanimentLine = line is KaraokeLine.AccompanimentKaraokeLine
 
-            val textStyle = remember(line.isAccompaniment) {
-                val baseStyle = if (line.isAccompaniment) accompanimentLineTextStyle else normalLineTextStyle
+            val textStyle = remember(isAccompanimentLine, normalLineTextStyle, accompanimentLineTextStyle) {
+                val baseStyle = if (isAccompanimentLine) accompanimentLineTextStyle else normalLineTextStyle
                 baseStyle.copy(textDirection = TextDirection.Content)
             }
 
@@ -521,34 +526,55 @@ fun KaraokeLineText(
                 }
             }
 
-            // Create and init NativeTextEngine (use shared if provided)
-            val nativeEngine = sharedNativeEngine ?: remember(textStyle.fontFamily, platformContext, fontResourceBytes) { 
-                NativeTextEngine().apply {
-                    init(2048, 2048)
-                    // Prefer fontResource bytes if provided, otherwise fall back to FontFamily
-                    val fontBytes = fontResourceBytes 
-                        ?: getFontBytes(textStyle.fontFamily, platformContext)
-                    if (fontBytes != null) {
-                        loadFont(fontBytes)
-                    }
-                    // Load system fallback fonts for missing glyphs (e.g., CJK characters)
-                    val fallbackFonts = getSystemFallbackFontBytes(platformContext)
-                    for (fallbackBytes in fallbackFonts) {
-                        loadFallbackFont(fallbackBytes)
-                    }
+            val fontConfig = remember(textStyle.fontFamily, platformContext, fontResourceBytes) {
+                NativeFontConfig(
+                    primary = fontResourceBytes?.let { NativeFontSource(bytes = it) }
+                        ?: getFontSource(textStyle.fontFamily, platformContext),
+                    fallbacks = getSystemFallbackFontSources(platformContext)
+                )
+            }
+            val fontConfigKey = remember(fontConfig) { fontConfig.stableKey() }
+
+            val nativeEngine = sharedNativeEngine ?: remember(fontConfigKey) {
+                NativeTextEngine(2048, 2048).apply {
+                    configureFonts(fontConfig)
                 }
             }
             
             // Create SdfAtlasManager with same dimensions as native engine (use shared if provided)
             val atlasManager = sharedAtlasManager ?: rememberSdfAtlasManager(2048, 2048)
 
-            val initialLayouts by remember(precalculatedLayouts) {
+            LaunchedEffect(sharedNativeEngine, fontConfigKey) {
+                if (sharedNativeEngine == null) {
+                    atlasManager.clear()
+                }
+            }
+
+            DisposableEffect(nativeEngine, sharedNativeEngine) {
+                onDispose {
+                    if (sharedNativeEngine == null) {
+                        nativeEngine.close()
+                    }
+                }
+            }
+
+            val initialLayouts by remember(
+                precalculatedLayouts,
+                processedSyllables,
+                textStyle,
+                spaceWidth,
+                density.density,
+                density.fontScale,
+                fontConfigKey,
+                nativeEngine,
+                nativeEngine.generation
+            ) {
                 derivedStateOf {
                     precalculatedLayouts ?: measureSyllablesAndDetermineAnimation(
                         syllables = processedSyllables,
                         textMeasurer = textMeasurer,
                         style = textStyle,
-                        isAccompanimentLine = line.isAccompaniment,
+                        isAccompanimentLine = isAccompanimentLine,
                         spaceWidth = spaceWidth,
                         fontFamilyResolver = fontFamilyResolver,
                         density = density,
@@ -558,7 +584,15 @@ fun KaraokeLineText(
                 }
             }
 
-            val wrappedLines by remember {
+            val wrappedLines by remember(
+                initialLayouts,
+                availableWidthPx,
+                textStyle,
+                density.density,
+                density.fontScale,
+                nativeEngine,
+                nativeEngine.generation
+            ) {
                 derivedStateOf {
                     calculateBalancedLines(
                         syllableLayouts = initialLayouts,
@@ -592,11 +626,11 @@ fun KaraokeLineText(
                 lineHeight * wrappedLines.size
             }
             
-            // Process pending glyph uploads from native engine
-            if (nativeEngine.hasPendingUploads()) {
-                val uploadsJson = nativeEngine.getPendingUploads()
-                val uploads = parsePendingUploads(uploadsJson)
-                atlasManager.updateAtlas(uploads)
+            LaunchedEffect(initialLayouts, wrappedLines, nativeEngine, nativeEngine.generation) {
+                val uploads = nativeEngine.drainPendingUploads()
+                if (uploads.isNotEmpty()) {
+                    atlasManager.updateAtlas(uploads)
+                }
             }
 
             Canvas(modifier = Modifier.size(maxWidth, (totalHeight.roundToInt() + 8).toDp())) {

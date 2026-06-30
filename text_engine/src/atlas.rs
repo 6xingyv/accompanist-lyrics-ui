@@ -11,7 +11,11 @@ pub struct Rect {
 /// Cached glyph information including atlas rect, bearing offsets, and LRU tracking
 #[derive(Clone, Copy, Debug)]
 pub struct GlyphInfo {
+    /// Drawable glyph pixels in the atlas. Width/height are the actual uploaded
+    /// bitmap size, not the internal allocation block size.
     pub rect: Rect,
+    /// Internal block allocation used for eviction.
+    pub allocated_rect: Rect,
     pub x_bearing: f32,
     pub y_bearing: f32,
     pub last_used: u64, // LRU timestamp
@@ -23,14 +27,10 @@ pub type GlyphCacheKey = (usize, u16, u32, u32); // (font_id, glyph_id, size_px,
 /// Block-based allocation unit
 #[derive(Clone, Copy, Debug)]
 struct Block {
-    x: u32,
-    y: u32,
     is_free: bool,
 }
 
 pub struct AtlasManager {
-    pub width: u32,
-    pub height: u32,
     block_size: u32,
     blocks_per_row: u32,
     blocks_per_col: u32,
@@ -51,19 +51,13 @@ impl AtlasManager {
         let total_blocks = (blocks_per_row * blocks_per_col) as usize;
 
         let mut blocks = Vec::with_capacity(total_blocks);
-        for row in 0..blocks_per_col {
-            for col in 0..blocks_per_row {
-                blocks.push(Block {
-                    x: col * block_size,
-                    y: row * block_size,
-                    is_free: true,
-                });
+        for _row in 0..blocks_per_col {
+            for _col in 0..blocks_per_row {
+                blocks.push(Block { is_free: true });
             }
         }
 
         Self {
-            width,
-            height,
             block_size,
             blocks_per_row,
             blocks_per_col,
@@ -90,24 +84,6 @@ impl AtlasManager {
         } else {
             None
         }
-    }
-
-    /// Legacy method - uses default weight of 400
-    #[allow(dead_code)]
-    pub fn get_glyph_info(
-        &mut self,
-        font_id: usize,
-        glyph_id: u16,
-        size_px: u32,
-    ) -> Option<GlyphInfo> {
-        self.get_glyph_info_with_weight(font_id, glyph_id, size_px, 400)
-    }
-
-    /// Legacy method for backward compatibility
-    #[allow(dead_code)]
-    pub fn get_glyph_rect(&mut self, font_id: usize, glyph_id: u16, size_px: u32) -> Option<Rect> {
-        self.get_glyph_info(font_id, glyph_id, size_px)
-            .map(|info| info.rect)
     }
 
     /// Allocate space for a glyph, evicting LRU glyphs if necessary
@@ -189,11 +165,12 @@ impl AtlasManager {
             }
 
             if let Some(info) = self.glyph_cache.remove(&key) {
-                // Free the blocks used by this glyph
-                let blocks_x = (info.rect.width + self.block_size - 1) / self.block_size;
-                let blocks_y = (info.rect.height + self.block_size - 1) / self.block_size;
-                let start_col = info.rect.x / self.block_size;
-                let start_row = info.rect.y / self.block_size;
+                // Free the blocks used by this glyph.
+                let allocated = info.allocated_rect;
+                let blocks_x = (allocated.width + self.block_size - 1) / self.block_size;
+                let blocks_y = (allocated.height + self.block_size - 1) / self.block_size;
+                let start_col = allocated.x / self.block_size;
+                let start_row = allocated.y / self.block_size;
 
                 for dy in 0..blocks_y {
                     for dx in 0..blocks_x {
@@ -226,10 +203,11 @@ impl AtlasManager {
         let key = (font_id, glyph_id, size_px, weight);
 
         // Store block -> glyph mapping for eviction
-        let blocks_x = (info.rect.width + self.block_size - 1) / self.block_size;
-        let blocks_y = (info.rect.height + self.block_size - 1) / self.block_size;
-        let start_col = info.rect.x / self.block_size;
-        let start_row = info.rect.y / self.block_size;
+        let allocated = info.allocated_rect;
+        let blocks_x = (allocated.width + self.block_size - 1) / self.block_size;
+        let blocks_y = (allocated.height + self.block_size - 1) / self.block_size;
+        let start_col = allocated.x / self.block_size;
+        let start_row = allocated.y / self.block_size;
 
         for dy in 0..blocks_y {
             for dx in 0..blocks_x {
@@ -240,20 +218,40 @@ impl AtlasManager {
 
         self.glyph_cache.insert(key, info);
     }
+}
 
-    /// Legacy method - uses default weight of 400
-    #[allow(dead_code)]
-    pub fn cache_glyph(&mut self, font_id: usize, glyph_id: u16, size_px: u32, info: GlyphInfo) {
-        self.cache_glyph_with_weight(font_id, glyph_id, size_px, 400, info);
-    }
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    /// Clear all cached data
-    pub fn clear(&mut self) {
-        for block in &mut self.blocks {
-            block.is_free = true;
-        }
-        self.glyph_cache.clear();
-        self.block_to_glyph.clear();
-        self.access_counter = 0;
+    #[test]
+    fn cached_rect_keeps_drawable_size_separate_from_allocation() {
+        let mut atlas = AtlasManager::new(128, 128);
+        let allocated = atlas.allocate(17, 23).expect("allocation");
+        assert_eq!(allocated.width, 64);
+        assert_eq!(allocated.height, 64);
+
+        let info = GlyphInfo {
+            rect: Rect {
+                x: allocated.x,
+                y: allocated.y,
+                width: 17,
+                height: 23,
+            },
+            allocated_rect: allocated,
+            x_bearing: 0.0,
+            y_bearing: 0.0,
+            last_used: 0,
+        };
+
+        atlas.cache_glyph_with_weight(0, 42, 32, 400, info);
+        let cached = atlas
+            .get_glyph_info_with_weight(0, 42, 32, 400)
+            .expect("cached glyph");
+
+        assert_eq!(cached.rect.width, 17);
+        assert_eq!(cached.rect.height, 23);
+        assert_eq!(cached.allocated_rect.width, 64);
+        assert_eq!(cached.allocated_rect.height, 64);
     }
 }

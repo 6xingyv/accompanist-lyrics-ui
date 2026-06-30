@@ -23,9 +23,13 @@ class MainActivity : ComponentActivity() {
 
         enableEdgeToEdge(
             navigationBarStyle = SystemBarStyle.auto(
-                Color.Transparent.toArgb(), Color.Transparent.toArgb()
+                Color.Transparent.toArgb(),
+                Color.Transparent.toArgb()
             ),
-            statusBarStyle = SystemBarStyle.dark(Color.White.toArgb())
+            statusBarStyle = SystemBarStyle.auto(
+                Color.Transparent.toArgb(),
+                Color.Transparent.toArgb()
+            )
         )
         // FUCKING XIAOMI
         @Suppress("DEPRECATION") if (Build.MANUFACTURER == "Xiaomi") {

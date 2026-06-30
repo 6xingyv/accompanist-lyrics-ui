@@ -4,13 +4,14 @@ import android.content.Context
 import androidx.media3.common.MediaItem
 import com.mocharealm.accompanist.lyrics.core.model.SyncedLyrics
 import com.mocharealm.accompanist.lyrics.core.model.karaoke.KaraokeLine
+import com.mocharealm.accompanist.lyrics.core.model.karaoke.copy
 import com.mocharealm.accompanist.lyrics.core.model.synced.SyncedLine
 import com.mocharealm.accompanist.lyrics.core.parser.AutoParser
 import com.mocharealm.accompanist.sample.domain.model.MusicItem
 import com.mocharealm.accompanist.sample.domain.repository.MusicRepository
 
 class MusicRepositoryImpl(private val context: Context): MusicRepository {
-    private val autoParser = AutoParser.Builder().build()
+    private val autoParser = AutoParser()
     override suspend fun getMusicItems(): List<MusicItem> {
         return listOf(
             MusicItem(

@@ -12,6 +12,7 @@ import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
+import java.awt.AlphaComposite
 import java.awt.image.BufferedImage
 
 /**
@@ -45,29 +46,6 @@ actual class SdfAtlasManager actual constructor(
     
     private var isDirty = true
     private var hasAnyData = false
-    
-    // Font loading is handled by the external NativeTextEngine
-    // These methods are kept for API compatibility but delegate to the shared engine
-    /**
-     * Loads the primary font. No-op: use [NativeTextEngine.loadFont] instead.
-     */
-    actual fun loadFont(fontBytes: ByteArray) {
-        // No-op: Font loading should be done via the shared NativeTextEngine
-    }
-    
-    /**
-     * Loads a fallback font. No-op: use [NativeTextEngine.loadFallbackFont] instead.
-     */
-    actual fun loadFallbackFont(fontBytes: ByteArray) {
-        // No-op: Font loading should be done via the shared NativeTextEngine
-    }
-    
-    /**
-     * Clears fallback fonts. No-op: use [NativeTextEngine.clearFallbackFonts] instead.
-     */
-    actual fun clearFallbackFonts() {
-        // No-op: Font loading should be done via the shared NativeTextEngine
-    }
     
     /**
      * Updates the atlas textures with pending glyph uploads from the native engine.
@@ -208,6 +186,23 @@ actual class SdfAtlasManager actual constructor(
      * @return true if the atlas has been initialized with texture data
      */
     actual fun isReady(): Boolean = hasAnyData
+
+    actual fun clear() {
+        val g = atlasImage.createGraphics()
+        g.composite = AlphaComposite.Clear
+        g.fillRect(0, 0, width, height)
+        g.dispose()
+
+        val shadowG = shadowAtlasImage.createGraphics()
+        shadowG.composite = AlphaComposite.Clear
+        shadowG.fillRect(0, 0, width, height)
+        shadowG.dispose()
+
+        atlasImageBitmap = null
+        shadowAtlasImageBitmap = null
+        isDirty = true
+        hasAnyData = false
+    }
     
     /**
      * Releases all resources associated with the atlas.

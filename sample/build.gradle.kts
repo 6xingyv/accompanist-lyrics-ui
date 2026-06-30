@@ -11,6 +11,11 @@ plugins {
     alias(libs.plugins.stability.analyzer)
 }
 
+fun getSecretProperty(key: String): String? {
+    return System.getenv(key)
+        ?: project.findProperty(key) as? String
+}
+
 kotlin {
     androidTarget {
         compilerOptions {
@@ -80,25 +85,33 @@ android {
     }
 
     signingConfigs {
-        val signingProps = Properties().apply {
-            val file = rootProject.file("signing.properties")
-            if (file.exists()) {
-                file.inputStream().use { load(it) }
+        val sFile = getSecretProperty("RELEASE_STORE_FILE")
+        val sPassword = getSecretProperty("RELEASE_STORE_PASSWORD")
+        val kAlias = getSecretProperty("RELEASE_KEY_ALIAS")
+        val kPassword = getSecretProperty("RELEASE_KEY_PASSWORD")
+
+        if (sFile != null && sPassword != null && kAlias != null && kPassword != null) {
+            create("release") {
+                val keystoreFile = rootProject.file(sFile)
+                if (keystoreFile.exists()) {
+                    storeFile = keystoreFile
+                    storePassword = sPassword
+                    keyAlias = kAlias
+                    keyPassword = kPassword
+                } else {
+                    logger.warn("Keystore file not found at: ${keystoreFile.absolutePath}")
+                }
+                enableV1Signing = true
+                enableV2Signing = true
+                enableV3Signing = true
+                enableV4Signing = true
             }
-        }
-        create("release") {
-            storeFile = signingProps["RELEASE_STORE_FILE"]?.let { rootProject.file(it as String) }
-            storePassword = signingProps["RELEASE_STORE_PASSWORD"] as String?
-            keyAlias = signingProps["RELEASE_KEY_ALIAS"] as String?
-            keyPassword = signingProps["RELEASE_KEY_PASSWORD"] as String?
-            enableV1Signing = true
-            enableV2Signing = true
         }
     }
 
     buildTypes {
         debug {
-            signingConfig = signingConfigs.getByName("release")
+            signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
         }
         release {
             isMinifyEnabled = true
@@ -107,7 +120,7 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            signingConfig = signingConfigs.getByName("release")
+            signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
         }
     }
 

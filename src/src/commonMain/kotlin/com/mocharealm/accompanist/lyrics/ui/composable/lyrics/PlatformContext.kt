@@ -7,13 +7,11 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.text.font.FontFamily
+import com.mocharealm.accompanist.lyrics.text.NativeFontSource
 import org.jetbrains.compose.resources.ExperimentalResourceApi
 import org.jetbrains.compose.resources.FontResource
-import org.jetbrains.compose.resources.LocalResourceReader
-import org.jetbrains.compose.resources.ResourceEnvironment
 import org.jetbrains.compose.resources.getFontResourceBytes
 import org.jetbrains.compose.resources.getSystemResourceEnvironment
-import org.jetbrains.compose.resources.rememberResourceEnvironment
 
 /**
  * Get platform-specific context for font loading.
@@ -28,7 +26,7 @@ expect fun getPlatformContext(): Any?
  * @param platformContext Platform context (Context on Android, null elsewhere)
  * @return Font file bytes, or null if not available
  */
-expect fun getFontBytes(fontFamily: FontFamily?, platformContext: Any?): ByteArray?
+expect fun getFontSource(fontFamily: FontFamily?, platformContext: Any?): NativeFontSource?
 
 /**
  * Get system fallback font bytes for text that cannot be rendered with the primary font.
@@ -36,7 +34,7 @@ expect fun getFontBytes(fontFamily: FontFamily?, platformContext: Any?): ByteArr
  * @param platformContext Platform context (Context on Android, null elsewhere)
  * @return List of fallback font bytes in priority order
  */
-expect fun getSystemFallbackFontBytes(platformContext: Any?): List<ByteArray>
+expect fun getSystemFallbackFontSources(platformContext: Any?): List<NativeFontSource>
 
 /**
  * Read font bytes from a Compose Multiplatform FontResource.

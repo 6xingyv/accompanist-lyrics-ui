@@ -84,24 +84,11 @@ expect class SdfAtlasManager(atlasWidth: Int, atlasHeight: Int) {
      * @return true if the atlas has been initialized with texture data
      */
     fun isReady(): Boolean
-    
+
     /**
-     * Loads the primary font for text rendering.
-     * @param fontBytes The raw bytes of the font file (TTF/OTF)
+     * Clears atlas pixels without destroying the manager.
      */
-    fun loadFont(fontBytes: ByteArray)
-    
-    /**
-     * Loads a fallback font for missing glyphs.
-     * Fallback fonts are tried in the order they are loaded.
-     * @param fontBytes The raw bytes of the font file (TTF/OTF)
-     */
-    fun loadFallbackFont(fontBytes: ByteArray)
-    
-    /**
-     * Clears all loaded fallback fonts.
-     */
-    fun clearFallbackFonts()
+    fun clear()
     
     /**
      * Releases all resources associated with the atlas.
@@ -110,10 +97,10 @@ expect class SdfAtlasManager(atlasWidth: Int, atlasHeight: Int) {
 }
 
 /**
- * Parses the JSON string from NativeTextEngine.getPendingUploads() into a list of GlyphUpload.
+ * Parses the JSON string from NativeTextEngine.getPendingUploadsJson() into a list of GlyphUpload.
  * JSON format: [{"x":0,"y":0,"width":32,"height":32,"data":"base64..."},...]
  */
-fun parsePendingUploads(json: String): List<GlyphUpload> {
+internal fun parsePendingUploads(json: String): List<GlyphUpload> {
     if (json.isEmpty() || json == "[]") return emptyList()
     
     val uploads = mutableListOf<GlyphUpload>()
@@ -204,13 +191,10 @@ suspend fun warmupAscii(
         nativeEngine.processText(asciiChars, fontSize, fontWeight)
         
         // Upload pending glyphs to atlas
-        if (nativeEngine.hasPendingUploads()) {
-            val uploadsJson = nativeEngine.getPendingUploads()
-            val uploads = parsePendingUploads(uploadsJson)
-            if (uploads.isNotEmpty()) {
-                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
-                    atlasManager.updateAtlas(uploads)
-                }
+        val uploads = nativeEngine.drainPendingUploads()
+        if (uploads.isNotEmpty()) {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                atlasManager.updateAtlas(uploads)
             }
         }
     }

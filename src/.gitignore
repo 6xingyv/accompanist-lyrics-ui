@@ -1,1 +1,3 @@
 /build
+/src/androidMain/jniLibs/*/libtext_engine.so
+/src/jvmMain/resources/natives/*/text_engine.dll

@@ -2,27 +2,16 @@ package com.mocharealm.accompanist.lyrics.ui.composable.lyrics
 
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.text.font.FontFamily
+import com.mocharealm.accompanist.lyrics.text.NativeFontSource
 
 @Composable
 actual fun getPlatformContext(): Any? {
     return null  // Apple platforms don't need context
 }
-/**
- * Get font bytes from FontFamily on Apple platforms.
- * TODO: Implement using CoreText APIs via cinterop.
- */
-actual fun getFontBytes(fontFamily: FontFamily?, platformContext: Any?): ByteArray? {
-    // TODO: Use CoreText to get font data
-    // CTFontCopyTable can be used to get font data
+actual fun getFontSource(fontFamily: FontFamily?, platformContext: Any?): NativeFontSource? {
     return null
 }
 
-/**
- * Get system fallback fonts on Apple platforms.
- * TODO: Implement using CoreText APIs via cinterop.
- */
-actual fun getSystemFallbackFontBytes(platformContext: Any?): List<ByteArray> {
-    // TODO: Use CoreText to enumerate system fonts
-    // CTFontCreateUIFontForLanguage can be used to get localized system fonts
+actual fun getSystemFallbackFontSources(platformContext: Any?): List<NativeFontSource> {
     return emptyList()
 }

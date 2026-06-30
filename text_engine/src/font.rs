@@ -15,7 +15,11 @@ const SDF_CUTOFF: f64 = 0.25;
 /// Font data storage - supports both owned bytes and memory-mapped files
 pub enum FontData {
     Owned(Vec<u8>),
-    Mapped(Mmap),
+    Mapped {
+        mmap: Mmap,
+        start: usize,
+        len: usize,
+    },
 }
 
 impl Deref for FontData {
@@ -24,7 +28,10 @@ impl Deref for FontData {
     fn deref(&self) -> &[u8] {
         match self {
             FontData::Owned(v) => v.as_slice(),
-            FontData::Mapped(m) => m.deref(),
+            FontData::Mapped { mmap, start, len } => {
+                let end = start.saturating_add(*len).min(mmap.len());
+                &mmap.deref()[*start..end]
+            }
         }
     }
 }
@@ -32,27 +39,43 @@ impl Deref for FontData {
 pub struct FontWrapper {
     pub font_data: FontData,
     pub _id: usize,
+    pub face_index: u32,
     scale_context: ScaleContext,
 }
 
 impl FontWrapper {
-    pub fn from_bytes(bytes: &[u8], id: usize) -> Option<Self> {
+    pub fn from_bytes_with_index(bytes: &[u8], id: usize, face_index: u32) -> Option<Self> {
         // Verify font is valid
-        let _ = FontRef::from_index(bytes, 0)?;
+        let _ = FontRef::from_index(bytes, face_index as usize)?;
         Some(Self {
             font_data: FontData::Owned(bytes.to_vec()),
             _id: id,
+            face_index,
             scale_context: ScaleContext::new(),
         })
     }
 
-    /// Create FontWrapper from a memory-mapped file
-    pub fn from_mmap(mmap: Mmap, id: usize) -> Option<Self> {
+    pub fn from_mmap_with_index(mmap: Mmap, id: usize, face_index: u32) -> Option<Self> {
+        Self::from_mmap_with_range(mmap, id, face_index, 0, None)
+    }
+
+    pub fn from_mmap_with_range(
+        mmap: Mmap,
+        id: usize,
+        face_index: u32,
+        start: usize,
+        len: Option<usize>,
+    ) -> Option<Self> {
+        let available_len = mmap.len().checked_sub(start)?;
+        let len = len.unwrap_or(available_len).min(available_len);
+        let data = &mmap[start..start + len];
+
         // Verify font is valid
-        let _ = FontRef::from_index(&mmap, 0)?;
+        let _ = FontRef::from_index(data, face_index as usize)?;
         Some(Self {
-            font_data: FontData::Mapped(mmap),
+            font_data: FontData::Mapped { mmap, start, len },
             _id: id,
+            face_index,
             scale_context: ScaleContext::new(),
         })
     }
@@ -70,7 +93,7 @@ impl FontWrapper {
         weight: f32,
     ) -> (Vec<u8>, u32, u32, f32, f32) {
         // Create FontRef directly to avoid borrow conflicts
-        let font = match FontRef::from_index(&self.font_data, 0) {
+        let font = match FontRef::from_index(&self.font_data, self.face_index as usize) {
             Some(f) => f,
             None => return (vec![0, 0, 0, 0], 1, 1, 0.0, 0.0),
         };

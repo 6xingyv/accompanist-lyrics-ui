@@ -1,46 +1,35 @@
 package com.mocharealm.accompanist.lyrics.text
 
-actual class NativeTextEngine {
-    actual fun init(atlasWidth: Int, atlasHeight: Int) {
-        // TODO: iOS/macOS native implementation via cinterop
-    }
-    
-    actual fun loadFont(bytes: ByteArray) {
-        // TODO: iOS/macOS native implementation via cinterop
-    }
-    
-    actual fun loadFallbackFont(bytes: ByteArray) {
-        // TODO: iOS/macOS native implementation via cinterop
-    }
-    
-    actual fun clearFallbackFonts() {
-        // TODO: iOS/macOS native implementation via cinterop
-    }
-    
-    actual fun processText(text: String, sizeFn: Float, weight: Float): String {
-        // TODO: iOS/macOS native implementation via cinterop
-        return "{}"
-    }
-    
-    actual fun hasPendingUploads(): Boolean {
-        // TODO: iOS/macOS native implementation via cinterop
+actual class NativeTextEngine actual constructor(
+    actual val atlasWidth: Int,
+    actual val atlasHeight: Int
+) {
+    private var generationCounter: Int = 0
+    actual internal val generation: Int
+        get() = generationCounter
+
+    actual fun configureFonts(config: NativeFontConfig): Boolean {
+        generationCounter++
         return false
     }
-    
-    actual fun getPendingUploads(): String {
-        // TODO: iOS/macOS native implementation via cinterop
-        return "[]"
+
+    actual fun processText(text: String, sizePx: Float, weight: Float): String {
+        return "{}"
     }
-    
+
+    actual fun hasPendingUploads(): Boolean = false
+
+    actual internal fun getPendingUploadsJson(): String = "[]"
+
     actual fun getAtlasSize(): String {
-        // TODO: iOS/macOS native implementation via cinterop
-        return """{"width":2048,"height":2048}"""
+        return """{"width":$atlasWidth,"height":$atlasHeight}"""
     }
-    
-    // Resource management
-    actual fun destroy() {
-        // TODO: iOS/macOS native implementation via cinterop
+
+    actual fun setLyricsScene(sceneJson: String): String = "{}"
+
+    actual fun getLyricsRendererMetrics(): String = "{}"
+
+    actual fun close() {
+        generationCounter++
     }
 }
-// Note: Zero-copy DirectByteBuffer API not available on Apple platforms.
-// Use processText/getPendingUploads JSON API instead.
