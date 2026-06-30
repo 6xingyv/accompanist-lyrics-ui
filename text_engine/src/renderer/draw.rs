@@ -3,10 +3,12 @@ use cosmic_text::fontdb;
 use cosmic_text::{Color as CosmicColor, FontSystem, PhysicalGlyph, SwashCache};
 use skia_safe::{
     canvas::SaveLayerRec,
-    font, gradient,
+    font,
+    font_arguments::{variation_position::Coordinate, VariationPosition},
+    gradient,
     image_filters::{self, CropRect},
-    BlurStyle, Color4f, Font, FontHinting, GlyphId, MaskFilter, Paint, Point, Rect, Shader,
-    TileMode, Typeface,
+    BlurStyle, Color4f, Font, FontArguments, FontHinting, FourByteTag, GlyphId, MaskFilter, Paint,
+    Point, Rect, Shader, TileMode, Typeface,
 };
 use std::collections::HashMap;
 use std::f32::consts::PI;
@@ -106,6 +108,7 @@ struct SkiaGlyphBatchKey {
     font_id: fontdb::ID,
     font_size_bits: u32,
     alpha_bits: u32,
+    weight: u16,
 }
 
 struct SkiaGlyphBatch {
@@ -126,6 +129,7 @@ impl SkiaGlyphBatcher {
             font_id: cache_key.font_id,
             font_size_bits: cache_key.font_size_bits,
             alpha_bits: alpha.clamp(0.0, 1.0).to_bits(),
+            weight: cache_key.font_weight.0,
         };
 
         if let Some(batch) = self.batches.iter_mut().find(|batch| batch.key == key) {
@@ -181,21 +185,31 @@ pub(super) fn draw_prepared_text_skia(
     // amount is unchanged. Inner draws then run with zero blur (the layer does it).
     let layer_blur = blur_radius > 0.1;
     if layer_blur {
-        let mut min_x = f32::INFINITY;
-        let mut max_x = f32::NEG_INFINITY;
+        // Bound the blur layer to where glyphs are ACTUALLY drawn. row.min_x/max_x
+        // describe the text *width* but not its on-screen x for right-aligned rows
+        // (plain text stores 0..line_w there while the glyphs sit at the right
+        // margin) — using them put the layer on the left and clipped the
+        // right-aligned translation to half. So take the left edge from the real
+        // glyph positions and span by the row width (max_x - min_x).
+        let mut left = f32::INFINITY;
+        let mut text_width = 0.0f32;
         for row in &text.rows {
-            min_x = min_x.min(origin_x + row.min_x);
-            max_x = max_x.max(origin_x + row.max_x);
+            text_width = text_width.max(row.max_x - row.min_x);
+            for glyph in &row.glyphs {
+                left = left.min(origin_x + glyph.physical.x as f32);
+            }
         }
-        if !min_x.is_finite() {
-            min_x = origin_x;
-            max_x = origin_x + text.rows.first().map(|row| row.width).unwrap_or(0.0);
+        if !left.is_finite() {
+            left = origin_x;
+            text_width = text.rows.first().map(|row| row.width).unwrap_or(0.0);
         }
-        let pad = blur_radius * 3.0 + 4.0;
+        // Pad covers the blur spread (~3 sigma) plus a glyph's worth of overhang
+        // past its pen origin on the right.
+        let pad = blur_radius * 3.0 + text.height.max(4.0);
         let bounds = Rect::new(
-            min_x - pad,
+            left - pad,
             origin_y - pad,
-            max_x + pad,
+            left + text_width + pad,
             origin_y + text.height + pad,
         );
         let mut layer_paint = Paint::default();
@@ -335,7 +349,7 @@ fn draw_skia_glyph_batch(
         }
     }
 
-    with_skia_font(batch.key.font_id, font_size, typefaces, |font| {
+    with_skia_font(batch.key.font_id, font_size, batch.key.weight, typefaces, |font| {
         canvas.draw_glyphs_at(
             &batch.glyphs,
             &batch.positions[..],
@@ -384,7 +398,7 @@ fn draw_skia_glyph(
 
     let glyphs: [GlyphId; 1] = [cache_key.glyph_id];
     let positions = [Point::new(x, y)];
-    with_skia_font(cache_key.font_id, font_size, typefaces, |font| {
+    with_skia_font(cache_key.font_id, font_size, cache_key.font_weight.0, typefaces, |font| {
         if (scale - 1.0).abs() > 0.001 {
             let (pivot_x, pivot_y) = scale_pivot.unwrap_or((x, y));
             canvas.save();
@@ -409,22 +423,41 @@ fn draw_skia_glyph(
 fn with_skia_font<R>(
     font_id: fontdb::ID,
     font_size: f32,
+    weight: u16,
     typefaces: &HashMap<fontdb::ID, Typeface>,
     f: impl FnOnce(&Font) -> R,
 ) -> Option<R> {
     thread_local! {
-        static FONT_CACHE: std::cell::RefCell<HashMap<(u32, u32), Font>> =
+        static FONT_CACHE: std::cell::RefCell<HashMap<(u32, u32, u16), Font>> =
             std::cell::RefCell::new(HashMap::new());
     }
     let typeface = typefaces.get(&font_id)?;
-    let key = (typeface.unique_id(), font_size.to_bits());
+    let key = (typeface.unique_id(), font_size.to_bits(), weight);
     Some(FONT_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
         let font = cache
             .entry(key)
-            .or_insert_with(|| make_skia_font(typeface.clone(), font_size));
+            .or_insert_with(|| make_skia_font(typeface_at_weight(typeface, weight), font_size));
         f(font)
     }))
+}
+
+/// cosmic-text shapes variable fonts at the requested weight by setting the
+/// `wght` axis (see its `font/mod.rs`), so the glyph *advances* are already for
+/// that weight. Skia, though, draws the typeface's default instance (usually
+/// 400) unless we set the same axis — that mismatch is the "measured bold, drawn
+/// thin" bug. Clone the typeface at the requested `wght`; a no-op for static
+/// fonts (no `wght` axis), and `clone` failures fall back to the original.
+fn typeface_at_weight(typeface: &Typeface, weight: u16) -> Typeface {
+    let coordinates = [Coordinate {
+        axis: FourByteTag::from_chars('w', 'g', 'h', 't'),
+        value: weight as f32,
+    }];
+    let arguments = FontArguments::new()
+        .set_variation_design_position(VariationPosition { coordinates: &coordinates });
+    typeface
+        .clone_with_arguments(&arguments)
+        .unwrap_or_else(|| typeface.clone())
 }
 
 fn make_skia_font(typeface: Typeface, font_size: f32) -> Font {
@@ -1194,8 +1227,24 @@ fn breathing_dots_state(
         return (eased * 0.8, eased, eased);
     }
     if current < dip_start {
-        let time_in_phase = current - enter_end;
-        let angle = (time_in_phase / 3000.0) * 2.0 * PI;
+        // Breathe at ~3000ms/cycle, but stretch the period slightly so a whole
+        // number of HALF-cycles fits the (variable-length) breathing window and
+        // it always ends at a peak (value 1.0) — exactly where the dip phase
+        // begins. With the old fixed 3000ms period the window ended at an
+        // arbitrary phase, leaving a leftover ~half oscillation that read as an
+        // "extra half cycle" before the dip. `0.9 - 0.1·cos`: starts at 0.8
+        // (matching the enter end), peaks at 1.0 every odd half-cycle.
+        let breathing_duration = (dip_start - enter_end).max(1.0);
+        let half_cycles = {
+            let n = (breathing_duration / 1500.0).round().max(1.0);
+            if (n as i64) % 2 == 0 {
+                n + 1.0
+            } else {
+                n
+            }
+        };
+        let period = 2.0 * breathing_duration / half_cycles;
+        let angle = ((current - enter_end) / period) * 2.0 * PI;
         return (0.9 - 0.1 * angle.cos(), 1.0, 1.0);
     }
     if current < still_start {

@@ -306,10 +306,13 @@ impl LyricsRenderer {
         self.last_spring_playback_ms = Some(current_time_ms);
         self.last_target_scroll_y = Some(target_scroll_y);
 
-        // While the finger is down the list must track 1:1, so snap every line's
-        // scroll to the target and skip the cascade (which is meant for
-        // auto-scroll and fling, not direct dragging).
-        if self.manual_scroll.dragging {
+        // Any user-driven scroll — finger dragging, the fling after release, or
+        // the glide back to the active line — must track the manual offset 1:1.
+        // The per-line spring cascade is for AUTO-scroll (it lags upcoming lines
+        // to make the ripple); running it on top of a fling makes the list trail
+        // the gesture and feel sluggish to respond. The manual offset already has
+        // its own fling/return physics, so just snap every row to the target.
+        if self.manual_scroll_active {
             for state in self.spring_layouts.iter_mut() {
                 state.scroll = target_scroll_y;
                 state.velocity = 0.0;

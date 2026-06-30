@@ -16,7 +16,7 @@ data class NativeLyricsRendererStyle(
     val phoneticFontSizePx: Float = translationFontSizePx,
     val phoneticLineHeightPx: Float = translationLineHeightPx,
     // Font weight (100..900) and italic per text role — independent of size.
-    val normalFontWeight: Int = 800,
+    val normalFontWeight: Int = 600,
     val normalFontItalic: Boolean = false,
     val accompanimentFontWeight: Int = 400,
     val accompanimentFontItalic: Boolean = false,

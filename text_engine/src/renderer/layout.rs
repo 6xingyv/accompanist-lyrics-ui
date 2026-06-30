@@ -98,14 +98,6 @@ impl LyricsRenderer {
             },
         };
 
-        info!(
-            "[FontTower] requested weights: normal={} accomp={} translation={} phonetic={}",
-            config.normal_attrs.weight,
-            config.accompaniment_attrs.weight,
-            config.translation_attrs.weight,
-            config.phonetic_attrs.weight
-        );
-
         let content_width = (config.width as f32 - config.padding_x * 2.0).max(1.0);
         let mut lines = Vec::with_capacity(scene.lines.len());
         let mut cursor_y = config.keep_alive;
