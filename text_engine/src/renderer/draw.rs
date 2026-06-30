@@ -60,6 +60,8 @@ pub(super) fn draw_prepared_text(
             }
 
             if effect.shadow_blur_radius > 0.1 && !glyph.is_phonetic {
+                // Keep the shadow locked to the same scale/pivot as the glyph so
+                // it tracks the awesome syllable swell instead of lagging behind.
                 draw_glyph_with_optional_blur(
                     font_system,
                     swash_cache,
@@ -71,8 +73,8 @@ pub(super) fn draw_prepared_text(
                     base_color,
                     glyph_alpha * 0.4,
                     effect.shadow_blur_radius,
-                    1.0,
-                    None,
+                    effect.scale,
+                    scale_pivot,
                     karaoke_brush,
                 );
             }
@@ -213,7 +215,16 @@ pub(super) fn draw_prepared_text_skia(
                 karaoke_shader.as_ref(),
             );
 
+            let scale_pivot = effect
+                .scale_pivot
+                .map(|(x, y)| (origin_x + x, origin_y + y));
+
             if effect.shadow_blur_radius > 0.1 && !glyph.is_phonetic {
+                // `Outer` blur keeps the glow strictly outside the glyph
+                // silhouette, so it never fills (and additively brightens) the
+                // interior of semi-transparent text; it still rides the same
+                // scale/pivot and the karaoke brush/shader, so it follows the
+                // syllable swell and the fill sweep.
                 draw_skia_glyph(
                     canvas,
                     typefaces,
@@ -223,8 +234,9 @@ pub(super) fn draw_prepared_text_skia(
                     base_color,
                     glyph_alpha * 0.4,
                     effect.shadow_blur_radius,
-                    1.0,
-                    None,
+                    BlurStyle::Outer,
+                    effect.scale,
+                    scale_pivot,
                     karaoke_brush,
                     karaoke_shader.as_ref(),
                 );
@@ -239,10 +251,9 @@ pub(super) fn draw_prepared_text_skia(
                 base_color,
                 glyph_alpha,
                 blur_radius,
+                BlurStyle::Normal,
                 effect.scale,
-                effect
-                    .scale_pivot
-                    .map(|(x, y)| (origin_x + x, origin_y + y)),
+                scale_pivot,
                 karaoke_brush,
                 karaoke_shader.as_ref(),
             );
@@ -305,6 +316,7 @@ fn draw_skia_glyph(
     base_color: (u8, u8, u8, u8),
     alpha: f32,
     blur_radius: f32,
+    blur_style: BlurStyle,
     scale: f32,
     scale_pivot: Option<(f32, f32)>,
     karaoke_brush: Option<KaraokeBrush>,
@@ -331,7 +343,7 @@ fn draw_skia_glyph(
         paint.set_color4f(skia_color(base_color, alpha * brush_alpha), None);
     }
     if blur_radius > 0.1 {
-        if let Some(mask_filter) = MaskFilter::blur(BlurStyle::Normal, blur_radius, true) {
+        if let Some(mask_filter) = MaskFilter::blur(blur_style, blur_radius, true) {
             paint.set_mask_filter(mask_filter);
         }
     }
@@ -526,6 +538,8 @@ fn draw_glyph_with_optional_blur(
             base_color,
             glyph_alpha,
             blur_radius,
+            scale,
+            scale_pivot,
             karaoke_brush,
         );
     }
@@ -651,6 +665,8 @@ fn draw_blurred_glyph_pixels(
     base_color: (u8, u8, u8, u8),
     glyph_alpha: f32,
     blur_radius: f32,
+    scale: f32,
+    scale_pivot: Option<(f32, f32)>,
     karaoke_brush: Option<KaraokeBrush>,
 ) {
     let radius = blur_radius.ceil().clamp(1.0, MAX_GLYPH_BLUR_RADIUS) as u8;
@@ -669,14 +685,28 @@ fn draw_blurred_glyph_pixels(
         return;
     }
 
+    let scaled = (scale - 1.0).abs() > 0.01;
+    let (pivot_x, pivot_y) = scale_pivot.unwrap_or_else(|| {
+        (
+            (physical.x + mask.origin_x) as f32 + mask.width as f32 * 0.5,
+            (physical.y + mask.origin_y) as f32 + mask.height as f32 * 0.5,
+        )
+    });
+    let cover = if scaled {
+        scale.ceil().max(1.0) as i32
+    } else {
+        1
+    };
+    let cover_offset = cover / 2;
+
     for local_y in 0..mask.height {
-        let dst_y = physical.y + mask.origin_y + local_y as i32;
+        let base_y = physical.y + mask.origin_y + local_y as i32;
         for local_x in 0..mask.width {
             let alpha = mask.alpha[local_y * mask.width + local_x];
             if alpha == 0 {
                 continue;
             }
-            let dst_x = physical.x + mask.origin_x + local_x as i32;
+            let base_x = physical.x + mask.origin_x + local_x as i32;
             let color = CosmicColor::rgba(
                 base_color.0,
                 base_color.1,
@@ -685,10 +715,25 @@ fn draw_blurred_glyph_pixels(
                     .round()
                     .clamp(0.0, 255.0) as u8,
             );
-            let brushed_color = karaoke_brush
-                .map(|brush| brush.sample_color(dst_x as f32, color))
-                .unwrap_or(color);
-            blend_pixel(pixels, width, height, dst_x, dst_y, brushed_color);
+            if scaled {
+                let scaled_x = (pivot_x + (base_x as f32 - pivot_x) * scale).round() as i32;
+                let scaled_y = (pivot_y + (base_y as f32 - pivot_y) * scale).round() as i32;
+                for y in 0..cover {
+                    for x in 0..cover {
+                        let dst_x = scaled_x + x - cover_offset;
+                        let dst_y = scaled_y + y - cover_offset;
+                        let brushed_color = karaoke_brush
+                            .map(|brush| brush.sample_color(dst_x as f32, color))
+                            .unwrap_or(color);
+                        blend_pixel(pixels, width, height, dst_x, dst_y, brushed_color);
+                    }
+                }
+            } else {
+                let brushed_color = karaoke_brush
+                    .map(|brush| brush.sample_color(base_x as f32, color))
+                    .unwrap_or(color);
+                blend_pixel(pixels, width, height, base_x, base_y, brushed_color);
+            }
         }
     }
 }
@@ -1196,32 +1241,47 @@ fn smooth_step(value: f32) -> f32 {
 }
 
 pub(super) fn accompaniment_visibility(start_ms: i32, end_ms: i32, current_time_ms: i32) -> f32 {
-    const ANIMATION_MS: f32 = 600.0;
+    // Reveal the accompaniment line ~1s before it starts (it expands into place
+    // ahead of time), then ease it back out after it ends. The grow/shrink is a
+    // deterministic eased height — the layout no longer springs it, so it makes
+    // room smoothly instead of vibrating.
+    const ENTER_MS: f32 = 1000.0;
+    const EXIT_LINGER_MS: f32 = 600.0;
+    const EXIT_FADE_MS: f32 = 600.0;
 
     let start = start_ms as f32;
     let end = end_ms as f32;
     let current = current_time_ms as f32;
-    let enter_start = start - ANIMATION_MS;
-    let exit_start = end + ANIMATION_MS;
-    let exit_end = exit_start + ANIMATION_MS;
+    let enter_start = start - ENTER_MS;
+    let exit_start = end + EXIT_LINGER_MS;
+    let exit_end = exit_start + EXIT_FADE_MS;
 
     if current < enter_start || current > exit_end {
         0.0
     } else if current < start {
-        smooth_step((current - enter_start) / ANIMATION_MS)
+        smooth_step((current - enter_start) / ENTER_MS)
     } else if current <= exit_start {
         1.0
     } else {
-        smooth_step((exit_end - current) / ANIMATION_MS)
+        smooth_step((exit_end - current) / EXIT_FADE_MS)
     }
 }
 
 pub(super) fn interlude_visibility(start_ms: i32, end_ms: i32, current_time_ms: i32) -> f32 {
-    if current_time_ms >= start_ms && current_time_ms < end_ms {
-        1.0
-    } else {
-        0.0
+    // The breathing-dots slot opens and closes with a short deterministic ease so
+    // it appears/leaves cleanly (no spring wobble, no hard layout pop) while the
+    // neighbouring lines slide to make/fill the room.
+    const FADE_MS: f32 = 220.0;
+
+    let start = start_ms as f32;
+    let end = end_ms as f32;
+    let current = current_time_ms as f32;
+    if current < start || current >= end {
+        return 0.0;
     }
+    let enter = smooth_step((current - start) / FADE_MS);
+    let exit = smooth_step((end - current) / FADE_MS);
+    enter.min(exit)
 }
 
 fn cubic_bezier_easing(fraction: f32, x1: f32, y1: f32, x2: f32, y2: f32) -> f32 {

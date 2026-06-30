@@ -41,7 +41,7 @@ const DEFAULT_ACCOMPANIMENT_LINE_HEIGHT: f32 = 26.0;
 const DEFAULT_TRANSLATION_FONT_SIZE: f32 = 16.0;
 const DEFAULT_TRANSLATION_LINE_HEIGHT: f32 = 21.0;
 const FADE_WIDTH: f32 = 100.0;
-const ROW_GAP: f32 = 2.0;
+const ROW_GAP: f32 = 32.0;
 const INTERLUDE_THRESHOLD_MS: i32 = 5000;
 const DEFAULT_DOTS_NUMBER: u32 = 3;
 const DEFAULT_DOTS_SIZE: f32 = 16.0;
@@ -56,6 +56,11 @@ const TOP_FADE_PX: f32 = 20.0;
 #[cfg(not(target_os = "android"))]
 const BOTTOM_FADE_PX: f32 = 100.0;
 const KARAOKE_INACTIVE_ALPHA: f32 = 0.2;
+// Rows whose screen position is within this many line-heights of the focus
+// anchor stay fully sharp, so the current cluster (main line plus the nested
+// accompaniment a line or two below it — further still when the main carries a
+// translation) is never blurred. Blur ramps up beyond this band.
+const BLUR_SHARP_RADIUS_LINES: f32 = 2.5;
 #[cfg(not(target_os = "android"))]
 const MAX_GLYPH_BLUR_RADIUS: f32 = 36.0;
 const SIMPLE_LIFT_PX: f32 = 4.0;
@@ -65,13 +70,30 @@ const AWESOME_FAST_CHAR_THRESHOLD_MS: f32 = 200.0;
 const AWESOME_MIN_WORD_DURATION_MS: i32 = 1000;
 const AWESOME_DURATION_RATIO: f32 = 0.8;
 const AWESOME_MAX_SHADOW_BLUR_PX: f32 = 10.0;
-const LINE_LAYOUT_SPRING_STIFFNESS: f32 = 420.0;
-const LINE_LAYOUT_SPRING_DAMPING: f32 = 30.0;
-const LINE_LAYOUT_HEIGHT_STIFFNESS: f32 = 520.0;
-const LINE_LAYOUT_HEIGHT_DAMPING: f32 = 34.0;
-const LINE_LAYOUT_CHAIN_COUPLING: f32 = 0.18;
+// Base spring for the leading (focused) row. Low stiffness = a very soft, slow
+// spring; damping gives a ratio of ~0.74 so it does ONE gentle stretch-and-
+// settle and the energy dies quickly (no repeated wobbling). Far rows scale
+// stiffness by `response` and damping by sqrt(response) so they stay at the same
+// damping ratio while lagging behind — the springy "one after another" cascade.
+const LINE_LAYOUT_SPRING_STIFFNESS: f32 = 100.0;
+const LINE_LAYOUT_SPRING_DAMPING: f32 = 12.0;
+// Each line is modeled as a mass connected by a spring to its neighbours so the
+// list behaves like a chain during auto-scroll: the focused line leads and the
+// rest follow one after another. A larger coupling makes the wave travel
+// further along the list.
+const LINE_LAYOUT_CHAIN_COUPLING: f32 = 0.65;
+// How quickly the spring softens as lines get further from the focused row.
+// Softer far-away rows lag behind the leading row, which is what produces the
+// visible "spring up and settle" cascade. `MIN_RESPONSE` clamps how soft they
+// can get so distant rows still eventually catch up.
+const LINE_LAYOUT_DISTANCE_FALLOFF: f32 = 0.25;
+const LINE_LAYOUT_MIN_RESPONSE: f32 = 0.35;
 const LINE_LAYOUT_MAX_DT: f32 = 1.0 / 30.0;
-const LINE_LAYOUT_SEEK_RESET_MS: i32 = 900;
+// A tap-to-seek lands on a visible line, so it only ever needs to scroll about
+// one viewport — let those animate with the spring. Only snap instantly when a
+// seek would jump further than this many viewports (e.g. scrubbing the timeline
+// to a far-away section, or loading a new song).
+const LINE_LAYOUT_SEEK_RESET_DISTANCE_FACTOR: f32 = 1.6;
 const LINE_LAYOUT_EPSILON: f32 = 0.08;
 const MANUAL_SCROLL_HOLD_MS: u64 = 1800;
 const MANUAL_SCROLL_MAX_FLING_VELOCITY: f32 = 14000.0;
@@ -82,6 +104,15 @@ const MANUAL_SCROLL_RETURN_DAMPING: f32 = 32.0;
 const MANUAL_SCROLL_OVERSCROLL_STIFFNESS: f32 = 520.0;
 const MANUAL_SCROLL_OVERSCROLL_DAMPING: f32 = 38.0;
 const MANUAL_SCROLL_RUBBER_BAND_LIMIT: f32 = 180.0;
+// Manual scrolling releases the depth-of-field blur so the user can read while
+// browsing. The blur stays released until this long after the *last touch input*
+// (grab/drag/release), then eases back in — independent of the fling/return
+// physics, so the automatic glide-back to the active line never re-toggles it.
+// The fade-out is quicker than the fade-in so grabbing the list feels responsive
+// while the blur eases back gently once you stop.
+const MANUAL_SCROLL_BLUR_RESTORE_MS: u64 = 2500;
+const MANUAL_SCROLL_BLUR_FADE_OUT_RATE: f32 = 16.0;
+const MANUAL_SCROLL_BLUR_FADE_IN_RATE: f32 = 6.0;
 
 #[derive(Debug, Deserialize)]
 pub struct LyricsScene {
@@ -194,13 +225,17 @@ pub struct LyricsRenderer {
     font_selection_cache: HashMap<String, Option<String>>,
     last_render_debug_time_ms: Option<i32>,
     spring_layouts: Vec<SpringLineState>,
-    spring_scroll: Option<SpringScalarState>,
     last_spring_frame_at: Option<Instant>,
     last_spring_playback_ms: Option<i32>,
+    last_target_scroll_y: Option<f32>,
     layout_animation_active: bool,
     manual_scroll: ManualScrollState,
     last_manual_scroll_frame_at: Option<Instant>,
     manual_scroll_active: bool,
+    /// 0.0 = depth-of-field blur fully applied, 1.0 = blur fully released.
+    /// Ramps toward 1.0 while the user manually scrolls so everything is sharp,
+    /// and back toward 0.0 once the list settles at the auto position again.
+    manual_scroll_blur_release: f32,
     #[cfg(not(target_os = "android"))]
     blurred_glyph_cache: HashMap<BlurredGlyphCacheKey, BlurredGlyphMask>,
     locale: String,
@@ -241,16 +276,15 @@ struct FrameGlyphStats {
     missing_typeface_glyphs: usize,
 }
 
+/// Per-line scroll spring. Only the *scroll* is sprung; each line's content-space
+/// top and height stay deterministic, so an interlude/accompaniment growing or
+/// shrinking moves the layout along a smooth eased curve instead of being sprung
+/// (which overshot and made the whole list vibrate). The cascade lives here: rows
+/// chase the same scroll target but soften/lag with distance and couple to
+/// neighbours.
 #[derive(Debug, Clone, Copy)]
 struct SpringLineState {
-    layout: DynamicLineLayout,
-    velocity_top: f32,
-    velocity_height: f32,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct SpringScalarState {
-    value: f32,
+    scroll: f32,
     velocity: f32,
 }
 
@@ -260,6 +294,10 @@ struct ManualScrollState {
     velocity: f32,
     dragging: bool,
     hold_until: Option<Instant>,
+    /// Blur stays released until this instant. Set purely from real touch input
+    /// (grab / drag / release / cancel) and never touched by the fling/return
+    /// physics, so the automatic glide-back can't re-trigger the blur.
+    blur_engaged_until: Option<Instant>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -611,13 +649,14 @@ impl LyricsRenderer {
             font_selection_cache: HashMap::new(),
             last_render_debug_time_ms: None,
             spring_layouts: Vec::new(),
-            spring_scroll: None,
             last_spring_frame_at: None,
             last_spring_playback_ms: None,
+            last_target_scroll_y: None,
             layout_animation_active: false,
             manual_scroll: ManualScrollState::default(),
             last_manual_scroll_frame_at: None,
             manual_scroll_active: false,
+            manual_scroll_blur_release: 0.0,
             #[cfg(not(target_os = "android"))]
             blurred_glyph_cache: HashMap::new(),
             locale: "en-US".to_string(),
@@ -797,9 +836,9 @@ impl LyricsRenderer {
 
     fn reset_layout_animation_state(&mut self) {
         self.spring_layouts.clear();
-        self.spring_scroll = None;
         self.last_spring_frame_at = None;
         self.last_spring_playback_ms = None;
+        self.last_target_scroll_y = None;
         self.layout_animation_active = false;
     }
 
@@ -807,14 +846,22 @@ impl LyricsRenderer {
         self.manual_scroll = ManualScrollState::default();
         self.last_manual_scroll_frame_at = None;
         self.manual_scroll_active = false;
+        self.manual_scroll_blur_release = 0.0;
+    }
+
+    fn engage_manual_scroll_blur(&mut self, now: Instant) {
+        self.manual_scroll.blur_engaged_until =
+            Some(now + Duration::from_millis(MANUAL_SCROLL_BLUR_RESTORE_MS));
     }
 
     pub fn begin_manual_scroll(&mut self) {
+        let now = Instant::now();
         self.manual_scroll.dragging = true;
         self.manual_scroll.velocity = 0.0;
         self.manual_scroll.hold_until = None;
         self.manual_scroll_active = true;
-        self.last_manual_scroll_frame_at = Some(Instant::now());
+        self.last_manual_scroll_frame_at = Some(now);
+        self.engage_manual_scroll_blur(now);
     }
 
     pub fn scroll_manual_by(&mut self, delta_y: f32) {
@@ -826,9 +873,11 @@ impl LyricsRenderer {
         self.manual_scroll.hold_until = None;
         self.manual_scroll.dragging = true;
         self.manual_scroll_active = true;
+        self.engage_manual_scroll_blur(Instant::now());
     }
 
     pub fn end_manual_scroll(&mut self, velocity_y: f32) {
+        let now = Instant::now();
         self.manual_scroll.dragging = false;
         self.manual_scroll.velocity = velocity_y.clamp(
             -MANUAL_SCROLL_MAX_FLING_VELOCITY,
@@ -837,20 +886,23 @@ impl LyricsRenderer {
         if self.manual_scroll.velocity.abs() <= MANUAL_SCROLL_VELOCITY_EPSILON {
             self.manual_scroll.velocity = 0.0;
             self.manual_scroll.hold_until =
-                Some(Instant::now() + Duration::from_millis(MANUAL_SCROLL_HOLD_MS));
+                Some(now + Duration::from_millis(MANUAL_SCROLL_HOLD_MS));
         } else {
             self.manual_scroll.hold_until = None;
         }
         self.manual_scroll_active = true;
-        self.last_manual_scroll_frame_at = Some(Instant::now());
+        self.last_manual_scroll_frame_at = Some(now);
+        self.engage_manual_scroll_blur(now);
     }
 
     pub fn cancel_manual_scroll(&mut self) {
+        let now = Instant::now();
         self.manual_scroll.dragging = false;
         self.manual_scroll.velocity = 0.0;
         self.manual_scroll.hold_until =
-            Some(Instant::now() + Duration::from_millis(MANUAL_SCROLL_HOLD_MS / 2));
+            Some(now + Duration::from_millis(MANUAL_SCROLL_HOLD_MS / 2));
         self.manual_scroll_active = self.manual_scroll.offset.abs() > LINE_LAYOUT_EPSILON;
+        self.engage_manual_scroll_blur(now);
     }
 
     fn update_manual_scroll_target(&mut self, auto_scroll_y: f32, max_scroll_y: f32) -> f32 {
@@ -918,10 +970,43 @@ impl LyricsRenderer {
             }
         }
 
-        self.manual_scroll_active = active
+        let mut manual_scroll_active = active
             || self.manual_scroll.dragging
             || self.manual_scroll.offset.abs() > LINE_LAYOUT_EPSILON
             || self.manual_scroll.velocity.abs() > MANUAL_SCROLL_VELOCITY_EPSILON;
+
+        // Depth-of-field blur is released while the finger is down and for a
+        // fixed window after the last touch input, then eases back in. This is a
+        // pure, monotonic timer driven only by touch events — the fling/return
+        // physics never touch `blur_engaged_until`, so the automatic glide-back
+        // to the active line (or normal playback auto-scroll) can never flip the
+        // blur off/on again. Keep rendering while the blur is engaged or fading
+        // so the ease-in still runs even when playback is paused.
+        let blur_engaged = self.manual_scroll.dragging
+            || self
+                .manual_scroll
+                .blur_engaged_until
+                .is_some_and(|until| now < until);
+        let blur_target = if blur_engaged { 1.0 } else { 0.0 };
+        if blur_engaged {
+            manual_scroll_active = true;
+        }
+        if (self.manual_scroll_blur_release - blur_target).abs() > 0.001 {
+            let rate = if blur_target > self.manual_scroll_blur_release {
+                MANUAL_SCROLL_BLUR_FADE_OUT_RATE
+            } else {
+                MANUAL_SCROLL_BLUR_FADE_IN_RATE
+            };
+            let factor = 1.0 - (-rate * dt).exp();
+            self.manual_scroll_blur_release += (blur_target - self.manual_scroll_blur_release) * factor;
+            if (self.manual_scroll_blur_release - blur_target).abs() <= 0.001 {
+                self.manual_scroll_blur_release = blur_target;
+            } else {
+                manual_scroll_active = true;
+            }
+        }
+
+        self.manual_scroll_active = manual_scroll_active;
         self.manual_scroll_projected_scroll(auto_scroll_y, max_scroll_y)
     }
 
@@ -930,41 +1015,68 @@ impl LyricsRenderer {
         rubber_band_scroll(raw_scroll_y, max_scroll_y)
     }
 
+    /// Advances the per-line scroll springs one frame and returns each line's
+    /// on-screen layout. The content-space top and height come straight from
+    /// `target_layouts` (deterministic, already eased), and only the *scroll*
+    /// offset is sprung per line — so a row's screen top is
+    /// `content_top - scroll[i]`.
+    ///
+    /// Splitting scroll out from the layout is what stops interlude/accompaniment
+    /// resizes from vibrating: a height change moves the deterministic content
+    /// tops smoothly without perturbing any spring. Meanwhile the focused row's
+    /// scroll spring is stiff and far rows soften/lag and couple to neighbours,
+    /// so a focus change still ripples through the list like a spring chain.
     fn animate_frame_layout(
         &mut self,
         current_time_ms: i32,
         target_layouts: &[DynamicLineLayout],
         target_scroll_y: f32,
-        focus_start: usize,
+        viewport_height: f32,
         focus_end: usize,
-    ) -> (Vec<DynamicLineLayout>, f32) {
+    ) -> Vec<DynamicLineLayout> {
         let now = Instant::now();
-        let playback_delta = self
-            .last_spring_playback_ms
-            .map(|last| current_time_ms - last);
+        let project = |scroll_of: &dyn Fn(usize) -> f32| -> Vec<DynamicLineLayout> {
+            target_layouts
+                .iter()
+                .enumerate()
+                .map(|(index, layout)| DynamicLineLayout {
+                    top: layout.top - scroll_of(index),
+                    ..*layout
+                })
+                .collect()
+        };
+
+        // Snap (rather than animate) only when the geometry can't be carried
+        // over: the scene changed, this is the first frame, or the scroll has to
+        // jump further than a tap could ever require. A tap-to-seek lands on a
+        // visible row, so its scroll delta stays under the threshold and springs
+        // the list to the new position — giving the seek its scroll animation.
+        let seek_reset_distance =
+            (viewport_height * LINE_LAYOUT_SEEK_RESET_DISTANCE_FACTOR).max(1.0);
+        let scroll_jump = self
+            .last_target_scroll_y
+            .map(|last| (target_scroll_y - last).abs());
+        // Don't snap while a manual scroll/fling/return is in flight — that
+        // motion is user-driven and always smooth, and a large spring-back could
+        // otherwise trip the distance threshold and make the list jump.
         let should_reset = target_layouts.len() != self.spring_layouts.len()
-            || self.spring_scroll.is_none()
-            || playback_delta
-                .is_none_or(|delta| delta < -120 || delta.abs() > LINE_LAYOUT_SEEK_RESET_MS);
+            || self.last_spring_playback_ms.is_none()
+            || (!self.manual_scroll_active
+                && scroll_jump.is_none_or(|jump| jump > seek_reset_distance));
 
         if should_reset {
-            self.spring_layouts = target_layouts
-                .iter()
-                .copied()
-                .map(|layout| SpringLineState {
-                    layout,
-                    velocity_top: 0.0,
-                    velocity_height: 0.0,
-                })
-                .collect();
-            self.spring_scroll = Some(SpringScalarState {
-                value: target_scroll_y,
-                velocity: 0.0,
-            });
+            self.spring_layouts = vec![
+                SpringLineState {
+                    scroll: target_scroll_y,
+                    velocity: 0.0,
+                };
+                target_layouts.len()
+            ];
             self.last_spring_frame_at = Some(now);
             self.last_spring_playback_ms = Some(current_time_ms);
+            self.last_target_scroll_y = Some(target_scroll_y);
             self.layout_animation_active = false;
-            return (target_layouts.to_vec(), target_scroll_y);
+            return project(&|_| target_scroll_y);
         }
 
         let dt = self
@@ -974,81 +1086,68 @@ impl LyricsRenderer {
             .clamp(0.001, LINE_LAYOUT_MAX_DT);
         self.last_spring_frame_at = Some(now);
         self.last_spring_playback_ms = Some(current_time_ms);
+        self.last_target_scroll_y = Some(target_scroll_y);
 
-        let mut chained_top_targets = target_layouts
-            .iter()
-            .map(|layout| layout.top)
-            .collect::<Vec<_>>();
-        for index in 1..chained_top_targets.len() {
-            let previous_delta =
-                self.spring_layouts[index - 1].layout.top - target_layouts[index - 1].top;
-            chained_top_targets[index] += previous_delta * LINE_LAYOUT_CHAIN_COUPLING;
+        // While the finger is down the list must track 1:1, so snap every line's
+        // scroll to the target and skip the cascade (which is meant for
+        // auto-scroll and fling, not direct dragging).
+        if self.manual_scroll.dragging {
+            for state in self.spring_layouts.iter_mut() {
+                state.scroll = target_scroll_y;
+                state.velocity = 0.0;
+            }
+            self.layout_animation_active = false;
+            return project(&|_| target_scroll_y);
         }
-        for index in (0..chained_top_targets.len().saturating_sub(1)).rev() {
-            let next_delta =
-                self.spring_layouts[index + 1].layout.top - target_layouts[index + 1].top;
-            chained_top_targets[index] += next_delta * LINE_LAYOUT_CHAIN_COUPLING * 0.45;
+
+        // Everything from the focused row upward moves as one rigid block: those
+        // rows share the full-stiffness spring and take no coupling, so they just
+        // shove up together to clear room for the focused row. The spring chain —
+        // softening/lagging with distance and coupled to the row above — only runs
+        // *below* the focus, so the upcoming lines stretch and settle one after
+        // another while the already-sung lines above leave cleanly as a slab.
+        let count = self.spring_layouts.len();
+        let anchor_hi = focus_end.min(count.saturating_sub(1));
+        let mut chained_targets = vec![target_scroll_y; count];
+        for index in (anchor_hi + 1)..count {
+            let previous_delta = self.spring_layouts[index - 1].scroll - target_scroll_y;
+            chained_targets[index] += previous_delta * LINE_LAYOUT_CHAIN_COUPLING;
         }
 
         let mut active = false;
         for (index, state) in self.spring_layouts.iter_mut().enumerate() {
-            let Some(target) = target_layouts.get(index).copied() else {
-                continue;
-            };
-            let distance = if index < focus_start {
-                focus_start - index
-            } else if index > focus_end {
-                index - focus_end
+            // Focus row and everything above it = rigid block (response 1.0); only
+            // rows below the focus soften with distance to form the cascade.
+            let response = if index > focus_end {
+                (1.0 - (index - focus_end) as f32 * LINE_LAYOUT_DISTANCE_FALLOFF)
+                    .clamp(LINE_LAYOUT_MIN_RESPONSE, 1.0)
             } else {
-                0
+                1.0
             };
-            let response = (1.0 - distance as f32 * 0.035).clamp(0.72, 1.0);
-            let top_target = chained_top_targets[index];
-            let height_target = target.height;
-
+            // Far rows soften (lower stiffness) so they lag and create the
+            // cascade, but their damping is scaled by sqrt(response) instead of
+            // response. That keeps the damping *ratio* constant across every row
+            // (ratio scales with damping / sqrt(stiffness)), so distant rows do a
+            // single soft stretch-and-settle like the leading row instead of
+            // dropping underdamped and wobbling back and forth.
+            let damping_response = response.powf(0.3);
             active |= spring_step(
-                &mut state.layout.top,
-                &mut state.velocity_top,
-                top_target,
+                &mut state.scroll,
+                &mut state.velocity,
+                chained_targets[index],
                 LINE_LAYOUT_SPRING_STIFFNESS * response,
-                LINE_LAYOUT_SPRING_DAMPING * response,
-                dt,
-            );
-            active |= spring_step(
-                &mut state.layout.height,
-                &mut state.velocity_height,
-                height_target,
-                LINE_LAYOUT_HEIGHT_STIFFNESS * response,
-                LINE_LAYOUT_HEIGHT_DAMPING * response,
-                dt,
-            );
-            state.layout.text_visibility = target.text_visibility;
-            state.layout.interlude_visibility = target.interlude_visibility;
-        }
-
-        if let Some(scroll) = self.spring_scroll.as_mut() {
-            active |= spring_step(
-                &mut scroll.value,
-                &mut scroll.velocity,
-                target_scroll_y,
-                LINE_LAYOUT_SPRING_STIFFNESS,
-                LINE_LAYOUT_SPRING_DAMPING,
+                LINE_LAYOUT_SPRING_DAMPING * damping_response,
                 dt,
             );
         }
 
-        let scroll_y = self
-            .spring_scroll
-            .map(|state| state.value)
-            .unwrap_or(target_scroll_y);
         self.layout_animation_active = active;
-        (
-            self.spring_layouts
-                .iter()
-                .map(|state| state.layout)
-                .collect(),
-            scroll_y,
-        )
+        let scrolls = self
+            .spring_layouts
+            .iter()
+            .map(|state| state.scroll)
+            .collect::<Vec<_>>();
+        project(&|index| scrolls[index])
     }
 
     pub fn set_scene_json(&mut self, json: &str) -> Result<RendererMetrics, String> {
@@ -1115,8 +1214,6 @@ impl LyricsRenderer {
         let visible_bottom = scroll_y + height as f32 + scene.config.keep_alive;
         let base_color = rgba_from_argb(scene.config.text_color);
 
-        let (focus_start, focus_end) = scene.focus_index_range(current_time_ms);
-
         for (line_index, line) in scene.lines.iter().enumerate() {
             let Some(dynamic_layout) = dynamic_layouts.get(line_index) else {
                 continue;
@@ -1139,7 +1236,7 @@ impl LyricsRenderer {
                 .unwrap_or(0.0);
             let distance_alpha =
                 scene.focus_alpha(line, current_time_ms) * dynamic_layout.text_visibility;
-            let blur_radius = scene.blur_radius_for_line(line_index, focus_start, focus_end);
+            let blur_radius = scene.blur_radius_for_screen_y(y, scene.config.keep_alive);
 
             if let Some(interlude) = &line.interlude {
                 if dynamic_layout.interlude_visibility > 0.001 {
@@ -1262,7 +1359,6 @@ impl LyricsRenderer {
             height,
             keep_alive,
             base_color,
-            focus_start,
             focus_end,
         ) = {
             let Some(scene) = &self.scene else {
@@ -1273,7 +1369,7 @@ impl LyricsRenderer {
             let auto_scroll_y =
                 scene.scroll_y_for_time_with_layouts(current_time_ms, &target_layouts);
             let max_scroll_y = scene.max_scroll_for_layouts(&target_layouts);
-            let (focus_start, focus_end) = scene.focus_index_range(current_time_ms);
+            let (_focus_start, focus_end) = scene.focus_index_range(current_time_ms);
             (
                 target_layouts,
                 auto_scroll_y,
@@ -1281,27 +1377,31 @@ impl LyricsRenderer {
                 scene.config.height.max(DEFAULT_HEIGHT),
                 scene.config.keep_alive,
                 rgba_from_argb(scene.config.text_color),
-                focus_start,
                 focus_end,
             )
         };
 
         let target_scroll_y = self.update_manual_scroll_target(auto_scroll_y, max_scroll_y);
-        let (dynamic_layouts, scroll_y) = self.animate_frame_layout(
+        let dynamic_layouts = self.animate_frame_layout(
             current_time_ms,
             &target_layouts,
             target_scroll_y,
-            focus_start,
+            height as f32,
             focus_end,
         );
+        // While the user manually scrolls the depth-of-field blur is eased away
+        // so the lyrics stay sharp for reading.
+        let blur_scale = (1.0 - self.manual_scroll_blur_release).clamp(0.0, 1.0);
         let Some(scene) = &self.scene else {
             return -3;
         };
 
         let mut frame_stats = FrameGlyphStats::default();
         let mut visible_font_ids = Vec::new();
-        let visible_top = scroll_y - keep_alive;
-        let visible_bottom = scroll_y + height as f32 + keep_alive;
+        // `dynamic_layouts` are already in screen space (scroll folded in), so the
+        // visible window is simply the surface plus the keep-alive margin.
+        let visible_top = -keep_alive;
+        let visible_bottom = height as f32 + keep_alive;
 
         for (line_index, line) in scene.lines.iter().enumerate() {
             let Some(dynamic_layout) = dynamic_layouts.get(line_index) else {
@@ -1317,7 +1417,7 @@ impl LyricsRenderer {
                 continue;
             }
 
-            let y = line_top - scroll_y;
+            let y = line_top;
             let text_y_offset = line
                 .interlude
                 .as_ref()
@@ -1325,7 +1425,7 @@ impl LyricsRenderer {
                 .unwrap_or(0.0);
             let distance_alpha =
                 scene.focus_alpha(line, current_time_ms) * dynamic_layout.text_visibility;
-            let blur_radius = scene.blur_radius_for_line(line_index, focus_start, focus_end);
+            let blur_radius = scene.blur_radius_for_screen_y(y, keep_alive) * blur_scale;
 
             if let Some(interlude) = &line.interlude {
                 if dynamic_layout.interlude_visibility > 0.001 {
@@ -2746,11 +2846,19 @@ fn rubber_band_distance(distance: f32) -> f32 {
 
 impl PreparedScene {
     fn max_scroll_for_layouts(&self, layouts: &[DynamicLineLayout]) -> f32 {
-        let content_height = layouts
-            .last()
-            .map(|layout| layout.top + layout.height + self.config.keep_alive)
-            .unwrap_or(self.config.keep_alive);
-        (content_height - self.config.height as f32).max(0.0)
+        let Some(last) = layouts.last() else {
+            return 0.0;
+        };
+        // Enough to reveal the bottom of the content (its trailing keep-alive
+        // pad) for short screens / tall final rows.
+        let content_bottom_scroll =
+            last.top + last.height + self.config.keep_alive - self.config.height as f32;
+        // ...but also at least enough for the final row to scroll all the way up
+        // to the focus anchor (keep_alive from the top), leaving the rest of the
+        // screen empty below it. Without this the last line stalls partway down
+        // the screen and can never reach the top.
+        let last_line_anchor_scroll = last.top - self.config.keep_alive;
+        content_bottom_scroll.max(last_line_anchor_scroll).max(0.0)
     }
 
     fn scroll_y_for_time_with_layouts(
@@ -2877,19 +2985,25 @@ impl PreparedScene {
         }
     }
 
-    fn blur_radius_for_line(&self, line_index: usize, focus_start: usize, focus_end: usize) -> f32 {
+    /// Depth-of-field blur keyed off the row's on-screen distance from the focus
+    /// anchor (in line-height units) rather than its focus *index*. Because the
+    /// screen position moves continuously as the list scrolls, the blur eases in
+    /// and out smoothly and does not snap when the focused row changes.
+    ///
+    /// A sharp band of `BLUR_SHARP_RADIUS_LINES` around the anchor stays fully
+    /// crisp so the *whole* current cluster — the main line and the accompaniment
+    /// sitting a line or two below it — is in focus; blur only ramps up past that
+    /// band. (A nested accompaniment is the current content but never sits exactly
+    /// at the anchor, so without this band it would read as blurred.)
+    fn blur_radius_for_screen_y(&self, screen_top: f32, anchor_y: f32) -> f32 {
         if !self.config.use_blur_effect || self.config.blur_delta <= 0.0 {
             return 0.0;
         }
 
-        let distance = if line_index < focus_start {
-            focus_start - line_index
-        } else if line_index > focus_end {
-            line_index - focus_end
-        } else {
-            0
-        };
-        distance.min(10) as f32 * self.config.blur_delta
+        let unit = self.config.normal_line_height.max(1.0);
+        let lines_away = (screen_top - anchor_y).abs() / unit;
+        let blur_lines = (lines_away - BLUR_SHARP_RADIUS_LINES).clamp(0.0, 10.0);
+        blur_lines * self.config.blur_delta
     }
 }
 
@@ -3044,7 +3158,7 @@ mod tests {
             content_height: 0.0,
         };
 
-        assert_eq!(scene.dynamic_line_layouts(1_400)[1].height, 0.0);
+        assert_eq!(scene.dynamic_line_layouts(1_050)[1].height, 0.0);
 
         let entering = scene.dynamic_line_layouts(1_800)[1];
         assert!(entering.height > 0.0 && entering.height < 30.0);

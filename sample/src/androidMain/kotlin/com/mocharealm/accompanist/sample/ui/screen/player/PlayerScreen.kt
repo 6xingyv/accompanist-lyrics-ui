@@ -590,16 +590,31 @@ fun PlayerLyrics(
 ) {
     if (lyrics == null) return
 
+    // Tap a line to seek to its start; long-press a karaoke line to share it.
+    // The hit test returns the index of the tapped line in `lyrics.lines`.
+    fun RustSkiaLyricsView.bindLineInteractions() {
+        setLineInteractionCallbacks(
+            onLineClicked = { index ->
+                lyrics.lines.getOrNull(index)?.let { onSeekTo(it.start) }
+            },
+            onLinePressed = { index ->
+                (lyrics.lines.getOrNull(index) as? KaraokeLine)?.let(onShare)
+            }
+        )
+    }
+
     AndroidView(
         factory = { context ->
             RustSkiaLyricsView(context).apply {
                 setLyrics(lyrics)
                 setCurrentPosition(currentPosition())
+                bindLineInteractions()
             }
         },
         update = { view ->
             view.setLyrics(lyrics)
             view.setCurrentPosition(currentPosition())
+            view.bindLineInteractions()
         },
         modifier = modifier
             .fillMaxSize()
