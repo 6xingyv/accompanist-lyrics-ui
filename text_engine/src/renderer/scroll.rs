@@ -33,6 +33,7 @@ impl LyricsRenderer {
         self.last_spring_playback_ms = None;
         self.last_seek_detection_playback_ms = None;
         self.last_target_scroll_y = None;
+        self.pending_lyric_click_seek = None;
         self.layout_animation_active = false;
         self.seek_glide_active = false;
     }
@@ -93,21 +94,49 @@ impl LyricsRenderer {
         self.engage_manual_scroll_blur(now);
     }
 
-    /// Drops a lingering manual-scroll offset when a seek lands (a discontinuous
-    /// playback-time jump), but never while a drag/fling is still in charge. This
-    /// intentionally uses a render-frame playback timestamp separate from the
-    /// spring timestamp: manual scrolling freezes the spring state, but seek
-    /// detection still has to advance every frame so normal playback during a
-    /// fling is not mistaken for a seek the moment the user releases.
-    pub(super) fn clear_manual_scroll_on_seek(&mut self, current_time_ms: i32) {
+    /// Prepares state for a discontinuous playback-time jump. A pending lyric
+    /// click means the user tapped a line that was already on screen, possibly
+    /// after manually scrolling far away from the current auto position. In that
+    /// case the spring must start from the visible list scroll recorded during
+    /// hit-test, not from the old auto target; otherwise the distance reset logic
+    /// misclassifies the tap as an off-range scrub and snaps.
+    pub(super) fn prepare_seek_transition(
+        &mut self,
+        current_time_ms: i32,
+        target_layout_count: usize,
+    ) {
+        let now = Instant::now();
+        if self
+            .pending_lyric_click_seek
+            .is_some_and(|pending| now.duration_since(pending.recorded_at)
+                > Duration::from_millis(LYRIC_CLICK_SEEK_PENDING_MS))
+        {
+            self.pending_lyric_click_seek = None;
+        }
+
         let seek_landed = self.last_seek_detection_playback_ms.is_some_and(|last| {
             let delta = current_time_ms - last;
             delta < -LINE_LAYOUT_SEEK_BACKWARD_MS || delta > LINE_LAYOUT_SEEK_FORWARD_MS
         });
         self.last_seek_detection_playback_ms = Some(current_time_ms);
-        let manual_scroll_in_flight =
-            self.manual_scroll.dragging || self.manual_scroll.return_to_auto_requested;
-        if seek_landed && !manual_scroll_in_flight {
+
+        if !seek_landed || self.manual_scroll.dragging {
+            return;
+        }
+
+        if let Some(pending) = self.pending_lyric_click_seek.take() {
+            if self.pending_click_matches_time(pending, current_time_ms) {
+                self.seed_lyric_click_seek(
+                    pending.visible_scroll_y,
+                    current_time_ms,
+                    target_layout_count,
+                );
+                self.reset_manual_scroll();
+                return;
+            }
+        }
+
+        if !self.manual_scroll.return_to_auto_requested {
             self.reset_manual_scroll();
         }
     }
@@ -285,6 +314,57 @@ impl LyricsRenderer {
         true
     }
 
+    fn seed_lyric_click_seek(
+        &mut self,
+        start_scroll_y: f32,
+        current_time_ms: i32,
+        target_layout_count: usize,
+    ) -> bool {
+        if target_layout_count == 0 {
+            return false;
+        }
+
+        if self.spring_layouts.len() != target_layout_count {
+            self.spring_layouts = vec![
+                SpringLineState {
+                    scroll: start_scroll_y,
+                    velocity: 0.0,
+                };
+                target_layout_count
+            ];
+        }
+        for state in &mut self.spring_layouts {
+            state.scroll = start_scroll_y;
+            state.velocity = 0.0;
+        }
+
+        self.seek_glide_active = false;
+        self.layout_animation_active = true;
+        self.last_spring_frame_at = Some(Instant::now());
+        // This seek is already classified by hit-test, so suppress the generic
+        // playback-delta seek glide. The next spring pass should behave like a
+        // normal on-screen lyric click: focused row/above are rigid, lower rows
+        // cascade from that first spring.
+        self.last_spring_playback_ms = Some(current_time_ms);
+        self.last_target_scroll_y = Some(start_scroll_y);
+        true
+    }
+
+    fn pending_click_matches_time(
+        &self,
+        pending: PendingLyricClickSeek,
+        current_time_ms: i32,
+    ) -> bool {
+        let Some(scene) = &self.scene else {
+            return true;
+        };
+        scene.lines.iter().any(|line| {
+            line.source_index == pending.source_index
+                && current_time_ms >= line.start - LINE_LAYOUT_SEEK_FORWARD_MS
+                && current_time_ms <= line.effective_end + LINE_LAYOUT_SEEK_FORWARD_MS
+        })
+    }
+
     /// Advances the per-line scroll springs one frame and returns each line's
     /// on-screen layout. The content-space top and height come straight from
     /// `target_layouts` (deterministic, already eased), and only the *scroll*
@@ -313,14 +393,16 @@ impl LyricsRenderer {
 
         // Snap (rather than animate) only when the geometry can't be carried
         // over: the scene changed, this is the first frame, or the scroll has to
-        // jump further than a tap could ever require. A tap-to-seek lands on a
-        // visible row, so its scroll delta stays under the threshold and springs
-        // the list to the new position — giving the seek its scroll animation.
+        // jump further than the spring range we intentionally animate.
         let seek_reset_distance =
             (viewport_height * LINE_LAYOUT_SEEK_RESET_DISTANCE_FACTOR).max(1.0);
         let scroll_jump = self
             .last_target_scroll_y
             .map(|last| (target_scroll_y - last).abs());
+        let playback_seek = self.last_spring_playback_ms.is_some_and(|last| {
+            let delta = current_time_ms - last;
+            delta < -LINE_LAYOUT_SEEK_BACKWARD_MS || delta > LINE_LAYOUT_SEEK_FORWARD_MS
+        });
         // Don't snap while a manual scroll/fling/return is in flight — that
         // motion is user-driven and always smooth, and a large spring-back could
         // otherwise trip the distance threshold and make the list jump.
@@ -352,17 +434,12 @@ impl LyricsRenderer {
             .unwrap_or(0.0)
             .clamp(0.001, LINE_LAYOUT_MAX_DT);
         self.last_spring_frame_at = Some(now);
-        // Only a BACKWARD jump glides as a rigid block. Seeking backward turns rows
-        // that were a rigid block above the old focus into cascade rows below the
-        // NEW focus while they still carry the old, far-away scroll — that seeds the
-        // spring chain with a huge delta and whips the list around. A FORWARD
-        // tap-seek has no stale-scroll problem, so we deliberately let the normal
-        // cascade run: the block above the tapped line shoves up together and the
-        // lines below spring in one after another (the desired tap-to-seek feel).
-        let backward_seek = self
-            .last_spring_playback_ms
-            .is_some_and(|last| current_time_ms - last < -LINE_LAYOUT_SEEK_BACKWARD_MS);
-        if backward_seek {
+        // Any discontinuous playback-time jump is a seek, not natural playback.
+        // Glide it as one rigid block: large focus-index jumps can otherwise move
+        // rows between the rigid and cascade regions while they still carry stale
+        // scroll state, which makes off-range clicks whip the list around. Normal
+        // frame-by-frame playback keeps the cascade below.
+        if playback_seek {
             self.seek_glide_active = true;
         }
         self.last_spring_playback_ms = Some(current_time_ms);
@@ -542,6 +619,14 @@ mod tests {
         max - min
     }
 
+    fn set_pending_click(renderer: &mut LyricsRenderer, source_index: usize, visible_scroll_y: f32) {
+        renderer.pending_lyric_click_seek = Some(PendingLyricClickSeek {
+            source_index,
+            visible_scroll_y,
+            recorded_at: Instant::now(),
+        });
+    }
+
     #[test]
     fn pending_manual_return_waits_for_blur_restore_before_gliding_back() {
         let mut renderer = LyricsRenderer::new();
@@ -615,12 +700,12 @@ mod tests {
         let viewport = 600.0;
 
         renderer.animate_frame_layout(1_000, &content, 200.0, viewport, 2);
-        renderer.clear_manual_scroll_on_seek(1_000);
+        renderer.prepare_seek_transition(1_000, content.len());
         renderer.begin_manual_scroll();
         renderer.scroll_manual_by(120.0);
-        renderer.clear_manual_scroll_on_seek(1_030);
+        renderer.prepare_seek_transition(1_030, content.len());
         renderer.end_manual_scroll(0.0);
-        renderer.clear_manual_scroll_on_seek(1_060);
+        renderer.prepare_seek_transition(1_060, content.len());
 
         assert!(renderer.manual_scroll.return_to_auto_requested);
         assert_eq!(renderer.manual_scroll.offset, 120.0);
@@ -628,21 +713,22 @@ mod tests {
     }
 
     #[test]
-    fn playback_jump_during_pending_manual_return_does_not_cancel_fling() {
+    fn seek_during_pending_manual_return_clears_plain_list_state() {
         let mut renderer = LyricsRenderer::new();
         let content = even_layouts(6, 100.0);
         let viewport = 600.0;
 
         renderer.animate_frame_layout(1_000, &content, 200.0, viewport, 2);
-        renderer.clear_manual_scroll_on_seek(1_000);
+        renderer.prepare_seek_transition(1_000, content.len());
         renderer.begin_manual_scroll();
         renderer.scroll_manual_by(120.0);
         renderer.end_manual_scroll(0.0);
-        renderer.clear_manual_scroll_on_seek(2_000);
+        set_pending_click(&mut renderer, 0, 320.0);
+        renderer.prepare_seek_transition(2_000, content.len());
 
-        assert!(renderer.manual_scroll.return_to_auto_requested);
-        assert_eq!(renderer.manual_scroll.offset, 120.0);
-        assert!(renderer.manual_scroll_plain_list_active());
+        assert!(!renderer.manual_scroll.return_to_auto_requested);
+        assert_eq!(renderer.manual_scroll.offset, 0.0);
+        assert!(!renderer.manual_scroll_plain_list_active());
         assert!(!renderer.seek_glide_active);
     }
 
@@ -653,7 +739,9 @@ mod tests {
         let viewport = 600.0;
 
         renderer.animate_frame_layout(1_000, &content, 0.0, viewport, 1);
-        renderer.clear_manual_scroll_on_seek(3_000);
+        renderer.prepare_seek_transition(1_000, content.len());
+        set_pending_click(&mut renderer, 0, 0.0);
+        renderer.prepare_seek_transition(3_000, content.len());
         let combined_scroll_y =
             renderer.update_manual_scroll_target(3_000, 300.0, 900.0, content.len());
         assert_eq!(combined_scroll_y, 300.0);
@@ -667,6 +755,127 @@ mod tests {
             "tap seek should spring toward target, not snap directly to {first_scroll}"
         );
         assert!(renderer.layout_animation_active);
+        assert!(!renderer.seek_glide_active);
+    }
+
+    #[test]
+    fn forward_seek_with_far_focus_jump_glides_without_cascade_whip() {
+        let mut renderer = LyricsRenderer::new();
+        let content = even_layouts(120, 100.0);
+        let viewport = 1000.0;
+
+        for _ in 0..200 {
+            renderer.animate_frame_layout(20_000, &content, 7_800.0, viewport, 78);
+        }
+
+        // The scroll delta stays under the snap threshold (1.6 * viewport), but
+        // the focus index jumps far enough that the normal cascade would reclassify
+        // many rows with stale scroll state. A seek must glide as a rigid block.
+        let mut worst_spread = 0.0f32;
+        for _ in 0..120 {
+            renderer.animate_frame_layout(35_000, &content, 9_000.0, viewport, 100);
+            worst_spread = worst_spread.max(scroll_spread(&renderer.frame_layouts, &content));
+        }
+
+        assert!(
+            worst_spread < 1.0,
+            "forward off-range seek should glide as a rigid block, but rows spread by {worst_spread:.1}px"
+        );
+    }
+
+    #[test]
+    fn unclassified_far_jump_still_snaps_instead_of_using_click_seek_path() {
+        let mut renderer = LyricsRenderer::new();
+        let content = even_layouts(120, 100.0);
+        let viewport = 1000.0;
+
+        renderer.animate_frame_layout(1_000, &content, 0.0, viewport, 1);
+        renderer.prepare_seek_transition(1_000, content.len());
+        renderer.prepare_seek_transition(20_000, content.len());
+        renderer.animate_frame_layout(20_000, &content, 5_000.0, viewport, 50);
+
+        let first_scroll = content[0].top - renderer.frame_layouts[0].top;
+        assert_eq!(first_scroll, 5_000.0);
+        assert!(!renderer.layout_animation_active);
+        assert!(!renderer.seek_glide_active);
+    }
+
+    #[test]
+    fn manually_revealed_far_forward_click_uses_visible_scroll_as_seek_start() {
+        let mut renderer = LyricsRenderer::new();
+        let content = even_layouts(120, 100.0);
+        let viewport = 1000.0;
+
+        renderer.animate_frame_layout(1_000, &content, 0.0, viewport, 1);
+        renderer.prepare_seek_transition(1_000, content.len());
+        renderer.manual_scroll.offset = 4_900.0;
+        renderer.manual_scroll.return_to_auto_requested = true;
+        renderer.manual_scroll_active = true;
+        set_pending_click(&mut renderer, 50, 4_900.0);
+
+        renderer.prepare_seek_transition(20_000, content.len());
+
+        assert_eq!(renderer.manual_scroll.offset, 0.0);
+        assert!(!renderer.manual_scroll_plain_list_active());
+        assert!(!renderer.seek_glide_active);
+        assert!(
+            renderer
+                .spring_layouts
+                .iter()
+                .all(|state| (state.scroll - 4_900.0).abs() <= LINE_LAYOUT_EPSILON)
+        );
+
+        renderer.last_spring_frame_at = Some(Instant::now() - Duration::from_millis(16));
+        renderer.animate_frame_layout(20_000, &content, 5_000.0, viewport, 50);
+
+        let first_scroll = content[0].top - renderer.frame_layouts[0].top;
+        assert!(
+            first_scroll > 4_900.0 && first_scroll < 5_000.0,
+            "manual far forward click should start from visible scroll, got {first_scroll}"
+        );
+        assert!(
+            scroll_spread(&renderer.frame_layouts, &content) > 0.5,
+            "manual far forward click should use normal cascade, not global rigid glide"
+        );
+    }
+
+    #[test]
+    fn manually_revealed_far_backward_click_uses_visible_scroll_as_seek_start() {
+        let mut renderer = LyricsRenderer::new();
+        let content = even_layouts(120, 100.0);
+        let viewport = 1000.0;
+
+        renderer.animate_frame_layout(20_000, &content, 8_000.0, viewport, 80);
+        renderer.prepare_seek_transition(20_000, content.len());
+        renderer.manual_scroll.offset = -2_900.0;
+        renderer.manual_scroll.return_to_auto_requested = true;
+        renderer.manual_scroll_active = true;
+        set_pending_click(&mut renderer, 50, 5_100.0);
+
+        renderer.prepare_seek_transition(10_000, content.len());
+
+        assert_eq!(renderer.manual_scroll.offset, 0.0);
+        assert!(!renderer.manual_scroll_plain_list_active());
+        assert!(!renderer.seek_glide_active);
+        assert!(
+            renderer
+                .spring_layouts
+                .iter()
+                .all(|state| (state.scroll - 5_100.0).abs() <= LINE_LAYOUT_EPSILON)
+        );
+
+        renderer.last_spring_frame_at = Some(Instant::now() - Duration::from_millis(16));
+        renderer.animate_frame_layout(10_000, &content, 5_000.0, viewport, 50);
+
+        let first_scroll = content[0].top - renderer.frame_layouts[0].top;
+        assert!(
+            first_scroll > 5_000.0 && first_scroll < 5_100.0,
+            "manual far backward click should start from visible scroll, got {first_scroll}"
+        );
+        assert!(
+            scroll_spread(&renderer.frame_layouts, &content) > 0.5,
+            "manual far backward click should use normal cascade, not global rigid glide"
+        );
     }
 
     #[test]

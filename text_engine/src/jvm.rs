@@ -697,7 +697,7 @@ pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeTextE
     y: jfloat,
     current_time_ms: jint,
 ) -> jint {
-    with_engine(handle, -1, |engine| {
+    with_engine_mut(handle, -1, |engine| {
         engine.hit_test_lyrics_line(x, y, current_time_ms)
     })
 }

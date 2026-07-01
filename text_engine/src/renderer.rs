@@ -138,6 +138,7 @@ const MANUAL_SCROLL_RUBBER_BAND_COEFFICIENT: f32 = 0.55;
 const MANUAL_SCROLL_BLUR_RESTORE_MS: u64 = 2500;
 const MANUAL_SCROLL_BLUR_FADE_OUT_RATE: f32 = 12.0;
 const MANUAL_SCROLL_BLUR_FADE_IN_RATE: f32 = 6.0;
+const LYRIC_CLICK_SEEK_PENDING_MS: u64 = 1500;
 
 #[derive(Debug, Deserialize)]
 pub struct LyricsScene {
@@ -292,11 +293,11 @@ pub struct LyricsRenderer {
     last_spring_playback_ms: Option<i32>,
     last_seek_detection_playback_ms: Option<i32>,
     last_target_scroll_y: Option<f32>,
+    pending_lyric_click_seek: Option<PendingLyricClickSeek>,
     layout_animation_active: bool,
-    /// True while a seek (a discontinuous playback-time jump from tapping a
-    /// lyric) glides the list to its new scroll position. The spring *chain*
-    /// cascade is suspended while this is set so a focus-index jump can't seed
-    /// the cascade with the stale rigid-block scroll and whip the list around.
+    /// True while an unclassified playback-time jump glides the list as one
+    /// rigid block. Explicit on-screen lyric clicks are seeded separately from
+    /// their visible scroll and keep the ordinary click cascade.
     seek_glide_active: bool,
     manual_scroll: ManualScrollState,
     last_manual_scroll_frame_at: Option<Instant>,
@@ -352,6 +353,13 @@ struct PreparedScene {
     config: SceneConfig,
     lines: Vec<PreparedLine>,
     content_height: f32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PendingLyricClickSeek {
+    source_index: usize,
+    visible_scroll_y: f32,
+    recorded_at: Instant,
 }
 
 #[derive(Debug, Default)]
@@ -626,6 +634,7 @@ impl LyricsRenderer {
             last_spring_playback_ms: None,
             last_seek_detection_playback_ms: None,
             last_target_scroll_y: None,
+            pending_lyric_click_seek: None,
             layout_animation_active: false,
             seek_glide_active: false,
             manual_scroll: ManualScrollState::default(),
@@ -905,13 +914,13 @@ impl LyricsRenderer {
             )
         };
 
-        // A seek (the user tapped a lyric, or scrubbed) is a discontinuous jump in
-        // playback time. If the user had manually scrolled away, the lingering
-        // manual offset would otherwise be added on top of the seeked auto
-        // position — leaving the list parked at `old_view + offset` instead of the
-        // tapped line. Drop the offset the moment the seek lands so the spring
-        // glides cleanly from wherever the list currently sits to the new line.
-        self.clear_manual_scroll_on_seek(current_time_ms);
+        // A seek (the user tapped a lyric, or scrubbed) is a discontinuous jump
+        // in playback time. If it lands while a manual/plain-list view is still
+        // on screen, seed the layout springs from that visible list scroll before
+        // clearing the manual offset. This makes a manually revealed far lyric
+        // behave like an ordinary on-screen lyric click instead of being judged
+        // against the old auto-scroll target and snapping as an "ultra far" jump.
+        self.prepare_seek_transition(current_time_ms, target_layouts.len());
 
         // The combined scroll = auto position + the manual-scroll offset (rubber
         // banded). We split it: the spring cascade animates only the AUTO part,
@@ -1167,12 +1176,14 @@ impl LyricsRenderer {
         }
     }
 
-    pub fn hit_test_line(&self, x: f32, y: f32, current_time_ms: i32) -> i32 {
+    pub fn hit_test_line(&mut self, x: f32, y: f32, current_time_ms: i32) -> i32 {
         let Some(scene) = &self.scene else {
+            self.pending_lyric_click_seek = None;
             return -1;
         };
 
         if x < 0.0 || y < 0.0 || x > scene.config.width as f32 || y > scene.config.height as f32 {
+            self.pending_lyric_click_seek = None;
             return -1;
         }
 
@@ -1183,7 +1194,7 @@ impl LyricsRenderer {
             scene.max_scroll_for_layouts(&dynamic_layouts),
         );
         let content_y = y + scroll_y;
-        scene
+        let hit = scene
             .lines
             .iter()
             .enumerate()
@@ -1193,9 +1204,19 @@ impl LyricsRenderer {
                         && content_y >= layout.top
                         && content_y <= layout.top + layout.height
                 })
-            })
-            .map(|(_, line)| line.source_index as i32)
-            .unwrap_or(-1)
+            });
+        if let Some((_, line)) = hit {
+            let source_index = line.source_index;
+            self.pending_lyric_click_seek = Some(PendingLyricClickSeek {
+                source_index,
+                visible_scroll_y: scroll_y,
+                recorded_at: Instant::now(),
+            });
+            source_index as i32
+        } else {
+            self.pending_lyric_click_seek = None;
+            -1
+        }
     }
 
 
@@ -1515,6 +1536,27 @@ mod tests {
 
         assert_eq!(scene.focus_alpha(line, line.start - 800), FOCUS_ALPHA_MIN);
         assert_eq!(scene.focus_alpha(line, line.effective_end + 800), FOCUS_ALPHA_MIN);
+    }
+
+    #[test]
+    fn hit_test_records_pending_lyric_click_seek() {
+        let mut renderer = LyricsRenderer::new();
+        renderer.scene = Some(PreparedScene {
+            config: test_config(),
+            lines: vec![test_line(ClusterRole::Standalone, 1_000, 2_000, 50.0)],
+            content_height: 0.0,
+        });
+
+        let hit = renderer.hit_test_line(20.0, 40.0, 1_000);
+
+        assert_eq!(hit, 0);
+        let pending = renderer.pending_lyric_click_seek.expect("pending click");
+        assert_eq!(pending.source_index, 0);
+        assert_eq!(pending.visible_scroll_y, 0.0);
+
+        let miss = renderer.hit_test_line(20.0, 180.0, 1_000);
+        assert_eq!(miss, -1);
+        assert!(renderer.pending_lyric_click_seek.is_none());
     }
 
     #[test]

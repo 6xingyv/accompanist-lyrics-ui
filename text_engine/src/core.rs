@@ -415,7 +415,7 @@ impl TextEngine {
         render_result
     }
 
-    pub fn hit_test_lyrics_line(&self, x: f32, y: f32, current_time_ms: i32) -> i32 {
+    pub fn hit_test_lyrics_line(&mut self, x: f32, y: f32, current_time_ms: i32) -> i32 {
         self.renderer.hit_test_line(x, y, current_time_ms)
     }
 
