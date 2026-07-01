@@ -1354,13 +1354,16 @@ fn smooth_step(value: f32) -> f32 {
 }
 
 pub(super) fn accompaniment_visibility(start_ms: i32, end_ms: i32, current_time_ms: i32) -> f32 {
-    // Reveal the accompaniment line ~1s before it starts (it expands into place
-    // ahead of time), then ease it back out after it ends. The grow/shrink is a
-    // deterministic eased height — the layout no longer springs it, so it makes
-    // room smoothly instead of vibrating.
-    const ENTER_MS: f32 = 1000.0;
-    const EXIT_LINGER_MS: f32 = 600.0;
-    const EXIT_FADE_MS: f32 = 600.0;
+    // Expand the accompaniment line into place shortly before it starts, then ease
+    // it back out after it ends. The grow/shrink is a deterministic eased height.
+    // Kept short and roughly matched to the scroll spring's settle time (~0.5s) so
+    // the make-room animation harmonizes with the auto-scroll instead of dragging
+    // on for a second-plus — a long animation overlaps the next line's expand and
+    // makes the focus bob (the "trembling" when two consecutive lines both have an
+    // accompaniment).
+    const ENTER_MS: f32 = 400.0;
+    const EXIT_LINGER_MS: f32 = 200.0;
+    const EXIT_FADE_MS: f32 = 400.0;
 
     let start = start_ms as f32;
     let end = end_ms as f32;

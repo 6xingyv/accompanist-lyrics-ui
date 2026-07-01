@@ -3,7 +3,10 @@ package com.mocharealm.accompanist.lyrics.ui.renderer
 import android.content.Context
 import android.graphics.Color
 import android.graphics.SurfaceTexture
+import android.os.Handler
+import android.os.HandlerThread
 import android.util.AttributeSet
+import android.view.Choreographer
 import android.view.Surface
 import android.view.GestureDetector
 import android.view.MotionEvent
@@ -15,6 +18,9 @@ import com.mocharealm.accompanist.lyrics.text.NativeFontConfig
 import com.mocharealm.accompanist.lyrics.text.NativeFontSource
 import com.mocharealm.accompanist.lyrics.text.NativeTextEngine
 import com.mocharealm.accompanist.lyrics.ui.composable.lyrics.getFontSource
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.roundToInt
@@ -37,15 +43,43 @@ class RustSkiaLyricsView @JvmOverloads constructor(
     }
 
     private var lyrics: SyncedLyrics? = null
+
+    // Playback position is written on the main thread and read on the render
+    // thread every frame, so it must be volatile. It is the ONLY per-frame value
+    // handed across threads — everything else the render thread needs lives behind
+    // the engine's own mutex.
+    @Volatile
     private var currentTimeMs: Int = 0
     private var sceneDirty = true
     private var renderSurface: Surface? = null
-    private var gpuSurfaceReady = false
     private var rendererStyle = defaultStyle()
     private var fontConfigKey = 0
     private var configuredFontBytes: ByteArray? = null
+    @Volatile
     private var engineClosed = false
-    private var frameCallbackScheduled = false
+
+    // --- Dedicated render thread ---------------------------------------------
+    // The EGL context is created, used (draw + blocking eglSwapBuffers), and
+    // destroyed exclusively on this thread, so the main/UI thread never blocks on
+    // the vsync swap and Compose stops competing with rendering.
+    private var renderThread: HandlerThread? = null
+    private var renderHandler: Handler? = null
+    // Obtained on the render thread (Choreographer is thread-local). Written on
+    // the render thread; nulled on the main thread only after the thread is joined.
+    @Volatile
+    private var renderChoreographer: Choreographer? = null
+    // Render-thread-only state (never touched from the main thread).
+    private var surfaceReady = false
+    private var renderScheduled = false
+    // Coalesces main-thread wake-ups so a burst of setCurrentPosition / touch
+    // events posts at most one Runnable to the render thread.
+    private val wakePending = AtomicBoolean(false)
+    private val frameCallback = Choreographer.FrameCallback { doFrame() }
+    private val wakeRunnable = Runnable {
+        wakePending.set(false)
+        scheduleFrame()
+    }
+
     private var renderWidth = 0
     private var renderHeight = 0
     private var renderScale = 1f
@@ -110,7 +144,7 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         if (oldLocale != lyrics?.detectNativeLyricsLocale()) {
             applyCurrentFontConfig()
         } else {
-            requestRender()
+            rebuildSceneAndRender()
         }
     }
 
@@ -125,24 +159,34 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         rendererStyle = style
         resetManualScroll()
         sceneDirty = true
+        rebuildSceneAndRender()
+    }
+
+    /**
+     * Rebuild the (dirty) scene on the main thread — infrequent, so keeping it here
+     * avoids threading the lyrics/style snapshot onto the render thread — then wake
+     * the render thread to draw it.
+     */
+    private fun rebuildSceneAndRender() {
+        if (width > 0 && height > 0) ensureScene(width, height)
         requestRender()
     }
 
     override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
         updateRenderTarget(width, height)
-        bindRenderSurface(surface, width, height)
         sceneDirty = true
-        renderFrame()
+        bindRenderSurface(surface, width, height)
     }
 
     override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {
         updateRenderTarget(width, height)
-        bindRenderSurface(surface, width, height)
         sceneDirty = true
-        renderFrame()
+        bindRenderSurface(surface, width, height)
     }
 
     override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
+        // Blocks until the render thread has torn down EGL and stopped touching the
+        // surface, so returning true (which frees the SurfaceTexture) is safe.
         releaseRenderSurface()
         return true
     }
@@ -150,39 +194,43 @@ class RustSkiaLyricsView @JvmOverloads constructor(
     override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {
     }
 
-    private fun renderFrame() {
-        frameCallbackScheduled = false
-        if (!isAttachedToWindow || engineClosed) return
-        val viewWidth = width
-        val viewHeight = height
-        if (!isAvailable || viewWidth <= 0 || viewHeight <= 0) return
-
-        if (updateRenderTarget(viewWidth, viewHeight) && gpuSurfaceReady) {
-            surfaceTexture?.let { bindRenderSurface(it, viewWidth, viewHeight) }
-        }
-        if (!ensureScene(viewWidth, viewHeight)) return
-        if (!gpuSurfaceReady) return
-
-        val result = engine.renderLyricsFrameToSurface(currentTimeMs)
-        if (result < 0) {
-            gpuSurfaceReady = false
-            engine.clearRenderSurface()
-            renderSurface?.release()
-            renderSurface = null
-            return
-        }
-        if (result > 0) {
-            requestRender()
+    /**
+     * Wake the render loop. Runs on the main thread and only hops one coalesced
+     * Runnable over to the render thread, where [scheduleFrame] posts a
+     * vsync-paced frame. No-op until the render thread exists (the surface
+     * callbacks create it).
+     */
+    private fun requestRender() {
+        val handler = renderHandler ?: return
+        if (wakePending.compareAndSet(false, true)) {
+            handler.post(wakeRunnable)
         }
     }
 
-    private fun requestRender() {
-        if (!isAttachedToWindow) return
-        if (frameCallbackScheduled) return
-        frameCallbackScheduled = true
-        postOnAnimation {
-            renderFrame()
+    /** Render thread only: schedule one frame on the next vsync (deduped). */
+    private fun scheduleFrame() {
+        if (renderScheduled || !surfaceReady) return
+        renderScheduled = true
+        renderChoreographer?.postFrameCallback(frameCallback)
+    }
+
+    /**
+     * Render thread only: draw + present one frame and keep the loop alive while
+     * the engine reports animation/scroll activity (return > 0). When it returns
+     * 0 the loop parks until the main thread calls [requestRender] again.
+     */
+    private fun doFrame() {
+        renderScheduled = false
+        if (!surfaceReady) return
+        val result = engine.renderLyricsFrameToSurface(currentTimeMs)
+        if (result < 0) {
+            // Surface lost — drop EGL. The Java Surface is released by the pending
+            // onSurfaceTextureDestroyed handshake (or the next bind).
+            surfaceReady = false
+            engine.clearRenderSurface()
+            return
         }
+        if (result > 0) scheduleFrame()
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
@@ -266,8 +314,9 @@ class RustSkiaLyricsView @JvmOverloads constructor(
 
     override fun onDetachedFromWindow() {
         super.onDetachedFromWindow()
-        releaseRenderSurface()
-        engine.close()
+        releaseRenderSurface()   // blocking EGL teardown on the render thread
+        stopRenderThread()       // quitSafely + join → render thread is fully dead
+        engine.close()           // now safe on the main thread: no concurrent access
         engineClosed = true
     }
 
@@ -290,14 +339,29 @@ class RustSkiaLyricsView @JvmOverloads constructor(
 
         val surface = Surface(surfaceTexture)
         requestHighestRefreshRate(surface)
-        val enabled = engine.setRenderSurface(surface, frameWidth, frameHeight, frameWidth, frameHeight)
-        if (enabled) {
-            renderSurface = surface
-            gpuSurfaceReady = true
-        } else {
+
+        // Acquire the native window here — this is the only step that needs a
+        // JNIEnv, so it must stay on the main thread. Then hand the raw pointer to
+        // the render thread, which owns all EGL. setRenderSurfaceFromWindow
+        // consumes windowPtr on both success and failure, so we never release it.
+        val windowPtr = engine.acquireNativeWindow(surface)
+        if (windowPtr == 0L) {
             surface.release()
             renderSurface = null
-            gpuSurfaceReady = false
+            return
+        }
+        renderSurface = surface
+        // Build the scene on the main thread before the first frame. This is
+        // infrequent (lyrics / style / size change), not a per-frame cost.
+        ensureScene(width, height)
+
+        val handler = ensureRenderThread()
+        handler.post {
+            val ok = engine.setRenderSurfaceFromWindow(windowPtr, frameWidth, frameHeight)
+            surfaceReady = ok
+            if (ok) scheduleFrame()
+            // On failure the window ref is already consumed; the stale Surface held
+            // in renderSurface is released by the next releaseRenderSurface().
         }
     }
 
@@ -317,12 +381,67 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         }
     }
 
+    /**
+     * Tear down EGL and release the surface. Blocks the caller (main thread) until
+     * the render thread has stopped touching the surface, so it is safe to call
+     * right before returning true from onSurfaceTextureDestroyed.
+     */
     private fun releaseRenderSurface() {
-        frameCallbackScheduled = false
-        gpuSurfaceReady = false
-        engine.clearRenderSurface()
+        val handler = renderHandler
+        if (handler != null) {
+            val latch = CountDownLatch(1)
+            // postAtFrontOfQueue so teardown preempts any queued wake Runnables; on
+            // the single-threaded Looper it still runs AFTER any in-flight doFrame.
+            handler.postAtFrontOfQueue {
+                surfaceReady = false
+                renderScheduled = false
+                renderChoreographer?.removeFrameCallback(frameCallback)
+                engine.clearRenderSurface() // drops the EGL renderer (frees context + window)
+                latch.countDown()
+            }
+            try {
+                // The main thread holds NO engine lock here, so teardown acquires it
+                // as soon as the current frame releases it (≤ ~1 frame). The timeout
+                // is only an ANR safety valve — surfaceReady is already false, so no
+                // NEW frame can start regardless.
+                if (!latch.await(500, TimeUnit.MILLISECONDS)) {
+                    android.util.Log.w("RustSkiaLyricsView", "render surface teardown timed out")
+                }
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+            }
+        }
         renderSurface?.release()
         renderSurface = null
+    }
+
+    /** Create the render thread + handler on demand (recreated after a detach). */
+    private fun ensureRenderThread(): Handler {
+        renderHandler?.let { return it }
+        val thread = HandlerThread("lyrics-render").also { it.start() }
+        val handler = Handler(thread.looper)
+        renderThread = thread
+        renderHandler = handler
+        // Choreographer is thread-local: grab the render thread's instance ON it.
+        // Posted first, so it is set before any scheduleFrame runs (FIFO queue).
+        handler.post { renderChoreographer = Choreographer.getInstance() }
+        return handler
+    }
+
+    /** Quit + join the render thread. Safe to call when it does not exist. */
+    private fun stopRenderThread() {
+        val thread = renderThread
+        if (thread != null) {
+            thread.quitSafely()
+            try {
+                thread.join(500)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+            }
+        }
+        renderThread = null
+        renderHandler = null
+        renderChoreographer = null
     }
 
     private fun ensureScene(width: Int, height: Int): Boolean {
@@ -366,12 +485,15 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         )
         engineClosed = false
         resetManualScroll()
+        // Mark dirty BEFORE (re)binding so bindRenderSurface's ensureScene rebuilds
+        // with the new font. configureFonts may have recreated the engine handle,
+        // dropping the GPU renderer, so a rebind is required here.
+        sceneDirty = true
         if (isAvailable && width > 0 && height > 0) {
             surfaceTexture?.let { surfaceTexture ->
                 bindRenderSurface(surfaceTexture, width, height)
             }
         }
-        sceneDirty = true
         requestRender()
     }
 

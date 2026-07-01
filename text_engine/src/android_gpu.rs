@@ -83,6 +83,7 @@ extern "C" {
         context: EGLContext,
     ) -> EGLBoolean;
     fn eglSwapBuffers(display: EGLDisplay, surface: EGLSurface) -> EGLBoolean;
+    fn eglSwapInterval(display: EGLDisplay, interval: EGLint) -> EGLBoolean;
     fn eglDestroySurface(display: EGLDisplay, surface: EGLSurface) -> EGLBoolean;
     fn eglDestroyContext(display: EGLDisplay, context: EGLContext) -> EGLBoolean;
     fn eglTerminate(display: EGLDisplay) -> EGLBoolean;
@@ -127,6 +128,33 @@ impl AndroidGpuRenderer {
         let window = ANativeWindow_fromSurface(env, surface_object);
         if window.is_null() {
             return Err("ANativeWindow_fromSurface failed");
+        }
+
+        // Hand the freshly-acquired window ref to the shared constructor, which
+        // takes ownership of it (and releases it on failure).
+        Self::from_window_ptr(window as *mut c_void, frame_width, frame_height)
+    }
+
+    /// Build a renderer from an already-acquired `ANativeWindow` pointer.
+    ///
+    /// The pointer must come from [`acquire_native_window`] (i.e. from
+    /// `ANativeWindow_fromSurface` on a JVM-attached thread). This entry point
+    /// carries NO `JNIEnv`, so it is what the dedicated render thread calls.
+    ///
+    /// OWNERSHIP: consumes the window's reference in every case — on success the
+    /// returned renderer releases it in `Drop`; on failure it is released here.
+    /// The caller must not touch the pointer afterwards.
+    pub unsafe fn from_window_ptr(
+        window: *mut c_void,
+        frame_width: u32,
+        frame_height: u32,
+    ) -> Result<Self, &'static str> {
+        let window = window as *mut ANativeWindow;
+        if window.is_null() || frame_width == 0 || frame_height == 0 {
+            if !window.is_null() {
+                ANativeWindow_release(window);
+            }
+            return Err("invalid native window");
         }
 
         match Self::from_native_window(window, frame_width, frame_height) {
@@ -214,6 +242,14 @@ impl AndroidGpuRenderer {
             return Err("eglMakeCurrent failed");
         }
 
+        // Pace presentation to the display's vsync (one swap per refresh). This is
+        // the EGL default, but set it explicitly so the behaviour is not left to
+        // the driver. The blocking wait in `eglSwapBuffers` is only acceptable
+        // because this renderer lives on its own dedicated thread (see the
+        // single-thread invariant on `draw_frame`); it must never run on the UI
+        // thread or it would cap the whole app to the swap cadence.
+        eglSwapInterval(display, 1);
+
         let interface = gpu::gl::Interface::new_load_with_cstr(|name| gl_proc_address(name))
             .ok_or("Skia GL interface creation failed")?;
         if !interface.validate() {
@@ -251,12 +287,18 @@ impl AndroidGpuRenderer {
         })
     }
 
+    /// Draw and present one frame.
+    ///
+    /// INVARIANT: this renderer is single-thread-affine. Creation
+    /// (`from_native_window`, which makes the EGL context current), every
+    /// `draw_frame`, and `Drop` must all run on the SAME thread — the dedicated
+    /// render thread. Because the context is made current once at creation and
+    /// nothing else on that thread rebinds EGL, we do NOT re-`eglMakeCurrent`
+    /// per frame here (it was pure overhead).
     pub fn draw_frame<F>(&mut self, draw: F) -> Result<(), &'static str>
     where
         F: FnOnce(&skia_safe::Canvas),
     {
-        self.make_current()?;
-
         let surface = self.skia_surface.as_mut().ok_or("missing Skia surface")?;
         let direct_context = self
             .direct_context
@@ -278,16 +320,6 @@ impl AndroidGpuRenderer {
 
     pub fn clear(&mut self) -> Result<(), &'static str> {
         self.draw_frame(|_| {})
-    }
-
-    fn make_current(&self) -> Result<(), &'static str> {
-        if unsafe { eglMakeCurrent(self.display, self.surface, self.surface, self.context) }
-            == EGL_FALSE
-        {
-            Err("eglMakeCurrent failed")
-        } else {
-            Ok(())
-        }
     }
 }
 
@@ -316,4 +348,31 @@ impl Drop for AndroidGpuRenderer {
 
 fn gl_proc_address(name: &CStr) -> *const c_void {
     unsafe { eglGetProcAddress(name.as_ptr()) }
+}
+
+/// Acquire an `ANativeWindow` from a Java `Surface`.
+///
+/// MUST run on a JVM-attached thread with a valid `JNIEnv` and a thread-local
+/// `jobject` — in practice the UI/main thread. `ANativeWindow_fromSurface`
+/// returns a +1 reference; ownership of that reference transfers to the caller,
+/// who must eventually pass it to [`AndroidGpuRenderer::from_window_ptr`] (which
+/// consumes it) or free it with [`release_native_window`]. This split lets the
+/// EGL setup happen on the render thread while the only `JNIEnv`-dependent call
+/// stays on the main thread.
+///
+/// Returns null on invalid input or failure.
+pub unsafe fn acquire_native_window(env: *mut JNIEnv, surface: jobject) -> *mut c_void {
+    if env.is_null() || surface.is_null() {
+        return ptr::null_mut();
+    }
+    ANativeWindow_fromSurface(env, surface) as *mut c_void
+}
+
+/// Release a window reference acquired by [`acquire_native_window`] that was NOT
+/// handed to [`AndroidGpuRenderer::from_window_ptr`]. No `JNIEnv` required, so it
+/// is safe to call from any thread.
+pub unsafe fn release_native_window(window: *mut c_void) {
+    if !window.is_null() {
+        ANativeWindow_release(window as *mut ANativeWindow);
+    }
 }

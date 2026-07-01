@@ -63,7 +63,21 @@ class MusicRepositoryImpl(private val context: Context): MusicRepository {
                     lyricsRaw.lines.map { line ->
                         val karaokeLine = line as KaraokeLine
                         val translationContent = (translationMap[karaokeLine.start] as SyncedLine?)?.content
-                        karaokeLine.copy(translation = translationContent)
+                        if (karaokeLine is KaraokeLine.MainKaraokeLine) {
+                            // The generic copy() preserves accompanimentLines untouched, so the
+                            // accompaniment (background) lines never got a translation. Merge
+                            // onto them too, each keyed by its own start time.
+                            karaokeLine.copy(
+                                translation = translationContent,
+                                accompanimentLines = karaokeLine.accompanimentLines?.map { accompaniment ->
+                                    accompaniment.copy(
+                                        translation = (translationMap[accompaniment.start] as SyncedLine?)?.content
+                                    )
+                                }
+                            )
+                        } else {
+                            karaokeLine.copy(translation = translationContent)
+                        }
                     }
                 )
             } else {

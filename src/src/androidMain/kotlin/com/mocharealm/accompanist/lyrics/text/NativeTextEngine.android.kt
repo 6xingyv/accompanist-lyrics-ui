@@ -82,6 +82,33 @@ actual class NativeTextEngine actual constructor(
         return nativeSetRenderSurface(handle, surface, surfaceWidth, surfaceHeight, frameWidth, frameHeight)
     }
 
+    /**
+     * Acquire the native window from [surface] on the CURRENT thread (must have a
+     * valid JNIEnv, i.e. the main thread). Returns a window pointer (0 on
+     * failure). Ownership transfers to the caller: hand it to
+     * [setRenderSurfaceFromWindow] (which consumes it) or free it with
+     * [releaseNativeWindow]. This lets the EGL setup run on the render thread
+     * while the JNIEnv-dependent acquisition stays on the main thread.
+     */
+    fun acquireNativeWindow(surface: Surface): Long {
+        return nativeAcquireNativeWindow(surface)
+    }
+
+    /** Free a window pointer that was never passed to [setRenderSurfaceFromWindow]. */
+    fun releaseNativeWindow(windowPtr: Long) {
+        if (windowPtr != 0L) nativeReleaseNativeWindow(windowPtr)
+    }
+
+    /**
+     * Build the EGL renderer from a pre-acquired [windowPtr]. Safe to call off the
+     * main thread (no JNIEnv needed). Consumes [windowPtr] on both success and
+     * failure — the caller must not release it afterwards.
+     */
+    fun setRenderSurfaceFromWindow(windowPtr: Long, frameWidth: Int, frameHeight: Int): Boolean {
+        ensureHandle()
+        return nativeSetRenderSurfaceFromWindow(handle, windowPtr, frameWidth, frameHeight)
+    }
+
     fun clearRenderSurface() {
         if (handle != 0L) {
             nativeClearRenderSurface(handle)
@@ -302,6 +329,15 @@ actual class NativeTextEngine actual constructor(
         surface: Surface,
         surfaceWidth: Int,
         surfaceHeight: Int,
+        frameWidth: Int,
+        frameHeight: Int
+    ): Boolean
+
+    private external fun nativeAcquireNativeWindow(surface: Surface): Long
+    private external fun nativeReleaseNativeWindow(windowPtr: Long)
+    private external fun nativeSetRenderSurfaceFromWindow(
+        handle: Long,
+        windowPtr: Long,
         frameWidth: Int,
         frameHeight: Int
     ): Boolean

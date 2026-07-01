@@ -559,6 +559,53 @@ pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeTextE
     }))
 }
 
+/// Acquire an `ANativeWindow` from a Java `Surface` on the calling (main) thread
+/// — the only step that needs a `JNIEnv`. Returns the raw pointer as a `jlong`
+/// (0 on failure) to be handed to the render thread.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeTextEngine_nativeAcquireNativeWindow(
+    env: JNIEnv,
+    _this: JObject,
+    surface: JObject,
+) -> jlong {
+    crate::android_gpu::acquire_native_window(env.get_native_interface(), surface.into_inner())
+        as jlong
+}
+
+/// Release a window pointer from `nativeAcquireNativeWindow` that was never
+/// handed to `nativeSetRenderSurfaceFromWindow`. No `JNIEnv`/engine lock needed.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeTextEngine_nativeReleaseNativeWindow(
+    _env: JNIEnv,
+    _this: JObject,
+    window_ptr: jlong,
+) {
+    crate::android_gpu::release_native_window(window_ptr as *mut std::ffi::c_void);
+}
+
+/// Build the EGL renderer from a pre-acquired window pointer. Carries no
+/// `JNIEnv`, so it can run on the dedicated render thread. Consumes `window_ptr`.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeTextEngine_nativeSetRenderSurfaceFromWindow(
+    _env: JNIEnv,
+    _this: JObject,
+    handle: jlong,
+    window_ptr: jlong,
+    frame_width: jint,
+    frame_height: jint,
+) -> jboolean {
+    bool_to_jboolean(with_engine_mut(handle, false, |engine| {
+        engine.set_android_render_surface_from_window(
+            window_ptr as *mut std::ffi::c_void,
+            frame_width.max(0) as u32,
+            frame_height.max(0) as u32,
+        )
+    }))
+}
+
 #[cfg(target_os = "android")]
 #[no_mangle]
 pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeTextEngine_nativeClearRenderSurface(

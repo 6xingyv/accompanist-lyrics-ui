@@ -358,6 +358,33 @@ impl TextEngine {
         }
     }
 
+    /// Install a render surface from a pre-acquired `ANativeWindow` pointer.
+    /// Unlike [`set_android_render_surface`], this carries no `JNIEnv` and so can
+    /// run on the dedicated render thread. Ownership of `window_ptr` transfers to
+    /// the renderer (released on failure by `from_window_ptr`).
+    #[cfg(target_os = "android")]
+    pub unsafe fn set_android_render_surface_from_window(
+        &mut self,
+        window_ptr: *mut std::ffi::c_void,
+        frame_width: u32,
+        frame_height: u32,
+    ) -> bool {
+        self.gpu_renderer = None;
+        match AndroidGpuRenderer::from_window_ptr(window_ptr, frame_width, frame_height) {
+            Ok(renderer) => {
+                self.gpu_renderer = Some(renderer);
+                true
+            }
+            Err(error) => {
+                warn!(
+                    "Failed to create Android GPU lyrics surface from window: {}",
+                    error
+                );
+                false
+            }
+        }
+    }
+
     #[cfg(target_os = "android")]
     pub fn clear_android_render_surface(&mut self) {
         if let Some(renderer) = self.gpu_renderer.as_mut() {

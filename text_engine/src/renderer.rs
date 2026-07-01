@@ -910,14 +910,26 @@ impl LyricsRenderer {
         // glides cleanly from wherever the list currently sits to the new line.
         self.clear_manual_scroll_on_seek(current_time_ms);
 
-        let target_scroll_y = self.update_manual_scroll_target(auto_scroll_y, max_scroll_y);
+        // The combined scroll = auto position + the manual-scroll offset (rubber
+        // banded). We split it: the spring cascade animates only the AUTO part,
+        // and the manual displacement is applied afterward as a flat shift. That
+        // way the inter-line ripple always runs on the auto component (present the
+        // moment auto-scroll resumes after a manual scroll) while the manual
+        // gesture stays exactly 1:1 (responsive fling, no spring trailing it).
+        let combined_scroll_y = self.update_manual_scroll_target(auto_scroll_y, max_scroll_y);
+        let manual_displacement = combined_scroll_y - auto_scroll_y;
         self.animate_frame_layout(
             current_time_ms,
             &target_layouts,
-            target_scroll_y,
+            auto_scroll_y,
             height as f32,
             focus_end,
         );
+        if manual_displacement.abs() > 0.001 {
+            for layout in self.frame_layouts.iter_mut() {
+                layout.top -= manual_displacement;
+            }
+        }
         // While the user manually scrolls the depth-of-field blur is eased away
         // so the lyrics stay sharp for reading.
         let blur_scale = (1.0 - self.manual_scroll_blur_release).clamp(0.0, 1.0);
@@ -1499,10 +1511,11 @@ mod tests {
 
         assert_eq!(scene.dynamic_line_layouts(2_100)[1].height, 30.0);
 
-        let exiting = scene.dynamic_line_layouts(3_300)[1];
+        // Exit window is end(2500) + linger(200) .. + fade(400) = 2700..3100.
+        let exiting = scene.dynamic_line_layouts(2_900)[1];
         assert!(exiting.height > 0.0 && exiting.height < 30.0);
 
-        assert_eq!(scene.dynamic_line_layouts(3_701)[1].height, 0.0);
+        assert_eq!(scene.dynamic_line_layouts(3_200)[1].height, 0.0);
     }
 
     #[test]
