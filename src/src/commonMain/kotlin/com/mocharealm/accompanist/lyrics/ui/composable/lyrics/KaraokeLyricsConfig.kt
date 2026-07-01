@@ -6,10 +6,8 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextMotion
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.Dp
-import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.TextUnitType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -39,7 +37,7 @@ data class KaraokeLyricsConfig(
     val focus: KaraokeFocusConfig = KaraokeFocusConfig(),
     val autoScrollSpring: KaraokeSpringConfig = KaraokeSpringConfig(),
     val manualScroll: KaraokeManualScrollConfig = KaraokeManualScrollConfig(),
-    val breathingDots: KaraokeBreathingDotsDefaults = KaraokeBreathingDotsDefaults(),
+    val breathingDots: KaraokeBreathingDotsConfigs = KaraokeBreathingDotsConfigs(),
     val textColor: Color = Color.White,
     val showTranslation: Boolean = true,
     val showPhonetic: Boolean = true,

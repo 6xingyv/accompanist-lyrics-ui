@@ -1,6 +1,5 @@
 package com.mocharealm.accompanist.lyrics.ui.composable.lyrics
 
-import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import com.mocharealm.accompanist.lyrics.core.model.ISyncedLine

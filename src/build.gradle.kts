@@ -87,8 +87,6 @@ kotlin {
                 implementation(compose.ui)
                 implementation(compose.components.uiToolingPreview)
 
-                implementation(libs.gaze.capsule)
-
                 implementation(libs.accompanist.lyrics.core)
 
                 implementation(compose.components.resources)
