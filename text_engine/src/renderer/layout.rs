@@ -340,6 +340,36 @@ impl LyricsRenderer {
             lines.push(prepared);
         }
 
+        // Split oversized scroll clusters. A main line and its nested accompaniment
+        // lines normally scroll and anchor as ONE block (a shared `cluster_index`),
+        // but when their combined wrapped-row count is large, pinning the block's
+        // top drags the sung line well below the focus. Break such a cluster into
+        // per-line scroll units: each accompaniment keeps its `cluster_role` (so the
+        // entrance bloom still fires) but gets its own fresh `cluster_index`, while
+        // the main line stays on the original one — so the scroll anchors each part
+        // individually instead of as one tall block. Runs before the effective-end
+        // pass below so a split main line only stays focused for its own span.
+        const MAX_CLUSTER_ROWS: usize = 3;
+        let mut rows_by_cluster = HashMap::<usize, usize>::new();
+        for line in &lines {
+            *rows_by_cluster.entry(line.cluster_index).or_insert(0) += line.text_row_count();
+        }
+        let mut next_cluster_index = lines
+            .iter()
+            .map(|line| line.cluster_index)
+            .max()
+            .map(|max| max + 1)
+            .unwrap_or(0);
+        for line in &mut lines {
+            let oversized = rows_by_cluster
+                .get(&line.cluster_index)
+                .is_some_and(|rows| *rows > MAX_CLUSTER_ROWS);
+            if oversized && line.cluster_role.is_nested_accompaniment() {
+                line.cluster_index = next_cluster_index;
+                next_cluster_index += 1;
+            }
+        }
+
         let mut cluster_end_times = HashMap::<usize, i32>::new();
         for line in &lines {
             cluster_end_times

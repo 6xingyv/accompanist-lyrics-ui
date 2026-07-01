@@ -1490,34 +1490,42 @@ fn smooth_step(value: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
+// Nested accompaniment lines bloom in over this window. It is matched to the
+// auto-scroll spring's settle time so the entrance completes just as the main
+// line reaches its target position, and it is anchored at the accompaniment's
+// own start: a before-line accompaniment starts together with its cluster, so
+// its bloom finishes as the main scrolls into place; an after-line one blooms in
+// as it begins to be sung.
+pub(super) const ACCOMPANIMENT_ENTER_MS: f32 = 500.0;
+
 pub(super) fn accompaniment_visibility(start_ms: i32, end_ms: i32, current_time_ms: i32) -> f32 {
-    // Expand the accompaniment line into place shortly before it starts, then ease
-    // it back out after it ends. The grow/shrink is a deterministic eased height.
-    // Kept short and roughly matched to the scroll spring's settle time (~0.5s) so
-    // the make-room animation harmonizes with the auto-scroll instead of dragging
-    // on for a second-plus — a long animation overlaps the next line's expand and
-    // makes the focus bob (the "trembling" when two consecutive lines both have an
-    // accompaniment).
-    const ENTER_MS: f32 = 400.0;
+    // Grow the accompaniment into place from its start, hold, then ease it back
+    // out after it ends. This drives the make-room height and the line alpha; the
+    // matching scale bloom is `accompaniment_enter_scale`. Kept short (and matched
+    // to the scroll spring's ~0.5s settle) so it harmonizes with the auto-scroll
+    // instead of dragging on and overlapping the next line's expand (which makes
+    // the focus bob when two consecutive lines both carry an accompaniment).
     const EXIT_LINGER_MS: f32 = 200.0;
     const EXIT_FADE_MS: f32 = 400.0;
 
     let start = start_ms as f32;
     let end = end_ms as f32;
     let current = current_time_ms as f32;
-    let enter_start = start - ENTER_MS;
-    let exit_start = end + EXIT_LINGER_MS;
-    let exit_end = exit_start + EXIT_FADE_MS;
-
-    if current < enter_start || current > exit_end {
-        0.0
-    } else if current < start {
-        smooth_step((current - enter_start) / ENTER_MS)
-    } else if current <= exit_start {
-        1.0
-    } else {
-        smooth_step((exit_end - current) / EXIT_FADE_MS)
+    let exit_end = end + EXIT_LINGER_MS + EXIT_FADE_MS;
+    if current < start || current > exit_end {
+        return 0.0;
     }
+    let enter = smooth_step((current - start) / ACCOMPANIMENT_ENTER_MS);
+    let exit = smooth_step((exit_end - current) / EXIT_FADE_MS);
+    enter.min(exit)
+}
+
+/// Scale factor (0 -> 1) for a nested accompaniment line's entrance bloom, run
+/// over the same window as `accompaniment_visibility`'s enter phase so the scale
+/// and the alpha grow together and both settle as the main line lands in place.
+pub(super) fn accompaniment_enter_scale(start_ms: i32, current_time_ms: i32) -> f32 {
+    let progress = ((current_time_ms - start_ms) as f32 / ACCOMPANIMENT_ENTER_MS).clamp(0.0, 1.0);
+    smooth_step(progress)
 }
 
 pub(super) fn interlude_visibility(start_ms: i32, end_ms: i32, current_time_ms: i32) -> f32 {

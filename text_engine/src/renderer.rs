@@ -19,8 +19,9 @@ mod scroll;
 mod text_utils;
 
 use draw::{
-    accompaniment_visibility, apply_vertical_fade_skia, draw_breathing_dots_skia,
-    draw_prepared_text_skia, interlude_visibility, make_interlude_slot, rgba_from_argb,
+    accompaniment_enter_scale, accompaniment_visibility, apply_vertical_fade_skia,
+    draw_breathing_dots_skia, draw_prepared_text_skia, interlude_visibility, make_interlude_slot,
+    rgba_from_argb,
 };
 use scroll::{ManualScrollState, SpringLineState};
 #[cfg(not(target_os = "android"))]
@@ -1127,6 +1128,35 @@ impl LyricsRenderer {
                 frame_stats.visible_lines += 1;
             }
 
+            // Nested accompaniment lines bloom out of the main line's adjacent edge
+            // as the cluster scrolls into place: scale 0->1 (alpha already comes
+            // from `text_visibility`) pivoted at the corner touching the main line —
+            // bottom for a line above the main, top for one below — on the side set
+            // by the main line's alignment.
+            let accompaniment_scale = if line.cluster_role.is_nested_accompaniment() {
+                accompaniment_enter_scale(line.start, current_time_ms)
+            } else {
+                1.0
+            };
+            let scaled_accompaniment = accompaniment_scale < 0.999;
+            if scaled_accompaniment {
+                let pivot_x = if line.right_aligned {
+                    scene.config.width as f32 - scene.config.padding_x
+                } else {
+                    scene.config.padding_x
+                };
+                let draw_top = y + text_y_offset + scene.config.padding_y;
+                let pivot_y = if line.cluster_role == ClusterRole::BeforeAccompaniment {
+                    draw_top + line.main_text_height()
+                } else {
+                    draw_top
+                };
+                canvas.save();
+                canvas.translate((pivot_x, pivot_y));
+                canvas.scale((accompaniment_scale, accompaniment_scale));
+                canvas.translate((-pivot_x, -pivot_y));
+            }
+
             match &line.kind {
                 PreparedLineKind::Karaoke {
                     is_accompaniment,
@@ -1214,6 +1244,10 @@ impl LyricsRenderer {
                     blur_radius,
                     None,
                 );
+            }
+
+            if scaled_accompaniment {
+                canvas.restore();
             }
         }
 
@@ -1549,6 +1583,15 @@ impl PreparedLine {
             PreparedLineKind::Synced { text } => text.height,
         }
     }
+
+    /// Number of wrapped rows the main lyric text occupies (translation/phonetic
+    /// excluded) — used to size a scroll cluster for the oversized-cluster split.
+    fn text_row_count(&self) -> usize {
+        match &self.kind {
+            PreparedLineKind::Karaoke { text, .. } => text.rows.len().max(1),
+            PreparedLineKind::Synced { text } => text.rows.len().max(1),
+        }
+    }
 }
 
 fn prepared_text_width(text: &PreparedText) -> f32 {
@@ -1866,23 +1909,28 @@ mod tests {
             config: test_config(),
             lines: vec![
                 test_line(ClusterRole::Main, 1_000, 2_000, 50.0),
-                test_line(ClusterRole::AfterAccompaniment, 2_100, 2_500, 30.0),
+                test_line(ClusterRole::AfterAccompaniment, 2_100, 3_000, 30.0),
             ],
             content_height: 0.0,
         };
 
+        // Collapsed before it starts, and still collapsed at the instant it starts
+        // (the bloom now grows *from* the start rather than pre-rolling before it).
         assert_eq!(scene.dynamic_line_layouts(1_050)[1].height, 0.0);
+        assert_eq!(scene.dynamic_line_layouts(2_100)[1].height, 0.0);
 
-        let entering = scene.dynamic_line_layouts(1_800)[1];
+        // Blooms open over the enter window (start .. start + 500).
+        let entering = scene.dynamic_line_layouts(2_350)[1];
         assert!(entering.height > 0.0 && entering.height < 30.0);
 
-        assert_eq!(scene.dynamic_line_layouts(2_100)[1].height, 30.0);
+        // Fully open once the enter window completes, through the line and linger.
+        assert_eq!(scene.dynamic_line_layouts(2_700)[1].height, 30.0);
 
-        // Exit window is end(2500) + linger(200) .. + fade(400) = 2700..3100.
-        let exiting = scene.dynamic_line_layouts(2_900)[1];
+        // Exit window is end(3000) + linger(200) .. + fade(400) = 3200..3600.
+        let exiting = scene.dynamic_line_layouts(3_400)[1];
         assert!(exiting.height > 0.0 && exiting.height < 30.0);
 
-        assert_eq!(scene.dynamic_line_layouts(3_200)[1].height, 0.0);
+        assert_eq!(scene.dynamic_line_layouts(3_700)[1].height, 0.0);
     }
 
     #[test]

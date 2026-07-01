@@ -241,12 +241,18 @@ fun SyncedLyrics.toNativeLyricsSceneJson(
         lines.forEachIndexed { index, line ->
             if (line is KaraokeLine.MainKaraokeLine) {
                 val accompanimentLines = line.accompanimentLines.orEmpty()
+                // `line.start` is the <p> begin, which a before-line accompaniment
+                // can pull earlier than the main vocal — so it equals that
+                // accompaniment's own start and the `<` split misfiled it as an
+                // after-line one (rendered below the main). Split on the first MAIN
+                // syllable instead so a genuinely-earlier accompaniment stays before.
+                val mainVocalStart = line.syllables.firstOrNull()?.start ?: line.start
                 accompanimentLines
-                    .filter { it.start < line.start }
+                    .filter { it.start < mainVocalStart }
                     .forEach { appendSceneLine(it, index, index, "before_accompaniment") }
                 appendSceneLine(line, index, index, "main")
                 accompanimentLines
-                    .filter { it.start >= line.start }
+                    .filter { it.start >= mainVocalStart }
                     .forEach { appendSceneLine(it, index, index, "after_accompaniment") }
             } else if (line !is KaraokeLine.AccompanimentKaraokeLine) {
                 appendSceneLine(line, index, index, "standalone")
