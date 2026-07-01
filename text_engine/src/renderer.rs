@@ -1301,23 +1301,29 @@ impl PreparedScene {
         }
     }
 
-    /// Extends the focused range to cover every line whose singing overlaps it —
-    /// so a run of lines with overlapping timelines (duet trades, a main line and
-    /// its nested accompaniment, back-to-back lines with no gap) is treated as ONE
-    /// scroll batch. Accompaniment lines are ordinary entries in `self.lines`, so
-    /// they participate in the overlap chain and are never ignored. The scroll
-    /// anchor holds on the group's first line, and the cascade's rigid block ends
-    /// at the group's last line, until the whole batch has finished.
+    /// Extends the focused range to cover every line whose singing genuinely
+    /// overlaps it — so a run of lines with overlapping timelines (duet trades, a
+    /// main line and its nested accompaniment) is treated as ONE scroll batch.
+    /// Accompaniment lines are ordinary entries in `self.lines`, so they
+    /// participate in the overlap chain and are never ignored. The scroll anchor
+    /// holds on the group's first line, and the cascade's rigid block ends at the
+    /// group's last line, until the whole batch has finished.
+    ///
+    /// The overlap test is STRICT (`>`, not `>=`): a line that ends exactly when
+    /// the next begins is a clean sequential hand-off, not an overlap. Most TTML
+    /// (e.g. Apple Music exports) times lyrics perfectly back-to-back, so treating
+    /// `end == next.start` as overlap would chain an entire gapless run into one
+    /// group and freeze auto-scroll on its first line for the whole run.
     fn focus_group_range(&self, current_time_ms: i32) -> (usize, usize) {
         let (mut first, mut last) = self.focus_index_range(current_time_ms);
-        // Walk backward while the previous line hadn't finished when this one began
-        // (their timelines overlap or touch).
-        while first > 0 && self.lines[first - 1].effective_end >= self.lines[first].start {
+        // Walk backward while the previous line was still being sung when this one
+        // began (their timelines truly overlap — an exact touch does not count).
+        while first > 0 && self.lines[first - 1].effective_end > self.lines[first].start {
             first -= 1;
         }
         // Walk forward while the next line begins before this one finishes.
         while last + 1 < self.lines.len()
-            && self.lines[last].effective_end >= self.lines[last + 1].start
+            && self.lines[last].effective_end > self.lines[last + 1].start
         {
             last += 1;
         }
@@ -1514,6 +1520,67 @@ mod tests {
             translation: None,
             phonetic: None,
         }
+    }
+
+    fn indexed_line(index: usize, start: i32, end: i32, height: f32) -> PreparedLine {
+        let mut line = test_line(ClusterRole::Standalone, start, end, height);
+        line.source_index = index;
+        line.cluster_index = index;
+        line
+    }
+
+    // Most TTML (Apple Music exports especially) times lyrics perfectly
+    // back-to-back: line N ends exactly when line N+1 begins. Such a hand-off is
+    // NOT an overlap, so each line must stay its own focus group — otherwise the
+    // whole gapless run chains into one group anchored on its first line and
+    // auto-scroll freezes there for the entire run (the havent-rain bug).
+    #[test]
+    fn exactly_touching_lines_do_not_chain_into_one_focus_group() {
+        let scene = PreparedScene {
+            config: test_config(),
+            lines: vec![
+                indexed_line(0, 0, 1_000, 50.0),
+                indexed_line(1, 1_000, 2_000, 50.0),
+                indexed_line(2, 2_000, 3_000, 50.0),
+                indexed_line(3, 3_000, 4_000, 50.0),
+                indexed_line(4, 4_000, 5_000, 50.0),
+            ],
+            content_height: 0.0,
+        };
+
+        // A line deep in the gapless run is its own group, not swallowed by the
+        // lines before/after it.
+        assert_eq!(scene.focus_group_range(2_500), (2, 2));
+        assert_eq!(scene.focus_group_range(500), (0, 0));
+
+        // The scroll anchor therefore advances as playback moves line to line.
+        let layouts = scene.dynamic_line_layouts(2_500);
+        let s0 = scene.scroll_y_for_time_with_layouts(500, &layouts);
+        let s1 = scene.scroll_y_for_time_with_layouts(1_500, &layouts);
+        let s2 = scene.scroll_y_for_time_with_layouts(2_500, &layouts);
+        assert!(
+            s0 < s1 && s1 < s2,
+            "auto-scroll should advance across touching lines, got {s0} -> {s1} -> {s2}"
+        );
+    }
+
+    // Genuinely overlapping timelines (a duet trade or a main line and its nested
+    // accompaniment still being sung together) MUST still be one scroll batch so
+    // the anchor doesn't hop forward while the earlier line is still audible.
+    #[test]
+    fn genuinely_overlapping_lines_still_group() {
+        let scene = PreparedScene {
+            config: test_config(),
+            lines: vec![
+                indexed_line(0, 0, 2_000, 50.0),
+                indexed_line(1, 1_500, 3_500, 50.0),
+            ],
+            content_height: 0.0,
+        };
+
+        // At t=1000 only line 0 is focused, but line 1 begins before it ends, so
+        // the forward walk pulls line 1 into the group.
+        assert_eq!(scene.focus_group_range(1_000), (0, 1));
     }
 
     #[test]
