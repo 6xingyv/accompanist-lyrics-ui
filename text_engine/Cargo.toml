@@ -7,6 +7,9 @@ edition = "2021"
 name = "text_engine"
 crate-type = ["cdylib", "staticlib"]
 
+[profile.release]
+strip = "symbols"
+
 [dependencies]
 jni = "0.19"
 rustybuzz = "0.18.0"
