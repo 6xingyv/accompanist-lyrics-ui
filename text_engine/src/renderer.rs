@@ -513,6 +513,10 @@ struct PreparedLine {
     start: i32,
     end: i32,
     effective_end: i32,
+    /// Time the line's appearance (bloom) animation starts from. For a nested
+    /// accompaniment this is its MAIN line's start, so the whole cluster blooms in
+    /// together when the main appears; for every other line it's just `start`.
+    entrance_start: i32,
     height: f32,
     right_aligned: bool,
     /// Horizontal draw offset (px) added to `padding_x`. Non-zero only for the
@@ -1575,7 +1579,9 @@ impl PreparedScene {
 
     fn text_visibility_for_line(&self, line: &PreparedLine, current_time_ms: i32) -> f32 {
         if line.cluster_role.is_nested_accompaniment() {
-            accompaniment_visibility(line.start, line.end, current_time_ms)
+            // Enter from the main line's start (so it blooms in with the main), but
+            // exit on its own end (it leaves after its own singing finishes).
+            accompaniment_visibility(line.entrance_start, line.end, current_time_ms)
         } else {
             1.0
         }
@@ -1704,6 +1710,7 @@ mod tests {
             start,
             end,
             effective_end: end,
+            entrance_start: start,
             height,
             right_aligned: false,
             x_offset: 0.0,
@@ -1992,6 +1999,25 @@ mod tests {
         assert!(exiting.height > 0.0 && exiting.height < 30.0);
 
         assert_eq!(scene.dynamic_line_layouts(3_700)[1].height, 0.0);
+    }
+
+    // The accompaniment's appearance is anchored to its MAIN line's start (via
+    // `entrance_start`), so it blooms in with the main — already open well before
+    // its own singing begins — while still exiting on its own end.
+    #[test]
+    fn accompaniment_blooms_in_with_its_main_line() {
+        let mut after = test_line(ClusterRole::AfterAccompaniment, 2_100, 3_000, 30.0);
+        after.entrance_start = 1_000; // the main line's start
+        let scene = PreparedScene {
+            config: test_config(),
+            lines: vec![test_line(ClusterRole::Main, 1_000, 2_000, 50.0), after],
+            content_height: 0.0,
+        };
+
+        // Collapsed before the main appears.
+        assert_eq!(scene.dynamic_line_layouts(900)[1].height, 0.0);
+        // Fully open by main.start + enter window — long before its own start 2100.
+        assert_eq!(scene.dynamic_line_layouts(1_600)[1].height, 30.0);
     }
 
     #[test]

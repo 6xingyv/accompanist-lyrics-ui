@@ -278,6 +278,7 @@ impl LyricsRenderer {
                         start: line.start,
                         end: line.end,
                         effective_end: line.end,
+                        entrance_start: line.start,
                         height,
                         right_aligned,
                         x_offset: if right_aligned { right_align_offset } else { 0.0 },
@@ -333,6 +334,7 @@ impl LyricsRenderer {
                         start: line.start,
                         end: line.end,
                         effective_end: line.end,
+                        entrance_start: line.start,
                         height,
                         right_aligned: is_rtl,
                         x_offset: if is_rtl { right_align_offset } else { 0.0 },
@@ -363,6 +365,25 @@ impl LyricsRenderer {
             previous_end = Some(prepared.end);
             previous_right_aligned = prepared.right_aligned;
             lines.push(prepared);
+        }
+
+        // Anchor each nested accompaniment's appearance animation to its MAIN
+        // line's start, so a main line and all of its accompaniment bloom in
+        // together when the main appears (rather than each accompaniment blooming
+        // only when it is itself first sung). Captured here — keyed by the original
+        // cluster index, before the split below gives accompaniment lines their own.
+        let mut cluster_main_start = HashMap::<usize, i32>::new();
+        for line in &lines {
+            if line.cluster_role == ClusterRole::Main {
+                cluster_main_start.insert(line.cluster_index, line.start);
+            }
+        }
+        for line in &mut lines {
+            if line.cluster_role.is_nested_accompaniment() {
+                if let Some(&main_start) = cluster_main_start.get(&line.cluster_index) {
+                    line.entrance_start = main_start;
+                }
+            }
         }
 
         // Split oversized scroll clusters. A main line and its nested accompaniment

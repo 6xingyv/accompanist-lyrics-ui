@@ -67,12 +67,6 @@ compose {
     resources {
         packageOfResClass = "com.mocharealm.accompanist.sample"
         publicResClass = true
-        customDirectory(
-            sourceSetName = "commonMain",
-            directoryProvider = provider {
-                layout.projectDirectory.dir("src/commonMain/resources")
-            }
-        )
     }
 }
 

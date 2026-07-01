@@ -3,6 +3,7 @@ package com.mocharealm.accompanist.sample.ui.screen.player
 import android.content.ComponentName
 import android.content.Context
 import android.graphics.BitmapFactory
+import android.net.Uri
 import android.util.Log
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asAndroidBitmap
@@ -45,7 +46,7 @@ data class PlayerUiState(
     val playbackState: PlaybackState = PlaybackState(),
     val backgroundState: BackgroundVisualState = BackgroundVisualState(null, 0f),
     val lyrics: SyncedLyrics? = null,
-    val availableSongs: List<MusicItem> = emptyList(),
+    val isPreparingSelection: Boolean = false,
     val currentMusicItem: MusicItem? = null,
     val isShareSheetVisible: Boolean = false
 )
@@ -76,6 +77,8 @@ class PlayerViewModel(
     private var positionUpdateJob: Job? = null
     private var artworkClearJob: Job? = null
     private var luminanceCalculationJob: Job? = null
+    private var selectionPreparationJob: Job? = null
+    private var selectionPreparationToken = 0
     private var lastArtworkData: ByteArray? = null
     private val playerListener = object : Player.Listener {
         override fun onIsPlayingChanged(playing: Boolean) {
@@ -95,7 +98,6 @@ class PlayerViewModel(
     }
 
     init {
-        loadAvailableSongs()
         viewModelScope.launch {
             try {
                 val controller = controllerFuture.await()
@@ -116,20 +118,6 @@ class PlayerViewModel(
 
     private fun updateState(updater: (PlayerUiState) -> PlayerUiState) {
         _uiState.update(updater)
-    }
-
-    private fun loadAvailableSongs() {
-        viewModelScope.launch {
-            val songs =  musicRepository.getMusicItems()
-            updateState { it.copy(availableSongs = songs) }
-        }
-    }
-
-    private fun loadLyricsFor(item: MusicItem) {
-        viewModelScope.launch {
-            val lyrics = musicRepository.getLyricsFor(item)
-            updateState { it.copy(lyrics = lyrics) }
-        }
     }
 
     private fun updatePlaybackState() {
@@ -195,20 +183,103 @@ class PlayerViewModel(
         }
     }
 
-    fun onSongSelected(item: MusicItem) {
+    suspend fun findExternalLyricsPath(audioUri: Uri): String? =
+        musicRepository.findExternalLyricsPath(audioUri)
+
+    fun prepareSongSelection(
+        audioUri: Uri,
+        lyricsUri: Uri? = null,
+        translationUri: Uri? = null
+    ) {
+        val token = ++selectionPreparationToken
+        selectionPreparationJob?.cancel()
+        selectionPreparationJob = viewModelScope.launch {
+            updateState {
+                it.copy(
+                    isPreparingSelection = true,
+                    currentMusicItem = null,
+                    lyrics = null
+                )
+            }
+
+            try {
+                val item = musicRepository.createMusicItem(audioUri, lyricsUri, translationUri)
+                val lyrics = musicRepository.getLyricsFor(item)
+                val displayItem = item.withLyricsMetadataFallback(lyrics)
+                if (token == selectionPreparationToken) {
+                    updateState {
+                        it.copy(
+                            currentMusicItem = displayItem,
+                            lyrics = lyrics,
+                            isPreparingSelection = false
+                        )
+                    }
+                }
+            } catch (e: Exception) {
+                if (token == selectionPreparationToken) {
+                    Log.e("PlayerViewModel", "Error preparing selected song", e)
+                    updateState {
+                        it.copy(
+                            currentMusicItem = null,
+                            lyrics = null,
+                            isPreparingSelection = false
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    fun onSongSelected(
+        audioUri: Uri,
+        lyricsUri: Uri? = null,
+        translationUri: Uri? = null
+    ) {
         val controller = mediaController ?: return
-        updateState { it.copy(showSelectionDialog = false, currentMusicItem = item) }
-        controller.setMediaItem(item.mediaItem)
-        controller.repeatMode = Player.REPEAT_MODE_ALL
-        controller.prepare()
-        controller.play()
-        loadLyricsFor(item)
+        viewModelScope.launch {
+            val item = uiState.value.currentMusicItem
+                ?: musicRepository.createMusicItem(audioUri, lyricsUri, translationUri)
+            controller.setMediaItem(item.mediaItem)
+            controller.repeatMode = Player.REPEAT_MODE_ALL
+            controller.prepare()
+            controller.play()
+            updateState { it.copy(showSelectionDialog = false, currentMusicItem = item) }
+        }
+    }
+
+    private fun MusicItem.withLyricsMetadataFallback(lyrics: SyncedLyrics?): MusicItem {
+        if (lyrics == null) return this
+
+        val lyricsTitle = lyrics.title.trim().takeIf { it.isNotBlank() }
+        val lyricsArtists = lyrics.artists
+            ?.mapNotNull { it.name.trim().takeIf(String::isNotBlank) }
+            ?.distinct()
+            ?.joinToString(", ")
+            ?.takeIf { it.isNotBlank() }
+
+        val resolvedTitle = if (!titleFromAudioMetadata && lyricsTitle != null) lyricsTitle else label
+        val resolvedArtist = if (!artistFromAudioMetadata && lyricsArtists != null) lyricsArtists else artist
+
+        return if (resolvedTitle != label || resolvedArtist != artist) {
+            copy(label = resolvedTitle, artist = resolvedArtist)
+        } else {
+            this
+        }
     }
 
     fun onOpenSongSelection() {
         val controller = mediaController ?: return
         controller.stop()
-        updateState { it.copy(showSelectionDialog = true, lyrics = null, currentMusicItem = null) }
+        selectionPreparationJob?.cancel()
+        selectionPreparationToken++
+        updateState {
+            it.copy(
+                showSelectionDialog = true,
+                lyrics = null,
+                isPreparingSelection = false,
+                currentMusicItem = null
+            )
+        }
     }
 
     fun onShareRequested() {
@@ -277,6 +348,7 @@ class PlayerViewModel(
         super.onCleared()
         val controller = mediaController ?: return
         stopPositionUpdates()
+        selectionPreparationJob?.cancel()
         controller.removeListener(playerListener)
         controller.release()
         Log.d("PlayerViewModel", "ViewModel cleared and controller released.")

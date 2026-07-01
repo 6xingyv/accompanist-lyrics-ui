@@ -1,6 +1,15 @@
 package com.mocharealm.accompanist.sample.ui.screen.player
 
+import android.app.Activity
+import android.content.ContentResolver
+import android.content.Context
+import android.content.Intent
 import android.net.Uri
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
+import android.provider.OpenableColumns
+import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
@@ -26,9 +35,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -40,7 +46,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -62,16 +67,12 @@ import androidx.compose.ui.text.style.TextMotion
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.viewinterop.AndroidView
-import androidx.media3.common.MediaItem
 import com.mocharealm.accompanist.lyrics.core.model.SyncedLyrics
 import com.mocharealm.accompanist.lyrics.core.model.karaoke.KaraokeLine
 import com.mocharealm.accompanist.lyrics.core.model.karaoke.mapper.toKaraokeLine
 import com.mocharealm.accompanist.lyrics.core.model.synced.SyncedLine
 import com.mocharealm.accompanist.lyrics.ui.composable.lyrics.KaraokeLyricsView
-import com.mocharealm.accompanist.lyrics.ui.renderer.RustSkiaLyricsView
 import com.mocharealm.accompanist.sample.Res
-import com.mocharealm.accompanist.sample.domain.model.MusicItem
 import com.mocharealm.accompanist.sample.empty
 import com.mocharealm.accompanist.sample.ic_ellipsis
 import com.mocharealm.accompanist.sample.sf_pro
@@ -89,6 +90,7 @@ import kotlinx.coroutines.launch
 import org.jetbrains.compose.resources.imageResource
 import org.jetbrains.compose.resources.painterResource
 import org.koin.compose.viewmodel.koinViewModel
+import java.io.File
 import kotlin.math.abs
 
 
@@ -164,11 +166,16 @@ fun PlayerScreen(
             }
 
             if (uiState.showSelectionDialog) {
-                MusicItemSelectionDialog(
-                    items = uiState.availableSongs,
-                    onItemSelected = { item ->
-                        playerViewModel.onSongSelected(item)
+                SongSelectionDialog(
+                    onSongSelected = { audioUri, lyricsUri, translationUri ->
+                        playerViewModel.onSongSelected(audioUri, lyricsUri, translationUri)
                     },
+                    onSelectionChanged = { audioUri, lyricsUri, translationUri ->
+                        playerViewModel.prepareSongSelection(audioUri, lyricsUri, translationUri)
+                    },
+                    findExternalLyricsPath = { uri -> playerViewModel.findExternalLyricsPath(uri) },
+                    isPreparingSelection = uiState.isPreparingSelection,
+                    isSelectionPrepared = uiState.currentMusicItem != null,
                     onDismissRequest = { /* Optionally handle dismiss */ }
                 )
             }
@@ -215,8 +222,7 @@ fun MobilePlayerScreen(
                 }
                 PlayerMetadata(
                     uiState.currentMusicItem?.label ?: "Unknown Title",
-                    uiState.currentMusicItem?.testTarget?.split(" [")?.get(0)
-                        ?: "Unknown"
+                    uiState.currentMusicItem?.artist ?: "Unknown"
                 )
             }
             Spacer(Modifier.width(8.dp))
@@ -237,8 +243,7 @@ fun MobilePlayerScreen(
                         initialLine = line,
                         backgroundState = uiState.backgroundState,
                         title = uiState.currentMusicItem?.label ?: "Unknown Title",
-                        artist = uiState.currentMusicItem?.testTarget?.split(" [")?.get(0)
-                            ?: "Unknown",
+                        artist = uiState.currentMusicItem?.artist ?: "Unknown",
                         cover = cover
                     )
                     shareViewModel.prepareForSharing(context)
@@ -305,8 +310,7 @@ fun PadPlayerScreen(
             ) {
                 PlayerMetadata(
                     uiState.currentMusicItem?.label ?: "Unknown Title",
-                    uiState.currentMusicItem?.testTarget?.split(" [")?.get(0)
-                        ?: "Unknown"
+                    uiState.currentMusicItem?.artist ?: "Unknown"
                 )
                 PlayerControls(onOpenSongSelection = { playerViewModel.onOpenSongSelection() })
             }
@@ -328,8 +332,7 @@ fun PadPlayerScreen(
                             initialLine = line,
                             backgroundState = uiState.backgroundState,
                             title = uiState.currentMusicItem?.label ?: "Unknown Title",
-                            artist = uiState.currentMusicItem?.testTarget?.split(" [")?.get(0)
-                                ?: "Unknown",
+                            artist = uiState.currentMusicItem?.artist ?: "Unknown",
                             cover = cover
                         )
                         shareViewModel.prepareForSharing(context)
@@ -346,13 +349,18 @@ fun PadPlayerScreen(
 }
 
 @Composable
-fun CustomSongSelectionDialog(
-    onDismissRequest: () -> Unit,
-    onSongSelected: (MusicItem) -> Unit
+fun SongSelectionDialog(
+    onSongSelected: (Uri, Uri?, Uri?) -> Unit,
+    onSelectionChanged: (Uri, Uri?, Uri?) -> Unit,
+    findExternalLyricsPath: suspend (Uri) -> String?,
+    isPreparingSelection: Boolean,
+    isSelectionPrepared: Boolean,
+    onDismissRequest: () -> Unit
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
+    var hasAllFilesAccess by remember { mutableStateOf(hasAllFilesAccess()) }
     var audioUri by remember { mutableStateOf<Uri?>(null) }
     var lyricsUri by remember { mutableStateOf<Uri?>(null) }
     var translationUri by remember { mutableStateOf<Uri?>(null) }
@@ -361,50 +369,112 @@ fun CustomSongSelectionDialog(
     var lyricsName by remember { mutableStateOf("Select Lyrics") }
     var translationName by remember { mutableStateOf("Select Translation (Optional)") }
 
+    val allFilesAccessLauncher =
+        rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+            hasAllFilesAccess = hasAllFilesAccess()
+        }
+
+    fun launchAllFilesAccessSettings() {
+        val packageSettingsIntent = Intent(
+            Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+            Uri.parse("package:${context.packageName}")
+        )
+        val fallbackIntent = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
+        runCatching { allFilesAccessLauncher.launch(packageSettingsIntent) }
+            .onFailure { allFilesAccessLauncher.launch(fallbackIntent) }
+    }
+
     val audioLauncher =
-        rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-            uri?.let {
-                audioUri = it
-                audioName = it.path?.split("/")?.last() ?: "Audio Selected"
+        rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            val uri = result.data?.data
+            if (result.resultCode == Activity.RESULT_OK && uri != null) {
+                val selectedAudioUri = uri
+                audioUri = selectedAudioUri
+                audioName = displayNameForUri(context, selectedAudioUri, "Audio Selected")
+                lyricsUri = null
+                lyricsName = "Select Lyrics"
+                translationUri = null
+                translationName = "Select Translation (Optional)"
+                onSelectionChanged(selectedAudioUri, null, null)
+
+                scope.launch {
+                    val detectedLyricsPath = findExternalLyricsPath(selectedAudioUri)
+                    if (audioUri == selectedAudioUri && lyricsUri == null && detectedLyricsPath != null) {
+                        lyricsUri = Uri.fromFile(File(detectedLyricsPath))
+                        lyricsName = File(detectedLyricsPath).name
+                    }
+                }
             }
         }
 
     val lyricsLauncher =
-        rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-            uri?.let {
-                lyricsUri = it
-                lyricsName = it.path?.split("/")?.last() ?: "Lyrics Selected"
+        rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            val uri = result.data?.data
+            if (result.resultCode == Activity.RESULT_OK && uri != null) {
+                lyricsUri = uri
+                lyricsName = displayNameForUri(context, uri, "Lyrics Selected")
+                audioUri?.let { onSelectionChanged(it, lyricsUri, translationUri) }
             }
         }
 
     val translationLauncher =
-        rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-            uri?.let {
-                translationUri = it
-                translationName = it.path?.split("/")?.last() ?: "Translation Selected"
+        rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            val uri = result.data?.data
+            if (result.resultCode == Activity.RESULT_OK && uri != null) {
+                translationUri = uri
+                translationName = displayNameForUri(context, uri, "Translation Selected")
+                audioUri?.let { onSelectionChanged(it, lyricsUri, translationUri) }
             }
         }
 
     AlertDialog(
         onDismissRequest = onDismissRequest,
-        title = { Text("Custom Song Selection") },
+        title = { Text("Choose a song to play") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (!hasAllFilesAccess) {
+                    Button(
+                        onClick = ::launchAllFilesAccessSettings,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Grant File Access")
+                    }
+                }
                 OutlinedButton(
-                    onClick = { audioLauncher.launch("audio/*") },
-                    modifier = Modifier.fillMaxWidth()
+                    onClick = {
+                        audioLauncher.launch(
+                            Intent(Intent.ACTION_PICK, MediaStore.Audio.Media.EXTERNAL_CONTENT_URI)
+                                .setType("audio/*")
+                        )
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = hasAllFilesAccess
                 ) {
                     Text(audioName)
                 }
                 OutlinedButton(
-                    onClick = { lyricsLauncher.launch("*/*") },
-                    modifier = Modifier.fillMaxWidth()
+                    onClick = {
+                        lyricsLauncher.launch(
+                            Intent(Intent.ACTION_GET_CONTENT)
+                                .setType("*/*")
+                                .addCategory(Intent.CATEGORY_OPENABLE)
+                        )
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = hasAllFilesAccess
                 ) {
                     Text(lyricsName)
                 }
                 OutlinedButton(
-                    onClick = { translationLauncher.launch("*/*") },
-                    modifier = Modifier.fillMaxWidth()
+                    onClick = {
+                        translationLauncher.launch(
+                            Intent(Intent.ACTION_GET_CONTENT)
+                                .setType("*/*")
+                                .addCategory(Intent.CATEGORY_OPENABLE)
+                        )
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = hasAllFilesAccess
                 ) {
                     Text(translationName)
                 }
@@ -413,93 +483,47 @@ fun CustomSongSelectionDialog(
         confirmButton = {
             Button(
                 onClick = {
-                    if (audioUri != null && lyricsUri != null) {
-                        scope.launch {
-                            val lyricsContent = context.contentResolver.openInputStream(lyricsUri!!)
-                                ?.bufferedReader()?.use { it.readText() } ?: ""
-                            val translationContent = translationUri?.let {
-                                context.contentResolver.openInputStream(it)?.bufferedReader()
-                                    ?.use { it.readText() }
-                            }
-
-                            val item = MusicItem(
-                                label = audioName,
-                                testTarget = "Custom Selection",
-                                mediaItem = MediaItem.fromUri(audioUri!!),
-                                lyrics = lyricsContent,
-                                translation = translationContent,
-                                isCustom = true
-                            )
-                            onSongSelected(item)
-                        }
-                    }
+                    audioUri?.let { onSongSelected(it, lyricsUri, translationUri) }
                 },
-                enabled = audioUri != null && lyricsUri != null
+                enabled = hasAllFilesAccess && audioUri != null && isSelectionPrepared && !isPreparingSelection
             ) {
-                Text("Play")
+                Text(if (isPreparingSelection) "Parsing..." else "Play")
             }
         },
         dismissButton = {
-            Button(onClick = { onDismissRequest() }) {
+            Button(onClick = onDismissRequest) {
                 Text("Cancel")
             }
         }
     )
 }
 
-@Composable
-fun MusicItemSelectionDialog(
-    items: List<MusicItem>,
-    onItemSelected: (MusicItem) -> Unit,
-    onDismissRequest: () -> Unit
-) {
-    var showCustomDialog by remember { mutableStateOf(false) }
+private fun hasAllFilesAccess(): Boolean =
+    Build.VERSION.SDK_INT < Build.VERSION_CODES.R || Environment.isExternalStorageManager()
 
-    if (showCustomDialog) {
-        CustomSongSelectionDialog(
-            onDismissRequest = { showCustomDialog = false },
-            onSongSelected = {
-                showCustomDialog = false
-                onItemSelected(it)
-            }
-        )
-    } else {
-        var selectedIndex by remember { mutableIntStateOf(-1) }
-        AlertDialog(
-            onDismissRequest = onDismissRequest,
-            title = { Text("Choose a song to play") },
-            text = {
-                LazyColumn {
-                    item {
-                        OutlinedButton(
-                            onClick = { showCustomDialog = true },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(bottom = 8.dp)
-                        ) {
-                            Text("Select Custom File...")
-                        }
-                    }
-                    itemsIndexed(items) { index, item ->
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { selectedIndex = index }
-                                .padding(vertical = 12.dp)) {
-                            Text(item.label, fontWeight = FontWeight.Bold)
-                            Text(item.testTarget, fontSize = 14.sp)
-                        }
-                    }
-                }
-            },
-            confirmButton = {
-                Text("Confirm", Modifier.clickable {
-                    if (selectedIndex != -1) {
-                        onItemSelected(items[selectedIndex])
-                    }
-                })
-            })
+private fun displayNameForUri(context: Context, uri: Uri, fallback: String): String {
+    if (uri.scheme == ContentResolver.SCHEME_FILE) {
+        return uri.path?.let { File(it).name } ?: fallback
     }
+
+    return runCatching {
+        context.contentResolver.query(
+            uri,
+            arrayOf(OpenableColumns.DISPLAY_NAME),
+            null,
+            null,
+            null
+        )?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (index >= 0) cursor.getString(index) else null
+            } else {
+                null
+            }
+        }
+    }.getOrNull()
+        ?: uri.lastPathSegment?.substringAfterLast('/')
+        ?: fallback
 }
 
 @Composable
