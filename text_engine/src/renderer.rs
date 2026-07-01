@@ -114,19 +114,15 @@ const LINE_LAYOUT_EPSILON: f32 = 0.08;
 // rigid-block scroll and the list whips around.
 const LINE_LAYOUT_SEEK_BACKWARD_MS: i32 = 1;
 const LINE_LAYOUT_SEEK_FORWARD_MS: i32 = 600;
-const MANUAL_SCROLL_HOLD_MS: u64 = 1800;
 const MANUAL_SCROLL_MAX_FLING_VELOCITY: f32 = 14000.0;
 // iOS UIScrollView fling: velocity decays as `rate^(elapsed_ms)`, NORMAL = 0.998
 // (~2.0/s continuous friction). The old `exp(-4.8·dt)` killed flings ~2.4× too
 // fast, which is why they felt stiff. Ported from ktiays/fluid-scroll.
 const MANUAL_SCROLL_DECELERATION_RATE: f32 = 0.998;
 const MANUAL_SCROLL_VELOCITY_EPSILON: f32 = 14.0;
-// Bounce-back / return springs are now CRITICALLY damped (no underdamped wobble,
-// which read as "weird"). Overscroll uses iOS SpringBack's response 0.575s
-// (λ = 2π/0.575 ≈ 10.93 → stiffness λ² ≈ 119.4, damping 2λ ≈ 21.85); the
-// return keeps its snappier stiffness but at critical damping (2·√stiffness).
-const MANUAL_SCROLL_RETURN_STIFFNESS: f32 = 360.0;
-const MANUAL_SCROLL_RETURN_DAMPING: f32 = 37.95;
+// Overscroll bounce-back is critically damped (no underdamped wobble, which read
+// as "weird"). It uses iOS SpringBack's response 0.575s (lambda = 2pi/0.575
+// ~= 10.93, stiffness ~= 119.4, damping ~= 21.85).
 const MANUAL_SCROLL_OVERSCROLL_STIFFNESS: f32 = 119.4;
 const MANUAL_SCROLL_OVERSCROLL_DAMPING: f32 = 21.85;
 // iOS rubber-band: `(1 - 1/(d/limit·c + 1))·limit`, c = 0.55. The old formula

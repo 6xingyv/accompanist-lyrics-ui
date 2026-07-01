@@ -1247,6 +1247,13 @@ fn breathing_dots_state(
     current_time_ms: i32,
     dots: BreathingDotsConfig,
 ) -> (f32, f32, f32) {
+    const ENTER_BREATH_SCALE: f32 = 0.8;
+    const FULL_SCALE: f32 = 1.0;
+    // If the gap is only barely longer than enter+dip+still+exit, a single
+    // sub-frame "breath" from 0.8 to 1.0 reads as a pop. Treat that as no
+    // breathing window and let enter finish at the same scale dip starts from.
+    const MIN_VISIBLE_BREATHING_MS: f32 = 16.0;
+
     let start = start_ms as f32;
     let end = end_ms as f32;
     let current = current_time_ms as f32;
@@ -1265,13 +1272,20 @@ fn breathing_dots_state(
     let dip_start = end - exit - still - dip;
     let still_start = end - exit - still;
     let exit_start = end - exit;
+    let breathing_duration = (dip_start - enter_end).max(0.0);
+    let has_visible_breathing = breathing_duration > MIN_VISIBLE_BREATHING_MS;
+    let enter_end_scale = if has_visible_breathing {
+        ENTER_BREATH_SCALE
+    } else {
+        FULL_SCALE
+    };
 
     if current < enter_end {
-        let progress = ((current - start) / (enter_end - start).max(1.0)).clamp(0.0, 1.0);
+        let progress = ((current - start) / (enter_end - start).max(f32::EPSILON)).clamp(0.0, 1.0);
         let eased = smooth_step(progress);
-        return (eased * 0.8, eased, eased);
+        return (eased * enter_end_scale, eased, eased);
     }
-    if current < dip_start {
+    if has_visible_breathing && current < dip_start {
         // Breathe at ~3000ms/cycle, but stretch the period slightly so a whole
         // number of HALF-cycles fits the (variable-length) breathing window and
         // it always ends at a peak (value 1.0) — exactly where the dip phase
@@ -1279,7 +1293,6 @@ fn breathing_dots_state(
         // arbitrary phase, leaving a leftover ~half oscillation that read as an
         // "extra half cycle" before the dip. `0.9 - 0.1·cos`: starts at 0.8
         // (matching the enter end), peaks at 1.0 every odd half-cycle.
-        let breathing_duration = (dip_start - enter_end).max(1.0);
         let half_cycles = {
             let n = (breathing_duration / 1500.0).round().max(1.0);
             if (n as i64) % 2 == 0 {
@@ -1292,21 +1305,94 @@ fn breathing_dots_state(
         let angle = ((current - enter_end) / period) * 2.0 * PI;
         return (0.9 - 0.1 * angle.cos(), 1.0, 1.0);
     }
+    if current < dip_start {
+        return (FULL_SCALE, 1.0, 1.0);
+    }
     if current < still_start {
-        let progress = ((current - dip_start) / (still_start - dip_start).max(1.0)).clamp(0.0, 1.0);
+        let progress =
+            ((current - dip_start) / (still_start - dip_start).max(f32::EPSILON)).clamp(0.0, 1.0);
         return (0.8 + 0.2 * (progress * 2.0 * PI).cos(), 1.0, 1.0);
     }
     if current < exit_start {
         return (1.0, 1.0, 1.0);
     }
 
-    let progress = ((end - current) / (end - exit_start).max(1.0)).clamp(0.0, 1.0);
+    let progress = ((end - current) / (end - exit_start).max(f32::EPSILON)).clamp(0.0, 1.0);
     let eased = smooth_step(progress);
     (eased, eased, 1.0)
 }
 
 fn dots_total_width(dots: BreathingDotsConfig) -> f32 {
     dots.size * dots.number as f32 + dots.margin * dots.number.saturating_sub(1) as f32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_dots() -> BreathingDotsConfig {
+        BreathingDotsConfig {
+            number: 3,
+            size: 16.0,
+            margin: 12.0,
+            enter_ms: 3000.0,
+            still_ms: 200.0,
+            dip_ms: 3000.0,
+            exit_ms: 200.0,
+            color: 0xffff_ffff,
+        }
+    }
+
+    fn max_adjacent_scale_jump(duration_ms: i32) -> (f32, i32, f32, f32) {
+        let dots = test_dots();
+        let mut previous = breathing_dots_state(0, duration_ms, 0, dots).0;
+        let mut worst = (0.0, 0, previous, previous);
+        for t in 1..=duration_ms {
+            let scale = breathing_dots_state(0, duration_ms, t, dots).0;
+            let jump = (scale - previous).abs();
+            if jump > worst.0 {
+                worst = (jump, t, previous, scale);
+            }
+            previous = scale;
+        }
+        worst
+    }
+
+    #[test]
+    fn breathing_dots_scale_stays_continuous_when_breathing_window_is_missing() {
+        // 6400ms is exactly enter+dip+still+exit. The old formula ended enter at
+        // 0.8 then started dip at 1.0, producing a 0.2 scale pop at t=3000.
+        let (jump, time_ms, before, after) = max_adjacent_scale_jump(6400);
+        assert!(
+            jump < 0.02,
+            "scale jumped by {jump:.3} at {time_ms}ms ({before:.3} -> {after:.3})"
+        );
+
+        let enter_end_scale = breathing_dots_state(0, 6400, 3000, test_dots()).0;
+        assert!((enter_end_scale - 1.0).abs() < 0.0001);
+    }
+
+    #[test]
+    fn breathing_dots_scale_has_no_large_jumps_for_real_interlude_lengths() {
+        for duration_ms in [5001, 6200, 6401, 6500, 8000, 12_345, 40_000] {
+            let (jump, time_ms, before, after) = max_adjacent_scale_jump(duration_ms);
+            assert!(
+                jump < 0.05,
+                "duration {duration_ms}ms jumped by {jump:.3} at {time_ms}ms ({before:.3} -> {after:.3})"
+            );
+        }
+
+        let mut seed = 0x1234_5678u32;
+        for _ in 0..256 {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let duration_ms = 5001 + (seed % 35_000) as i32;
+            let (jump, time_ms, before, after) = max_adjacent_scale_jump(duration_ms);
+            assert!(
+                jump < 0.05,
+                "duration {duration_ms}ms jumped by {jump:.3} at {time_ms}ms ({before:.3} -> {after:.3})"
+            );
+        }
+    }
 }
 
 #[cfg(not(target_os = "android"))]
