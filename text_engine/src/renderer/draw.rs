@@ -1500,11 +1500,12 @@ pub(super) const ACCOMPANIMENT_ENTER_MS: f32 = 500.0;
 
 pub(super) fn accompaniment_visibility(start_ms: i32, end_ms: i32, current_time_ms: i32) -> f32 {
     // Grow the accompaniment into place from its start, hold, then ease it back
-    // out after it ends. This drives the make-room height and the line alpha; the
-    // matching scale bloom is `accompaniment_enter_scale`. Kept short (and matched
-    // to the scroll spring's ~0.5s settle) so it harmonizes with the auto-scroll
-    // instead of dragging on and overlapping the next line's expand (which makes
-    // the focus bob when two consecutive lines both carry an accompaniment).
+    // out after it ends. This one curve drives the make-room height, the line
+    // alpha AND the scale bloom (so the appear and disappear animations match).
+    // Kept short (and matched to the scroll spring's ~0.5s settle) so it
+    // harmonizes with the auto-scroll instead of dragging on and overlapping the
+    // next line's expand (which makes the focus bob when two consecutive lines
+    // both carry an accompaniment).
     const EXIT_LINGER_MS: f32 = 200.0;
     const EXIT_FADE_MS: f32 = 400.0;
 
@@ -1518,14 +1519,6 @@ pub(super) fn accompaniment_visibility(start_ms: i32, end_ms: i32, current_time_
     let enter = smooth_step((current - start) / ACCOMPANIMENT_ENTER_MS);
     let exit = smooth_step((exit_end - current) / EXIT_FADE_MS);
     enter.min(exit)
-}
-
-/// Scale factor (0 -> 1) for a nested accompaniment line's entrance bloom, run
-/// over the same window as `accompaniment_visibility`'s enter phase so the scale
-/// and the alpha grow together and both settle as the main line lands in place.
-pub(super) fn accompaniment_enter_scale(start_ms: i32, current_time_ms: i32) -> f32 {
-    let progress = ((current_time_ms - start_ms) as f32 / ACCOMPANIMENT_ENTER_MS).clamp(0.0, 1.0);
-    smooth_step(progress)
 }
 
 pub(super) fn interlude_visibility(start_ms: i32, end_ms: i32, current_time_ms: i32) -> f32 {

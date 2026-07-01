@@ -19,9 +19,8 @@ mod scroll;
 mod text_utils;
 
 use draw::{
-    accompaniment_enter_scale, accompaniment_visibility, apply_vertical_fade_skia,
-    draw_breathing_dots_skia, draw_prepared_text_skia, interlude_visibility, make_interlude_slot,
-    rgba_from_argb,
+    accompaniment_visibility, apply_vertical_fade_skia, draw_breathing_dots_skia,
+    draw_prepared_text_skia, interlude_visibility, make_interlude_slot, rgba_from_argb,
 };
 use scroll::{ManualScrollState, SpringLineState};
 #[cfg(not(target_os = "android"))]
@@ -140,6 +139,16 @@ const MANUAL_SCROLL_BLUR_RESTORE_MS: u64 = 2500;
 const MANUAL_SCROLL_BLUR_FADE_OUT_RATE: f32 = 12.0;
 const MANUAL_SCROLL_BLUR_FADE_IN_RATE: f32 = 6.0;
 const LYRIC_CLICK_SEEK_PENDING_MS: u64 = 1500;
+// A scroll batch — the run of time-overlapping lines that auto-scroll anchors and
+// moves as one rigid block (see `focus_group_range`), plus the main+accompaniment
+// cluster that shares a scroll anchor — is capped at this many wrapped rows. A
+// taller batch would freeze the scroll on its first line (pushing the sung line
+// far below the focus), so it is "split" into smaller batches instead.
+const MAX_SCROLL_GROUP_ROWS: usize = 3;
+// Fraction of the content width each line uses in a duet song (lines aligned to
+// both sides), so the two singers' lines occupy opposite 80% bands that overlap
+// in the middle. Solo songs use the full width.
+const DUET_LINE_WIDTH_RATIO: f32 = 0.85;
 
 #[derive(Debug, Deserialize)]
 pub struct LyricsScene {
@@ -506,6 +515,10 @@ struct PreparedLine {
     effective_end: i32,
     height: f32,
     right_aligned: bool,
+    /// Horizontal draw offset (px) added to `padding_x`. Non-zero only for the
+    /// right-aligned lines of a duet song, which are laid out in an 80%-wide band
+    /// and shifted right so they still hug the true right edge.
+    x_offset: f32,
     interlude: Option<PreparedInterlude>,
     kind: PreparedLineKind,
     translation: Option<PreparedText>,
@@ -1095,6 +1108,9 @@ impl LyricsRenderer {
                 .as_ref()
                 .map(|slot| slot.height * dynamic_layout.interlude_visibility)
                 .unwrap_or(0.0);
+            // Left edge of this line's text: `padding_x`, plus the duet right-band
+            // shift for right-aligned lines of a duet song (zero otherwise).
+            let origin_x = scene.config.padding_x + line.x_offset;
             let distance_alpha =
                 scene.focus_alpha(line, current_time_ms) * dynamic_layout.text_visibility;
             // The whole active cluster (the sung main line and its nested
@@ -1129,12 +1145,14 @@ impl LyricsRenderer {
             }
 
             // Nested accompaniment lines bloom out of the main line's adjacent edge
-            // as the cluster scrolls into place: scale 0->1 (alpha already comes
-            // from `text_visibility`) pivoted at the corner touching the main line —
-            // bottom for a line above the main, top for one below — on the side set
-            // by the main line's alignment.
+            // and retract back the same way. The scale tracks `text_visibility`
+            // (the same enter/hold/exit curve as the alpha and the make-room
+            // height), so the appear and disappear animations match: scale+alpha
+            // 0->1 on entrance, 1->0 on exit, pivoted at the corner touching the
+            // main line — bottom for a line above the main, top for one below — on
+            // the side set by the main line's alignment.
             let accompaniment_scale = if line.cluster_role.is_nested_accompaniment() {
-                accompaniment_enter_scale(line.start, current_time_ms)
+                dynamic_layout.text_visibility
             } else {
                 1.0
             };
@@ -1175,7 +1193,7 @@ impl LyricsRenderer {
                         canvas,
                         &self.skia_typefaces,
                         text,
-                        scene.config.padding_x,
+                        origin_x,
                         y + text_y_offset + scene.config.padding_y,
                         base_color,
                         line_alpha,
@@ -1194,7 +1212,7 @@ impl LyricsRenderer {
                         canvas,
                         &self.skia_typefaces,
                         text,
-                        scene.config.padding_x,
+                        origin_x,
                         y + text_y_offset + scene.config.padding_y,
                         base_color,
                         distance_alpha,
@@ -1217,7 +1235,7 @@ impl LyricsRenderer {
                     canvas,
                     &self.skia_typefaces,
                     translation,
-                    scene.config.padding_x,
+                    origin_x,
                     detail_y,
                     base_color,
                     0.42 * distance_alpha,
@@ -1237,7 +1255,7 @@ impl LyricsRenderer {
                     canvas,
                     &self.skia_typefaces,
                     phonetic,
-                    scene.config.padding_x,
+                    origin_x,
                     detail_y,
                     base_color,
                     0.55 * distance_alpha,
@@ -1443,15 +1461,33 @@ impl PreparedScene {
     /// group and freeze auto-scroll on its first line for the whole run.
     fn focus_group_range(&self, current_time_ms: i32) -> (usize, usize) {
         let (mut first, mut last) = self.focus_index_range(current_time_ms);
+        // Cap the batch at `MAX_SCROLL_GROUP_ROWS` wrapped rows so a long run of
+        // overlapping lines (a duet trade, or a main line plus a tall
+        // accompaniment) doesn't chain into one block that freezes auto-scroll on
+        // its first line for the whole run — split the oversized batch instead. The
+        // base focused range is always kept; only the overlap extension is capped.
+        let mut rows: usize = (first..=last)
+            .map(|index| self.lines[index].text_row_count())
+            .sum();
         // Walk backward while the previous line was still being sung when this one
         // began (their timelines truly overlap — an exact touch does not count).
         while first > 0 && self.lines[first - 1].effective_end > self.lines[first].start {
+            let candidate_rows = self.lines[first - 1].text_row_count();
+            if rows + candidate_rows > MAX_SCROLL_GROUP_ROWS {
+                break;
+            }
+            rows += candidate_rows;
             first -= 1;
         }
         // Walk forward while the next line begins before this one finishes.
         while last + 1 < self.lines.len()
             && self.lines[last].effective_end > self.lines[last + 1].start
         {
+            let candidate_rows = self.lines[last + 1].text_row_count();
+            if rows + candidate_rows > MAX_SCROLL_GROUP_ROWS {
+                break;
+            }
+            rows += candidate_rows;
             last += 1;
         }
         (first, last)
@@ -1670,6 +1706,7 @@ mod tests {
             effective_end: end,
             height,
             right_aligned: false,
+            x_offset: 0.0,
             interlude: None,
             kind: PreparedLineKind::Synced {
                 text: test_text(height),
@@ -1738,6 +1775,30 @@ mod tests {
         // At t=1000 only line 0 is focused, but line 1 begins before it ends, so
         // the forward walk pulls line 1 into the group.
         assert_eq!(scene.focus_group_range(1_000), (0, 1));
+    }
+
+    // A long run of lines that each overlap the next (a duet trade, or a main line
+    // plus a tall accompaniment) would otherwise chain into one batch and freeze
+    // auto-scroll on its first line. The row cap splits the oversized batch.
+    #[test]
+    fn oversized_overlapping_batch_is_capped_at_row_limit() {
+        let scene = PreparedScene {
+            config: test_config(),
+            lines: vec![
+                indexed_line(0, 0, 2_000, 50.0),
+                indexed_line(1, 1_500, 3_500, 50.0),
+                indexed_line(2, 3_000, 5_000, 50.0),
+                indexed_line(3, 4_500, 6_500, 50.0),
+                indexed_line(4, 6_000, 8_000, 50.0),
+            ],
+            content_height: 0.0,
+        };
+
+        // Every line overlaps the next, so without a cap the whole run chains into
+        // one batch. Each `indexed_line` is one row, so the batch stops at 3 rows.
+        let (first, last) = scene.focus_group_range(1_600);
+        assert_eq!((first, last), (0, 2));
+        assert!(last - first + 1 <= MAX_SCROLL_GROUP_ROWS);
     }
 
     // Every newly-exposed knob must survive the Kotlin JSON keys → `SceneConfig`

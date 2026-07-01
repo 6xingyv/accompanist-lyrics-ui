@@ -163,6 +163,29 @@ impl LyricsRenderer {
         };
 
         let content_width = (config.width as f32 - config.padding_x * 2.0).max(1.0);
+        // Duet songs (lines aligned to both sides) lay each line out in an 80%-wide
+        // band so the two singers' lines sit on opposite sides with an overlap in
+        // the middle, instead of both spanning the full width. Right-aligned lines
+        // are then shifted right by the freed 20% (`right_align_offset`) so they
+        // still hug the true right edge. Solo songs (one alignment) keep full width.
+        let is_duet = {
+            let mut saw_left = false;
+            let mut saw_right = false;
+            for input in &scene.lines {
+                if input_line_right_aligned(input) {
+                    saw_right = true;
+                } else {
+                    saw_left = true;
+                }
+            }
+            saw_left && saw_right
+        };
+        let layout_width = if is_duet {
+            (content_width * DUET_LINE_WIDTH_RATIO).max(1.0)
+        } else {
+            content_width
+        };
+        let right_align_offset = content_width - layout_width;
         let mut lines = Vec::with_capacity(scene.lines.len());
         let mut cursor_y = config.keep_alive;
         let mut previous_end: Option<i32> = None;
@@ -205,7 +228,7 @@ impl LyricsRenderer {
                         &mut prepared_syllables,
                         font_size,
                         line_height,
-                        content_width,
+                        layout_width,
                         right_aligned,
                         is_rtl,
                         config.show_phonetic,
@@ -220,7 +243,7 @@ impl LyricsRenderer {
                                 translation,
                                 config.translation_font_size,
                                 config.translation_line_height,
-                                content_width,
+                                layout_width,
                                 right_aligned,
                             )
                         })
@@ -234,7 +257,7 @@ impl LyricsRenderer {
                                 phonetic,
                                 config.phonetic_font_size,
                                 config.phonetic_line_height,
-                                content_width,
+                                layout_width,
                                 right_aligned,
                             )
                         })
@@ -257,6 +280,7 @@ impl LyricsRenderer {
                         effective_end: line.end,
                         height,
                         right_aligned,
+                        x_offset: if right_aligned { right_align_offset } else { 0.0 },
                         interlude: None,
                         kind: PreparedLineKind::Karaoke {
                             is_accompaniment: line.is_accompaniment,
@@ -281,7 +305,7 @@ impl LyricsRenderer {
                         &line.content,
                         config.normal_font_size,
                         config.normal_line_height,
-                        content_width,
+                        layout_width,
                         is_rtl,
                     );
                     let translation = if config.show_translation {
@@ -291,7 +315,7 @@ impl LyricsRenderer {
                                 translation,
                                 config.translation_font_size,
                                 config.translation_line_height,
-                                content_width,
+                                layout_width,
                                 is_rtl,
                             )
                         })
@@ -311,6 +335,7 @@ impl LyricsRenderer {
                         effective_end: line.end,
                         height,
                         right_aligned: is_rtl,
+                        x_offset: if is_rtl { right_align_offset } else { 0.0 },
                         interlude: None,
                         kind: PreparedLineKind::Synced { text },
                         translation,
@@ -348,8 +373,8 @@ impl LyricsRenderer {
         // entrance bloom still fires) but gets its own fresh `cluster_index`, while
         // the main line stays on the original one — so the scroll anchors each part
         // individually instead of as one tall block. Runs before the effective-end
-        // pass below so a split main line only stays focused for its own span.
-        const MAX_CLUSTER_ROWS: usize = 3;
+        // pass below so a split main line only stays focused for its own span. Uses
+        // the same row cap as `focus_group_range` so the two agree on "oversized".
         let mut rows_by_cluster = HashMap::<usize, usize>::new();
         for line in &lines {
             *rows_by_cluster.entry(line.cluster_index).or_insert(0) += line.text_row_count();
@@ -363,7 +388,7 @@ impl LyricsRenderer {
         for line in &mut lines {
             let oversized = rows_by_cluster
                 .get(&line.cluster_index)
-                .is_some_and(|rows| *rows > MAX_CLUSTER_ROWS);
+                .is_some_and(|rows| *rows > MAX_SCROLL_GROUP_ROWS);
             if oversized && line.cluster_role.is_nested_accompaniment() {
                 line.cluster_index = next_cluster_index;
                 next_cluster_index += 1;
@@ -1147,6 +1172,22 @@ impl LyricsRenderer {
             height,
             first_baseline: first_baseline.unwrap_or(line_height),
         }
+    }
+}
+
+/// Whether an input line lays out right-aligned — mirrors the per-line logic in
+/// `prepare_scene`, used up front to decide if the song is a duet (has lines on
+/// both sides).
+fn input_line_right_aligned(input: &LyricsLineInput) -> bool {
+    match input {
+        LyricsLineInput::Karaoke(line) => {
+            let is_rtl = line.syllables.iter().any(|s| contains_rtl(&s.content));
+            match line.alignment {
+                AlignmentInput::Start | AlignmentInput::Unspecified => is_rtl,
+                AlignmentInput::End => !is_rtl,
+            }
+        }
+        LyricsLineInput::Synced(line) => contains_rtl(&line.content),
     }
 }
 
