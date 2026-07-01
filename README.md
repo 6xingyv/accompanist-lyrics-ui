@@ -2,7 +2,7 @@
 
 ## 📜 License
 
-This branch is **view-only**. See the [LICENSE](http://www.apache.org/licenses/LICENSE-2.0.txt) file for details.
+This branch is **view-only**. See the [LICENSE](./LICENSE) file for details.
 
 ## 📦 Repository
 

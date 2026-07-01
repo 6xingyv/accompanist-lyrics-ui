@@ -443,8 +443,10 @@ fun SongSelectionDialog(
                 OutlinedButton(
                     onClick = {
                         audioLauncher.launch(
-                            Intent(Intent.ACTION_PICK, MediaStore.Audio.Media.EXTERNAL_CONTENT_URI)
-                                .setType("audio/*")
+                            Intent(Intent.ACTION_GET_CONTENT).apply {
+                                type = "audio/*"
+                                addCategory(Intent.CATEGORY_OPENABLE)
+                            }
                         )
                     },
                     modifier = Modifier.fillMaxWidth(),
@@ -455,9 +457,10 @@ fun SongSelectionDialog(
                 OutlinedButton(
                     onClick = {
                         lyricsLauncher.launch(
-                            Intent(Intent.ACTION_GET_CONTENT)
-                                .setType("*/*")
-                                .addCategory(Intent.CATEGORY_OPENABLE)
+                            Intent(Intent.ACTION_GET_CONTENT).apply {
+                                type = "*/*"
+                                addCategory(Intent.CATEGORY_OPENABLE)
+                            }
                         )
                     },
                     modifier = Modifier.fillMaxWidth(),
