@@ -230,15 +230,32 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         renderScheduled = false
         if (!surfaceReady) return
         applyPendingScrollOnRenderThread()
+        // Arm the next vsync callback BEFORE the blocking present. eglSwapBuffers
+        // (swapInterval 1) blocks the render thread until the next vsync, so posting
+        // the callback AFTER it would register past the vsync boundary and only fire
+        // a vsync later — halving the effective rate (present once per two refreshes)
+        // while the GPU sits idle in the swap. Registering it first lets Choreographer
+        // stamp it against the current vsync, so it fires on the next one → one present
+        // per refresh. If this frame turns out idle/lost, the callback is cancelled
+        // below so the loop still parks.
+        scheduleFrame()
         val result = engine.renderLyricsFrameToSurface(currentTimeMs)
         if (result < 0) {
             // Surface lost — drop EGL. The Java Surface is released by the pending
             // onSurfaceTextureDestroyed handshake (or the next bind).
             surfaceReady = false
+            renderChoreographer?.removeFrameCallback(frameCallback)
+            renderScheduled = false
             engine.clearRenderSurface()
             return
         }
-        if (result > 0) scheduleFrame()
+        if (result == 0) {
+            // Engine idle — cancel the optimistically-armed callback and park until
+            // the next requestRender() wake (position tick / touch).
+            renderChoreographer?.removeFrameCallback(frameCallback)
+            renderScheduled = false
+        }
+        // result > 0: the callback armed above IS the next frame — keep it.
     }
 
     /** Main thread: accumulate a drag delta without touching the engine lock. */
@@ -624,13 +641,12 @@ class RustSkiaLyricsView @JvmOverloads constructor(
             accompanimentLineHeightPx = 26f * scaledDensity,
             translationFontSizePx = 16f * scaledDensity,
             translationLineHeightPx = 21f * scaledDensity,
-            // Main + accompaniment lines are bold; translation/phonetic are regular.
-            normalFontWeight = 700,
-            accompanimentFontWeight = 700,
+            normalFontWeight = 600,
+            accompanimentFontWeight = 600,
             translationFontWeight = 400,
             phoneticFontWeight = 400,
             paddingXPx = 16f * density,
-            paddingYPx = 8f * density,
+            paddingYPx = 16f * density,
             keepAlivePx = 120f * density,
             textColorArgb = Color.WHITE,
         )

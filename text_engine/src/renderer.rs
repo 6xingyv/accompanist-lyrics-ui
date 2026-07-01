@@ -38,7 +38,7 @@ use draw::{awesome_glyph_effect_for_char, bounce, dip_and_rise, swell};
 const DEFAULT_WIDTH: u32 = 1;
 const DEFAULT_HEIGHT: u32 = 1;
 const DEFAULT_PADDING_X: f32 = 16.0;
-const DEFAULT_PADDING_Y: f32 = 8.0;
+const DEFAULT_PADDING_Y: f32 = 16.0;
 const DEFAULT_KEEP_ALIVE: f32 = 120.0;
 const DEFAULT_NORMAL_FONT_SIZE: f32 = 34.0;
 const DEFAULT_NORMAL_LINE_HEIGHT: f32 = 42.0;
