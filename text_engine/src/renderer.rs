@@ -19,8 +19,8 @@ mod scroll;
 mod text_utils;
 
 use draw::{
-    accompaniment_visibility, draw_breathing_dots_skia, draw_prepared_text_skia,
-    interlude_visibility, make_interlude_slot, rgba_from_argb,
+    accompaniment_visibility, apply_vertical_fade_skia, draw_breathing_dots_skia,
+    draw_prepared_text_skia, interlude_visibility, make_interlude_slot, rgba_from_argb,
 };
 use scroll::{ManualScrollState, SpringLineState};
 #[cfg(not(target_os = "android"))]
@@ -62,6 +62,11 @@ const TOP_FADE_PX: f32 = 20.0;
 #[cfg(not(target_os = "android"))]
 const BOTTOM_FADE_PX: f32 = 100.0;
 const KARAOKE_INACTIVE_ALPHA: f32 = 0.2;
+// A line that leaves the focus dims to `FOCUS_ALPHA_MIN` over `..FALLOFF_MS` of
+// distance (time before it starts / after it ends). Kept short so the dim is
+// snappy — the old 6000ms falloff took ~3.6s to reach 0.4, which read as sluggish.
+const FOCUS_ALPHA_MIN: f32 = 0.4;
+const FOCUS_ALPHA_FALLOFF_MS: f32 = 800.0;
 // Rows whose screen position is within this many line-heights of the focus
 // anchor stay fully sharp, so the current cluster (main line plus the nested
 // accompaniment a line or two below it — further still when the main carries a
@@ -890,7 +895,7 @@ impl LyricsRenderer {
             let auto_scroll_y =
                 scene.scroll_y_for_time_with_layouts(current_time_ms, &target_layouts);
             let max_scroll_y = scene.max_scroll_for_layouts(&target_layouts);
-            let (_focus_start, focus_end) = scene.focus_index_range(current_time_ms);
+            let (_focus_start, focus_end) = scene.focus_group_range(current_time_ms);
             (
                 target_layouts,
                 auto_scroll_y,
@@ -1104,6 +1109,17 @@ impl LyricsRenderer {
             }
         }
 
+        // Fade the top and bottom edges so lines dissolve as they scroll off. The
+        // top fade stays inside the keep-alive gap so the active line (anchored at
+        // keep_alive from the top) is never touched.
+        apply_vertical_fade_skia(
+            canvas,
+            scene.config.width as f32,
+            height as f32,
+            keep_alive * 0.7,
+            height as f32 * 0.12,
+        );
+
         if should_log_debug {
             frame_stats.visible_font_ids = visible_font_ids.len();
             info!(
@@ -1212,7 +1228,10 @@ impl PreparedScene {
             return 0.0;
         }
 
-        let focus_index = self.focus_anchor_index(current_time_ms);
+        // Anchor on the FIRST line of the overlap group so the scroll holds in
+        // place while any line in a batch of overlapping timelines is still being
+        // sung — instead of hopping forward the instant the first line ends.
+        let focus_index = self.focus_group_range(current_time_ms).0;
         let focus_top = self.cluster_top_for_line(focus_index, layouts);
         let target = focus_top - self.config.keep_alive;
         target.clamp(0.0, self.max_scroll_for_layouts(layouts))
@@ -1228,7 +1247,9 @@ impl PreparedScene {
         } else {
             (current_time_ms - line.effective_end) as f32
         };
-        (1.0 - (distance / 6000.0)).clamp(0.28, 0.78)
+        // Ease from 1.0 (at the focus edge, so there's no visible step off the
+        // focused line) down to FOCUS_ALPHA_MIN quickly.
+        (1.0 - distance / FOCUS_ALPHA_FALLOFF_MS).clamp(FOCUS_ALPHA_MIN, 1.0)
     }
 
     fn focus_index_range(&self, current_time_ms: i32) -> (usize, usize) {
@@ -1252,6 +1273,29 @@ impl PreparedScene {
                 (pending, pending)
             }
         }
+    }
+
+    /// Extends the focused range to cover every line whose singing overlaps it —
+    /// so a run of lines with overlapping timelines (duet trades, a main line and
+    /// its nested accompaniment, back-to-back lines with no gap) is treated as ONE
+    /// scroll batch. Accompaniment lines are ordinary entries in `self.lines`, so
+    /// they participate in the overlap chain and are never ignored. The scroll
+    /// anchor holds on the group's first line, and the cascade's rigid block ends
+    /// at the group's last line, until the whole batch has finished.
+    fn focus_group_range(&self, current_time_ms: i32) -> (usize, usize) {
+        let (mut first, mut last) = self.focus_index_range(current_time_ms);
+        // Walk backward while the previous line hadn't finished when this one began
+        // (their timelines overlap or touch).
+        while first > 0 && self.lines[first - 1].effective_end >= self.lines[first].start {
+            first -= 1;
+        }
+        // Walk forward while the next line begins before this one finishes.
+        while last + 1 < self.lines.len()
+            && self.lines[last].effective_end >= self.lines[last + 1].start
+        {
+            last += 1;
+        }
+        (first, last)
     }
 
     fn focus_anchor_index(&self, current_time_ms: i32) -> usize {

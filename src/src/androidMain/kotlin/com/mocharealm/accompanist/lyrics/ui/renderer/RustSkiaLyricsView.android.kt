@@ -21,6 +21,7 @@ import com.mocharealm.accompanist.lyrics.ui.composable.lyrics.getFontSource
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.roundToInt
@@ -79,6 +80,12 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         wakePending.set(false)
         scheduleFrame()
     }
+    // Drag deltas accumulate here (as float bits) from ACTION_MOVE on the main
+    // thread WITHOUT taking the engine lock, and are applied on the render thread
+    // inside doFrame. This keeps fast drags off the engine mutex, which the render
+    // thread holds for a whole frame — the old per-MOVE engine.scrollLyricsBy could
+    // block the UI thread ~a frame each move and stutter the drag.
+    private val pendingScrollDeltaBits = AtomicInteger(0)
 
     private var renderWidth = 0
     private var renderHeight = 0
@@ -222,6 +229,7 @@ class RustSkiaLyricsView @JvmOverloads constructor(
     private fun doFrame() {
         renderScheduled = false
         if (!surfaceReady) return
+        applyPendingScrollOnRenderThread()
         val result = engine.renderLyricsFrameToSurface(currentTimeMs)
         if (result < 0) {
             // Surface lost — drop EGL. The Java Surface is released by the pending
@@ -231,6 +239,36 @@ class RustSkiaLyricsView @JvmOverloads constructor(
             return
         }
         if (result > 0) scheduleFrame()
+    }
+
+    /** Main thread: accumulate a drag delta without touching the engine lock. */
+    private fun addPendingScroll(delta: Float) {
+        if (delta == 0f) return
+        while (true) {
+            val cur = pendingScrollDeltaBits.get()
+            val next = (Float.fromBits(cur) + delta).toRawBits()
+            if (pendingScrollDeltaBits.compareAndSet(cur, next)) return
+        }
+    }
+
+    /** Render thread: drain and apply the accumulated drag delta. Also called at
+     * the start of the posted end/cancel commands so a trailing delta is applied
+     * before the gesture is finalized (never after, which would revive dragging). */
+    private fun applyPendingScrollOnRenderThread() {
+        val delta = Float.fromBits(pendingScrollDeltaBits.getAndSet(0))
+        if (delta != 0f) engine.scrollLyricsBy(delta)
+    }
+
+    /**
+     * Run a scroll-lifecycle command (begin / end / cancel) on the render thread so
+     * ALL engine scroll mutations are ordered on one thread — keeping them after the
+     * accumulated deltas and off the main thread's hot path. Falls back to the main
+     * thread only if the render thread doesn't exist yet.
+     */
+    private fun postScrollCommand(command: () -> Unit) {
+        val handler = renderHandler
+        if (handler != null) handler.post(command) else command()
+        requestRender()
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
@@ -263,7 +301,7 @@ class RustSkiaLyricsView @JvmOverloads constructor(
                 if (!isDragging && abs(y - downY) > touchSlop) {
                     isDragging = true
                     lastTouchY = y
-                    engine.beginLyricsScroll()
+                    postScrollCommand { engine.beginLyricsScroll() }
                     cancelTapDetection(event)
                     return true
                 }
@@ -271,7 +309,7 @@ class RustSkiaLyricsView @JvmOverloads constructor(
                 if (isDragging) {
                     val dy = y - lastTouchY
                     if (dy != 0f) {
-                        engine.scrollLyricsBy(-dy * renderScale)
+                        addPendingScroll(-dy * renderScale)
                         requestRender()
                     }
                     lastTouchY = y
@@ -296,10 +334,12 @@ class RustSkiaLyricsView @JvmOverloads constructor(
             }
 
             MotionEvent.ACTION_CANCEL -> {
-                engine.cancelLyricsScroll()
+                postScrollCommand {
+                    applyPendingScrollOnRenderThread()
+                    engine.cancelLyricsScroll()
+                }
                 recycleTouchState()
                 parent?.requestDisallowInterceptTouchEvent(false)
-                requestRender()
                 return true
             }
         }
@@ -498,6 +538,8 @@ class RustSkiaLyricsView @JvmOverloads constructor(
     }
 
     private fun resetManualScroll() {
+        // Drop any un-applied drag delta so it can't be re-applied after the reset.
+        pendingScrollDeltaBits.set(0)
         engine.resetLyricsScroll()
     }
 
@@ -510,9 +552,14 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         } else {
             0f
         }
-        engine.endLyricsScroll(nativeVelocity)
+        // Apply any trailing drag delta then end the scroll, both on the render
+        // thread so the delta lands before endLyricsScroll (a delta applied after
+        // it would flip dragging back on and break the fling/return).
+        postScrollCommand {
+            applyPendingScrollOnRenderThread()
+            engine.endLyricsScroll(nativeVelocity)
+        }
         recycleTouchState()
-        requestRender()
     }
 
     private fun handlePointerUp(event: MotionEvent) {

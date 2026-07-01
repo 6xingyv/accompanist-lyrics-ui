@@ -7,8 +7,8 @@ use skia_safe::{
     font_arguments::{variation_position::Coordinate, VariationPosition},
     gradient,
     image_filters::{self, CropRect},
-    BlurStyle, Color4f, Font, FontArguments, FontHinting, FourByteTag, GlyphId, MaskFilter, Paint,
-    Point, Rect, Shader, TileMode, Typeface,
+    BlendMode, BlurStyle, Color4f, Font, FontArguments, FontHinting, FourByteTag, GlyphId,
+    MaskFilter, Paint, Point, Rect, Shader, TileMode, Typeface,
 };
 use std::collections::HashMap;
 use std::f32::consts::PI;
@@ -483,6 +483,51 @@ fn skia_color(color: (u8, u8, u8, u8), alpha: f32) -> Color4f {
         color.2 as f32 / 255.0,
         a,
     )
+}
+
+/// Multiply the canvas's alpha by a vertical gradient so the top and bottom edges
+/// fade to transparent — the GPU-path equivalent of [`apply_vertical_fade`]. Draws
+/// one full-bounds rect with `BlendMode::DstIn` (result = dst × src.alpha), which
+/// operates directly on the transparent-cleared framebuffer, no save_layer needed.
+pub(super) fn apply_vertical_fade_skia(
+    canvas: &skia_safe::Canvas,
+    width: f32,
+    height: f32,
+    top_px: f32,
+    bottom_px: f32,
+) {
+    if width <= 0.0 || height <= 0.0 || (top_px <= 0.0 && bottom_px <= 0.0) {
+        return;
+    }
+    let top_stop = (top_px / height).clamp(0.0, 1.0);
+    let bottom_stop = (1.0 - bottom_px / height).clamp(0.0, 1.0);
+    // Only the alpha channel matters for DstIn; keep RGB at 1.
+    let clear = Color4f::new(1.0, 1.0, 1.0, 0.0);
+    let solid = Color4f::new(1.0, 1.0, 1.0, 1.0);
+    // On a very short surface the two fades could overlap (bottom_stop <= top_stop);
+    // fall back to a single centre-peaked fade so it degrades gracefully.
+    let (colors, positions): (Vec<Color4f>, Vec<f32>) = if bottom_stop <= top_stop {
+        (vec![clear, solid, clear], vec![0.0, 0.5, 1.0])
+    } else {
+        (
+            vec![clear, solid, solid, clear],
+            vec![0.0, top_stop, bottom_stop, 1.0],
+        )
+    };
+    let gradient_colors = gradient::Colors::new(&colors, Some(&positions), TileMode::Clamp, None);
+    let gradient = gradient::Gradient::new(gradient_colors, gradient::Interpolation::default());
+    let Some(shader) = gradient::shaders::linear_gradient(
+        (Point::new(0.0, 0.0), Point::new(0.0, height)),
+        &gradient,
+        None,
+    ) else {
+        return;
+    };
+    let mut paint = Paint::default();
+    paint.set_anti_alias(false);
+    paint.set_shader(shader);
+    paint.set_blend_mode(BlendMode::DstIn);
+    canvas.draw_rect(Rect::new(0.0, 0.0, width, height), &paint);
 }
 
 fn make_karaoke_shader(brush: KaraokeBrush, base_color: (u8, u8, u8, u8)) -> Option<Shader> {

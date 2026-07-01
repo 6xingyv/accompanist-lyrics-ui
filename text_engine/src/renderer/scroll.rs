@@ -292,15 +292,17 @@ impl LyricsRenderer {
             .unwrap_or(0.0)
             .clamp(0.001, LINE_LAYOUT_MAX_DT);
         self.last_spring_frame_at = Some(now);
-        // A discontinuous playback-time jump means a seek (the user tapped a
-        // lyric), not playback advancing frame-by-frame. Latch a glide so the
-        // cascade stays suspended until the list settles at the new position —
-        // it resumes for natural progression once the springs reach the target.
-        let seek_jump = self.last_spring_playback_ms.is_some_and(|last| {
-            let delta = current_time_ms - last;
-            delta < -LINE_LAYOUT_SEEK_BACKWARD_MS || delta > LINE_LAYOUT_SEEK_FORWARD_MS
-        });
-        if seek_jump {
+        // Only a BACKWARD jump glides as a rigid block. Seeking backward turns rows
+        // that were a rigid block above the old focus into cascade rows below the
+        // NEW focus while they still carry the old, far-away scroll — that seeds the
+        // spring chain with a huge delta and whips the list around. A FORWARD
+        // tap-seek has no stale-scroll problem, so we deliberately let the normal
+        // cascade run: the block above the tapped line shoves up together and the
+        // lines below spring in one after another (the desired tap-to-seek feel).
+        let backward_seek = self
+            .last_spring_playback_ms
+            .is_some_and(|last| current_time_ms - last < -LINE_LAYOUT_SEEK_BACKWARD_MS);
+        if backward_seek {
             self.seek_glide_active = true;
         }
         self.last_spring_playback_ms = Some(current_time_ms);
