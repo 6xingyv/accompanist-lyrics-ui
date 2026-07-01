@@ -10,6 +10,9 @@
           <set>
             <option value="$PROJECT_DIR$" />
             <option value="$PROJECT_DIR$/sample" />
+            <option value="$PROJECT_DIR$/sample/android-app" />
+            <option value="$PROJECT_DIR$/sample/desktop-app" />
+            <option value="$PROJECT_DIR$/sample/shared" />
             <option value="$PROJECT_DIR$/src" />
           </set>
         </option>

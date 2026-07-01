@@ -1,4 +1,3 @@
-import com.android.build.api.dsl.androidLibrary
 import com.vanniktech.maven.publish.JavadocJar
 import com.vanniktech.maven.publish.KotlinMultiplatform
 import org.gradle.kotlin.dsl.support.serviceOf
@@ -11,6 +10,7 @@ import org.gradle.api.tasks.InputDirectory
 import org.gradle.api.tasks.OutputDirectory
 import org.gradle.api.tasks.TaskAction
 import org.gradle.process.ExecOperations
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import javax.inject.Inject
 
 plugins {
@@ -35,9 +35,9 @@ kotlin {
             }
         }
     }
-    androidLibrary {
+    android {
         namespace = "com.mocharealm.accompanist.lyrics.ui"
-        compileSdk = 36
+        compileSdk = 37
 
         minSdk = 29
 
@@ -55,8 +55,10 @@ kotlin {
         }
 
         compilations.configureEach {
-            compilerOptions.configure {
-                jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_21
+            compileTaskProvider.configure {
+                compilerOptions {
+                    jvmTarget.set(JvmTarget.JVM_21)
+                }
             }
         }
     }
@@ -149,7 +151,7 @@ mavenPublishing {
 }
 
 composeCompiler {
-    val configFile = project.layout.projectDirectory.file("compose-compiler-config.conf")
+    val configFile = rootProject.layout.projectDirectory.file("compose_compiler_config.conf")
     if (configFile.asFile.exists()) {
         stabilityConfigurationFiles.add(configFile)
     }

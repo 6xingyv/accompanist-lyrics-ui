@@ -10,7 +10,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
@@ -45,9 +44,7 @@ fun main() = application {
                 RepeatMode.Reverse
             )
         )
-        val listState = rememberLazyListState()
         KaraokeLyricsView(
-            listState = listState,
             lyrics = lyrics,
             currentPosition = { currentTime.toInt() },
             onLineClicked = { line ->

@@ -1,13 +1,9 @@
-import org.jetbrains.compose.desktop.application.dsl.TargetFormat
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
-import java.util.Properties
 
 plugins {
-    alias(libs.plugins.jetbrains.kotlin.multiplatform)
-    alias(libs.plugins.jetbrains.compose)
     alias(libs.plugins.android.application)
+    alias(libs.plugins.jetbrains.compose)
     alias(libs.plugins.compose.compiler)
-    alias(libs.plugins.maven.publish)
     alias(libs.plugins.stability.analyzer)
 }
 
@@ -16,68 +12,14 @@ fun getSecretProperty(key: String): String? {
         ?: project.findProperty(key) as? String
 }
 
-kotlin {
-    androidTarget {
-        compilerOptions {
-            jvmTarget = JvmTarget.JVM_21
-        }
-    }
-
-    jvm() {
-        compilerOptions {
-            jvmTarget = JvmTarget.JVM_21
-        }
-    }
-
-    sourceSets {
-        commonMain.dependencies {
-            implementation(compose.runtime)
-            implementation(compose.foundation)
-            implementation(compose.material3)
-            implementation(compose.ui)
-            implementation(compose.components.resources)
-            implementation(compose.components.uiToolingPreview)
-
-            implementation(libs.accompanist.lyrics.core)
-
-            implementation(libs.gaze.capsule)
-
-            implementation(project.dependencies.platform(libs.koin.bom))
-            implementation(libs.koin.compose)
-            implementation(libs.koin.compose.viewmodel)
-
-            implementation(project(":src"))
-        }
-
-        androidMain.dependencies {
-            implementation(libs.androidx.activity.compose)
-            implementation(libs.androidx.core.ktx)
-            implementation(libs.androidx.lifecycle.runtime.ktx)
-
-            implementation(libs.androidx.media3.exoplayer)
-            implementation(libs.androidx.media3.session)
-            implementation(files("src/androidMain/libs/lib-decoder-ffmpeg-release.aar"))
-
-            implementation(libs.cloudy)
-
-            implementation(libs.androidx.lifecycle.viewmodel.compose)
-            implementation(libs.kotlinx.coroutines.guava)
-        }
-
-        jvmMain.dependencies {
-            implementation(compose.desktop.currentOs)
-        }
-    }
-}
-
 android {
     namespace = "com.mocharealm.accompanist.sample"
-    compileSdk = 36
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "com.mocharealm.accompanist.demo"
         minSdk = 29
-        targetSdk = 36
+        targetSdk = 37
         versionCode = 3
         versionName = "${rootProject.version}-flight"
 
@@ -152,28 +94,41 @@ android {
     }
 }
 
-compose {
-    desktop {
-        application {
-            mainClass = "com.mocharealm.accompanist.sample.MainKt"
-
-            nativeDistributions {
-                targetFormats(TargetFormat.Dmg, TargetFormat.Exe)
-            }
-        }
-    }
-    resources {
-        packageOfResClass = "com.mocharealm.accompanist.sample"
-        publicResClass = true
-        customDirectory(
-            sourceSetName = "commonMain",
-            directoryProvider = provider {
-                layout.projectDirectory.dir("src/commonMain/resources")
-            }
-        )
+kotlin {
+    compilerOptions {
+        jvmTarget = JvmTarget.JVM_21
     }
 }
 
+dependencies {
+    implementation(project(":sample:shared"))
+    implementation(project(":src"))
+
+    implementation(compose.runtime)
+    implementation(compose.foundation)
+    implementation(compose.material3)
+    implementation(compose.ui)
+    implementation(compose.components.resources)
+    implementation(compose.components.uiToolingPreview)
+
+    implementation(libs.accompanist.lyrics.core)
+    implementation(libs.gaze.capsule)
+
+    implementation(platform(libs.koin.bom))
+    implementation(libs.koin.compose)
+    implementation(libs.koin.compose.viewmodel)
+
+    implementation(libs.androidx.activity.compose)
+    implementation(libs.androidx.core.ktx)
+    implementation(libs.androidx.lifecycle.runtime.ktx)
+    implementation(libs.androidx.lifecycle.viewmodel.compose)
+    implementation(libs.androidx.media3.exoplayer)
+    implementation(libs.androidx.media3.session)
+    implementation(files("src/main/libs/lib-decoder-ffmpeg-release.aar"))
+    implementation(libs.cloudy)
+    implementation(libs.kotlinx.coroutines.guava)
+}
+
 composeCompiler {
-    stabilityConfigurationFiles.add(rootProject.layout.projectDirectory.file("compose-compiler-config.conf"))
+    stabilityConfigurationFiles.add(rootProject.layout.projectDirectory.file("compose_compiler_config.conf"))
 }
