@@ -17,18 +17,19 @@ pub(super) struct ManualScrollState {
     velocity: f32,
     dragging: bool,
     hold_until: Option<Instant>,
+    return_to_auto_requested: bool,
     /// Blur stays released until this instant. Set purely from real touch input
     /// (grab / drag / release / cancel) and never touched by the fling/return
     /// physics, so the automatic glide-back can't re-trigger the blur.
     blur_engaged_until: Option<Instant>,
 }
 
-
 impl LyricsRenderer {
     pub(super) fn reset_layout_animation_state(&mut self) {
         self.spring_layouts.clear();
         self.last_spring_frame_at = None;
         self.last_spring_playback_ms = None;
+        self.last_seek_detection_playback_ms = None;
         self.last_target_scroll_y = None;
         self.layout_animation_active = false;
         self.seek_glide_active = false;
@@ -51,6 +52,7 @@ impl LyricsRenderer {
         self.manual_scroll.dragging = true;
         self.manual_scroll.velocity = 0.0;
         self.manual_scroll.hold_until = None;
+        self.manual_scroll.return_to_auto_requested = false;
         self.manual_scroll_active = true;
         self.last_manual_scroll_frame_at = Some(now);
         self.engage_manual_scroll_blur(now);
@@ -64,6 +66,7 @@ impl LyricsRenderer {
         self.manual_scroll.velocity = 0.0;
         self.manual_scroll.hold_until = None;
         self.manual_scroll.dragging = true;
+        self.manual_scroll.return_to_auto_requested = false;
         self.manual_scroll_active = true;
         self.engage_manual_scroll_blur(Instant::now());
     }
@@ -75,13 +78,8 @@ impl LyricsRenderer {
             -MANUAL_SCROLL_MAX_FLING_VELOCITY,
             MANUAL_SCROLL_MAX_FLING_VELOCITY,
         );
-        if self.manual_scroll.velocity.abs() <= MANUAL_SCROLL_VELOCITY_EPSILON {
-            self.manual_scroll.velocity = 0.0;
-            self.manual_scroll.hold_until =
-                Some(now + Duration::from_millis(MANUAL_SCROLL_HOLD_MS));
-        } else {
-            self.manual_scroll.hold_until = None;
-        }
+        self.manual_scroll.hold_until = None;
+        self.manual_scroll.return_to_auto_requested = true;
         self.manual_scroll_active = true;
         self.last_manual_scroll_frame_at = Some(now);
         self.engage_manual_scroll_blur(now);
@@ -91,29 +89,36 @@ impl LyricsRenderer {
         let now = Instant::now();
         self.manual_scroll.dragging = false;
         self.manual_scroll.velocity = 0.0;
-        self.manual_scroll.hold_until =
-            Some(now + Duration::from_millis(MANUAL_SCROLL_HOLD_MS / 2));
+        self.manual_scroll.hold_until = None;
+        self.manual_scroll.return_to_auto_requested = true;
         self.manual_scroll_active = self.manual_scroll.offset.abs() > LINE_LAYOUT_EPSILON;
         self.engage_manual_scroll_blur(now);
     }
 
     /// Drops a lingering manual-scroll offset when a seek lands (a discontinuous
-    /// playback-time jump), unless a finger is actively dragging. Without this the
-    /// stale offset is folded onto the seeked auto position and the list parks at
-    /// the wrong place after tapping a lyric you scrolled away to. Reuses the same
-    /// time-jump signal as the spring seek-glide; `last_spring_playback_ms` still
-    /// holds the previous frame's time when this runs.
+    /// playback-time jump), unless a finger is actively dragging. This intentionally
+    /// uses a render-frame playback timestamp separate from the spring timestamp:
+    /// manual scrolling freezes the spring state, but seek detection still has to
+    /// advance every frame so normal playback during a fling is not mistaken for a
+    /// seek the moment the user releases.
     pub(super) fn clear_manual_scroll_on_seek(&mut self, current_time_ms: i32) {
-        let seek_landed = self.last_spring_playback_ms.is_some_and(|last| {
+        let seek_landed = self.last_seek_detection_playback_ms.is_some_and(|last| {
             let delta = current_time_ms - last;
             delta < -LINE_LAYOUT_SEEK_BACKWARD_MS || delta > LINE_LAYOUT_SEEK_FORWARD_MS
         });
+        self.last_seek_detection_playback_ms = Some(current_time_ms);
         if seek_landed && !self.manual_scroll.dragging {
             self.reset_manual_scroll();
         }
     }
 
-    pub(super) fn update_manual_scroll_target(&mut self, auto_scroll_y: f32, max_scroll_y: f32) -> f32 {
+    pub(super) fn update_manual_scroll_target(
+        &mut self,
+        current_time_ms: i32,
+        auto_scroll_y: f32,
+        max_scroll_y: f32,
+        target_layout_count: usize,
+    ) -> f32 {
         let now = Instant::now();
         let dt = self
             .last_manual_scroll_frame_at
@@ -122,17 +127,64 @@ impl LyricsRenderer {
             .clamp(0.001, LINE_LAYOUT_MAX_DT);
         self.last_manual_scroll_frame_at = Some(now);
 
+        let blur_engaged = self.manual_scroll.dragging
+            || self
+                .manual_scroll
+                .blur_engaged_until
+                .is_some_and(|until| now < until);
         let mut active = self.manual_scroll.dragging;
         if !self.manual_scroll.dragging {
-            if self.manual_scroll.velocity.abs() > MANUAL_SCROLL_VELOCITY_EPSILON {
+            if self.manual_scroll.return_to_auto_requested && !blur_engaged {
+                let return_scroll_y = self.manual_scroll_projected_scroll(auto_scroll_y, max_scroll_y);
+                let return_displacement = return_scroll_y - auto_scroll_y;
+                let can_finish_return = return_displacement.abs() <= LINE_LAYOUT_EPSILON
+                    || self.seed_manual_scroll_return_glide(
+                        return_scroll_y,
+                        current_time_ms,
+                        auto_scroll_y,
+                        target_layout_count,
+                    );
+                if can_finish_return {
+                    self.manual_scroll.offset = 0.0;
+                    self.manual_scroll.velocity = 0.0;
+                    self.manual_scroll.hold_until = None;
+                    self.manual_scroll.return_to_auto_requested = false;
+                    active |= return_displacement.abs() > LINE_LAYOUT_EPSILON;
+                } else {
+                    active = true;
+                }
+            }
+
+            // Once the return hold has expired, keep the return spring in control
+            // until the offset reaches zero. Its velocity is spring state, not a
+            // user fling; feeding it through the fling deceleration path would turn
+            // each return step into another coast + hold cycle.
+            let return_due = self
+                .manual_scroll
+                .hold_until
+                .is_some_and(|hold_until| now >= hold_until)
+                && !self.manual_scroll.return_to_auto_requested
+                && self.manual_scroll.offset.abs() > LINE_LAYOUT_EPSILON;
+            if return_due {
+                active |= spring_step(
+                    &mut self.manual_scroll.offset,
+                    &mut self.manual_scroll.velocity,
+                    0.0,
+                    MANUAL_SCROLL_RETURN_STIFFNESS,
+                    MANUAL_SCROLL_RETURN_DAMPING,
+                    dt,
+                );
+            } else if self.manual_scroll.velocity.abs() > MANUAL_SCROLL_VELOCITY_EPSILON {
                 self.manual_scroll.offset += self.manual_scroll.velocity * dt;
                 // iOS exponential deceleration: v *= rate^(elapsed_ms).
-                self.manual_scroll.velocity *=
-                    MANUAL_SCROLL_DECELERATION_RATE.powf(dt * 1000.0);
+                self.manual_scroll.velocity *= MANUAL_SCROLL_DECELERATION_RATE.powf(dt * 1000.0);
                 if self.manual_scroll.velocity.abs() <= MANUAL_SCROLL_VELOCITY_EPSILON {
                     self.manual_scroll.velocity = 0.0;
-                    self.manual_scroll.hold_until =
-                        Some(now + Duration::from_millis(MANUAL_SCROLL_HOLD_MS));
+                    self.manual_scroll.hold_until = if self.manual_scroll.return_to_auto_requested {
+                        None
+                    } else {
+                        Some(now + Duration::from_millis(MANUAL_SCROLL_HOLD_MS))
+                    };
                 }
                 active = true;
             }
@@ -152,9 +204,11 @@ impl LyricsRenderer {
                     MANUAL_SCROLL_OVERSCROLL_DAMPING,
                     dt,
                 );
-            } else if self.manual_scroll.velocity == 0.0
+            } else if self.manual_scroll.velocity.abs() <= MANUAL_SCROLL_VELOCITY_EPSILON
+                && !self.manual_scroll.return_to_auto_requested
                 && self.manual_scroll.offset.abs() > LINE_LAYOUT_EPSILON
             {
+                self.manual_scroll.velocity = 0.0;
                 let hold_until = self
                     .manual_scroll
                     .hold_until
@@ -192,11 +246,6 @@ impl LyricsRenderer {
         // to the active line (or normal playback auto-scroll) can never flip the
         // blur off/on again. Keep rendering while the blur is engaged or fading
         // so the ease-in still runs even when playback is paused.
-        let blur_engaged = self.manual_scroll.dragging
-            || self
-                .manual_scroll
-                .blur_engaged_until
-                .is_some_and(|until| now < until);
         let blur_target = if blur_engaged { 1.0 } else { 0.0 };
         if blur_engaged {
             manual_scroll_active = true;
@@ -208,7 +257,8 @@ impl LyricsRenderer {
                 MANUAL_SCROLL_BLUR_FADE_IN_RATE
             };
             let factor = 1.0 - (-rate * dt).exp();
-            self.manual_scroll_blur_release += (blur_target - self.manual_scroll_blur_release) * factor;
+            self.manual_scroll_blur_release +=
+                (blur_target - self.manual_scroll_blur_release) * factor;
             if (self.manual_scroll_blur_release - blur_target).abs() <= 0.001 {
                 self.manual_scroll_blur_release = blur_target;
             } else {
@@ -220,9 +270,52 @@ impl LyricsRenderer {
         self.manual_scroll_projected_scroll(auto_scroll_y, max_scroll_y)
     }
 
-    pub(super) fn manual_scroll_projected_scroll(&self, auto_scroll_y: f32, max_scroll_y: f32) -> f32 {
+    pub(super) fn manual_scroll_plain_list_active(&self) -> bool {
+        self.manual_scroll.dragging || self.manual_scroll.return_to_auto_requested
+    }
+
+    pub(super) fn manual_scroll_projected_scroll(
+        &self,
+        auto_scroll_y: f32,
+        max_scroll_y: f32,
+    ) -> f32 {
         let raw_scroll_y = auto_scroll_y + self.manual_scroll.offset;
         rubber_band_scroll(raw_scroll_y, max_scroll_y)
+    }
+
+    fn seed_manual_scroll_return_glide(
+        &mut self,
+        start_scroll_y: f32,
+        current_time_ms: i32,
+        target_scroll_y: f32,
+        target_layout_count: usize,
+    ) -> bool {
+        if target_layout_count == 0 {
+            return false;
+        }
+
+        if self.spring_layouts.len() != target_layout_count {
+            self.spring_layouts = vec![
+                SpringLineState {
+                    scroll: start_scroll_y,
+                    velocity: 0.0,
+                };
+                target_layout_count
+            ];
+        }
+        for state in &mut self.spring_layouts {
+            state.scroll = start_scroll_y;
+            state.velocity = 0.0;
+        }
+        // Use the same rigid-block spring path as a seek glide: the manual view is
+        // treated as the starting scroll position, and the existing auto target is
+        // chased by the per-line spring system instead of by manual offset decay.
+        self.seek_glide_active = true;
+        self.layout_animation_active = true;
+        self.last_spring_frame_at = Some(Instant::now());
+        self.last_spring_playback_ms = Some(current_time_ms);
+        self.last_target_scroll_y = Some(target_scroll_y);
+        true
     }
 
     /// Advances the per-line scroll springs one frame and returns each line's
@@ -282,7 +375,7 @@ impl LyricsRenderer {
             self.last_target_scroll_y = Some(target_scroll_y);
             self.layout_animation_active = false;
             self.seek_glide_active = false;
-            self.project_uniform(target_layouts, target_scroll_y);
+            self.project_uniform_frame_layout(target_layouts, target_scroll_y);
             return;
         }
 
@@ -377,7 +470,11 @@ impl LyricsRenderer {
 
     /// Projects `target_layouts` into the reused `frame_layouts` buffer with a
     /// single shared scroll for every row (snap / drag / reset).
-    fn project_uniform(&mut self, target_layouts: &[DynamicLineLayout], scroll: f32) {
+    pub(super) fn project_uniform_frame_layout(
+        &mut self,
+        target_layouts: &[DynamicLineLayout],
+        scroll: f32,
+    ) {
         self.frame_layouts.clear();
         self.frame_layouts.reserve(target_layouts.len());
         for layout in target_layouts {
@@ -476,6 +573,196 @@ mod tests {
         let min = scrolls.iter().copied().fold(f32::INFINITY, f32::min);
         let max = scrolls.iter().copied().fold(f32::NEG_INFINITY, f32::max);
         max - min
+    }
+
+    #[test]
+    fn manual_scroll_return_spring_keeps_control_after_hold_expires() {
+        let mut renderer = LyricsRenderer::new();
+        renderer.manual_scroll.offset = 360.0;
+        renderer.manual_scroll.velocity = 0.0;
+        renderer.manual_scroll.dragging = false;
+        renderer.manual_scroll.hold_until = Some(Instant::now() - Duration::from_millis(1));
+        renderer.last_manual_scroll_frame_at = Some(Instant::now() - Duration::from_millis(16));
+
+        for _ in 0..3000 {
+            renderer.update_manual_scroll_target(1_000, 480.0, 1200.0, 6);
+        }
+
+        assert_eq!(renderer.manual_scroll.offset, 0.0);
+        assert_eq!(renderer.manual_scroll.velocity, 0.0);
+        assert!(renderer.manual_scroll.hold_until.is_none());
+    }
+
+    #[test]
+    fn ending_manual_scroll_keeps_fling_until_blur_restore_window_expires() {
+        let mut renderer = LyricsRenderer::new();
+        let content = even_layouts(6, 100.0);
+        let viewport = 600.0;
+
+        renderer.animate_frame_layout(1_000, &content, 200.0, viewport, 2);
+        renderer.begin_manual_scroll();
+        renderer.scroll_manual_by(120.0);
+        renderer.end_manual_scroll(1_000.0);
+
+        let projected = renderer.update_manual_scroll_target(1_016, 200.0, 900.0, content.len());
+
+        assert!(projected > 320.0);
+        assert!(renderer.manual_scroll.offset > 120.0);
+        assert!(renderer.manual_scroll.velocity > 0.0);
+        assert!(renderer.manual_scroll.return_to_auto_requested);
+        assert!(renderer.manual_scroll_plain_list_active());
+        assert!(!renderer.seek_glide_active);
+    }
+
+    #[test]
+    fn manual_scroll_projects_as_plain_list_without_line_spring() {
+        let mut renderer = LyricsRenderer::new();
+        let content = even_layouts(6, 100.0);
+        let viewport = 600.0;
+
+        for _ in 0..20 {
+            renderer.animate_frame_layout(1_000, &content, 200.0, viewport, 2);
+        }
+        renderer.begin_manual_scroll();
+        renderer.scroll_manual_by(120.0);
+
+        let combined_scroll_y =
+            renderer.update_manual_scroll_target(1_016, 200.0, 900.0, content.len());
+        assert!(renderer.manual_scroll_plain_list_active());
+
+        renderer.project_uniform_frame_layout(&content, combined_scroll_y);
+
+        assert!(
+            scroll_spread(&renderer.frame_layouts, &content) < LINE_LAYOUT_EPSILON,
+            "manual scroll should move every row with one shared list scroll"
+        );
+        assert!((renderer.frame_layouts[0].top + 320.0).abs() < LINE_LAYOUT_EPSILON);
+    }
+
+    #[test]
+    fn normal_playback_after_release_keeps_pending_manual_return() {
+        let mut renderer = LyricsRenderer::new();
+        let content = even_layouts(6, 100.0);
+        let viewport = 600.0;
+
+        renderer.animate_frame_layout(1_000, &content, 200.0, viewport, 2);
+        renderer.clear_manual_scroll_on_seek(1_000);
+        renderer.begin_manual_scroll();
+        renderer.scroll_manual_by(120.0);
+        renderer.clear_manual_scroll_on_seek(1_030);
+        renderer.end_manual_scroll(0.0);
+        renderer.clear_manual_scroll_on_seek(1_060);
+
+        assert!(renderer.manual_scroll.return_to_auto_requested);
+        assert_eq!(renderer.manual_scroll.offset, 120.0);
+        assert!(renderer.manual_scroll_plain_list_active());
+    }
+
+    #[test]
+    fn seek_during_pending_manual_return_clears_plain_list_state() {
+        let mut renderer = LyricsRenderer::new();
+        let content = even_layouts(6, 100.0);
+        let viewport = 600.0;
+
+        renderer.animate_frame_layout(1_000, &content, 200.0, viewport, 2);
+        renderer.clear_manual_scroll_on_seek(1_000);
+        renderer.begin_manual_scroll();
+        renderer.scroll_manual_by(120.0);
+        renderer.end_manual_scroll(0.0);
+        renderer.clear_manual_scroll_on_seek(2_000);
+
+        assert!(!renderer.manual_scroll.return_to_auto_requested);
+        assert_eq!(renderer.manual_scroll.offset, 0.0);
+        assert!(!renderer.manual_scroll_plain_list_active());
+    }
+
+    #[test]
+    fn forward_tap_seek_keeps_spring_animation_after_manual_changes() {
+        let mut renderer = LyricsRenderer::new();
+        let content = even_layouts(8, 100.0);
+        let viewport = 600.0;
+
+        renderer.animate_frame_layout(1_000, &content, 0.0, viewport, 1);
+        renderer.clear_manual_scroll_on_seek(3_000);
+        let combined_scroll_y =
+            renderer.update_manual_scroll_target(3_000, 300.0, 900.0, content.len());
+        assert_eq!(combined_scroll_y, 300.0);
+        assert!(!renderer.manual_scroll_plain_list_active());
+
+        renderer.animate_frame_layout(3_000, &content, 300.0, viewport, 3);
+
+        let first_scroll = content[0].top - renderer.frame_layouts[0].top;
+        assert!(
+            first_scroll > 0.0 && first_scroll < 300.0,
+            "tap seek should spring toward target, not snap directly to {first_scroll}"
+        );
+        assert!(renderer.layout_animation_active);
+    }
+
+    #[test]
+    fn manual_scroll_return_transfers_offset_to_layout_spring_when_blur_restores() {
+        let mut renderer = LyricsRenderer::new();
+        let content = even_layouts(6, 100.0);
+        let viewport = 600.0;
+
+        renderer.animate_frame_layout(1_000, &content, 200.0, viewport, 2);
+        renderer.begin_manual_scroll();
+        renderer.scroll_manual_by(120.0);
+        renderer.end_manual_scroll(0.0);
+        renderer.manual_scroll.blur_engaged_until = Some(Instant::now() - Duration::from_millis(1));
+        renderer.last_manual_scroll_frame_at = Some(Instant::now() - Duration::from_millis(16));
+
+        let projected = renderer.update_manual_scroll_target(1_016, 200.0, 900.0, content.len());
+
+        assert_eq!(projected, 200.0);
+        assert_eq!(renderer.manual_scroll.offset, 0.0);
+        assert_eq!(renderer.manual_scroll.velocity, 0.0);
+        assert!(renderer.manual_scroll.hold_until.is_none());
+        assert!(!renderer.manual_scroll.return_to_auto_requested);
+        assert!(renderer.seek_glide_active);
+        assert!(
+            renderer
+                .spring_layouts
+                .iter()
+                .all(|state| (state.scroll - 320.0).abs() <= LINE_LAYOUT_EPSILON)
+        );
+
+        renderer.animate_frame_layout(1_016, &content, 200.0, viewport, 2);
+
+        assert!(renderer.frame_layouts[0].top < -200.0 - LINE_LAYOUT_EPSILON);
+        assert!(
+            scroll_spread(&renderer.frame_layouts, &content) < 1.0,
+            "manual release return should glide as a rigid click-style spring"
+        );
+    }
+
+    #[test]
+    fn manual_scroll_return_seeds_glide_even_without_existing_spring_state() {
+        let mut renderer = LyricsRenderer::new();
+        let content = even_layouts(6, 100.0);
+        let viewport = 600.0;
+
+        renderer.manual_scroll.offset = 120.0;
+        renderer.manual_scroll.dragging = false;
+        renderer.manual_scroll.return_to_auto_requested = true;
+        renderer.manual_scroll.blur_engaged_until = Some(Instant::now() - Duration::from_millis(1));
+        renderer.last_manual_scroll_frame_at = Some(Instant::now() - Duration::from_millis(16));
+
+        let projected = renderer.update_manual_scroll_target(1_000, 200.0, 900.0, content.len());
+
+        assert_eq!(projected, 200.0);
+        assert_eq!(renderer.spring_layouts.len(), content.len());
+        assert!(renderer.seek_glide_active);
+        assert!(
+            renderer
+                .spring_layouts
+                .iter()
+                .all(|state| (state.scroll - 320.0).abs() <= LINE_LAYOUT_EPSILON)
+        );
+
+        renderer.animate_frame_layout(1_000, &content, 200.0, viewport, 2);
+
+        assert!(renderer.frame_layouts[0].top < -200.0 - LINE_LAYOUT_EPSILON);
     }
 
     // Tapping an earlier, on-screen lyric jumps playback time backward and the

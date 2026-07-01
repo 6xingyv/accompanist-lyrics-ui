@@ -294,6 +294,7 @@ pub struct LyricsRenderer {
     frame_layouts: Vec<DynamicLineLayout>,
     last_spring_frame_at: Option<Instant>,
     last_spring_playback_ms: Option<i32>,
+    last_seek_detection_playback_ms: Option<i32>,
     last_target_scroll_y: Option<f32>,
     layout_animation_active: bool,
     /// True while a seek (a discontinuous playback-time jump from tapping a
@@ -627,6 +628,7 @@ impl LyricsRenderer {
             frame_layouts: Vec::new(),
             last_spring_frame_at: None,
             last_spring_playback_ms: None,
+            last_seek_detection_playback_ms: None,
             last_target_scroll_y: None,
             layout_animation_active: false,
             seek_glide_active: false,
@@ -921,18 +923,27 @@ impl LyricsRenderer {
         // way the inter-line ripple always runs on the auto component (present the
         // moment auto-scroll resumes after a manual scroll) while the manual
         // gesture stays exactly 1:1 (responsive fling, no spring trailing it).
-        let combined_scroll_y = self.update_manual_scroll_target(auto_scroll_y, max_scroll_y);
-        let manual_displacement = combined_scroll_y - auto_scroll_y;
-        self.animate_frame_layout(
+        let combined_scroll_y = self.update_manual_scroll_target(
             current_time_ms,
-            &target_layouts,
             auto_scroll_y,
-            height as f32,
-            focus_end,
+            max_scroll_y,
+            target_layouts.len(),
         );
-        if manual_displacement.abs() > 0.001 {
-            for layout in self.frame_layouts.iter_mut() {
-                layout.top -= manual_displacement;
+        let manual_displacement = combined_scroll_y - auto_scroll_y;
+        if self.manual_scroll_plain_list_active() {
+            self.project_uniform_frame_layout(&target_layouts, combined_scroll_y);
+        } else {
+            self.animate_frame_layout(
+                current_time_ms,
+                &target_layouts,
+                auto_scroll_y,
+                height as f32,
+                focus_end,
+            );
+            if manual_displacement.abs() > 0.001 {
+                for layout in self.frame_layouts.iter_mut() {
+                    layout.top -= manual_displacement;
+                }
             }
         }
         // While the user manually scrolls the depth-of-field blur is eased away
@@ -1242,14 +1253,12 @@ impl PreparedScene {
             return 1.0;
         }
 
-        let distance = if current_time_ms < line.start {
-            (line.start - current_time_ms) as f32
+        let progress = if current_time_ms < line.start {
+            1.0 - (line.start - current_time_ms) as f32 / FOCUS_ALPHA_FALLOFF_MS
         } else {
-            (current_time_ms - line.effective_end) as f32
+            1.0 - (current_time_ms - line.effective_end) as f32 / FOCUS_ALPHA_FALLOFF_MS
         };
-        // Ease from 1.0 (at the focus edge, so there's no visible step off the
-        // focused line) down to FOCUS_ALPHA_MIN quickly.
-        (1.0 - distance / FOCUS_ALPHA_FALLOFF_MS).clamp(FOCUS_ALPHA_MIN, 1.0)
+        focus_alpha_from_progress(progress)
     }
 
     fn focus_index_range(&self, current_time_ms: i32) -> (usize, usize) {
@@ -1415,6 +1424,12 @@ fn prepared_text_width(text: &PreparedText) -> f32 {
     text.rows.iter().map(|row| row.width).fold(0.0, f32::max)
 }
 
+fn focus_alpha_from_progress(progress: f32) -> f32 {
+    let t = progress.clamp(0.0, 1.0);
+    let eased = t * t * (3.0 - 2.0 * t);
+    FOCUS_ALPHA_MIN + (1.0 - FOCUS_ALPHA_MIN) * eased
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1482,6 +1497,28 @@ mod tests {
             translation: None,
             phonetic: None,
         }
+    }
+
+    #[test]
+    fn focus_alpha_is_symmetric_for_past_and_future_lines() {
+        let scene = PreparedScene {
+            config: test_config(),
+            lines: vec![test_line(ClusterRole::Standalone, 1_000, 2_000, 50.0)],
+            content_height: 0.0,
+        };
+        let line = &scene.lines[0];
+
+        for distance in [0, 100, 400, 800, 1_200] {
+            let future = scene.focus_alpha(line, line.start - distance);
+            let past = scene.focus_alpha(line, line.effective_end + distance);
+            assert!(
+                (future - past).abs() < 0.0001,
+                "distance {distance} should have matching future/past alpha, got {future} vs {past}"
+            );
+        }
+
+        assert_eq!(scene.focus_alpha(line, line.start - 800), FOCUS_ALPHA_MIN);
+        assert_eq!(scene.focus_alpha(line, line.effective_end + 800), FOCUS_ALPHA_MIN);
     }
 
     #[test]
