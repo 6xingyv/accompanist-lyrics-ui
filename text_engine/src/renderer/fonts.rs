@@ -202,7 +202,6 @@ impl LyricsRenderer {
         if self.font_matcher.is_none() {
             return;
         }
-        let family = self.font_stack.first().map(|face| face.family_name.clone());
 
         let mut to_match: Vec<char> = Vec::new();
         for ch in text.chars() {
@@ -217,12 +216,20 @@ impl LyricsRenderer {
             return;
         }
 
-        // Ask the NDK matcher which system font renders each new glyph.
+        // Ask the NDK matcher which system font renders each new glyph. Query
+        // from the canonical default family ("sans-serif") — NOT the user's
+        // primary family. `AFontMatcher` only knows *system* families; handing it
+        // a custom/app font name (which it can't resolve) makes it mis-resolve the
+        // fallback, so CJK/emoji glyphs the app font lacks stop falling back once a
+        // custom `FontResource` is set. Flutter behaves the same way: its Android
+        // system fallback manager (`SkFontMgr_android`) is queried independently of
+        // the app's own font. The primary font's own coverage is decided separately
+        // in `select_family_for_cluster`, so it still wins for glyphs it has.
         let mut matched: Vec<(char, crate::system_fonts::SystemFont)> = Vec::new();
         if let Some(matcher) = self.font_matcher.as_mut() {
             matcher.set_style(attrs.weight, attrs.italic);
             for ch in to_match {
-                if let Some(font) = matcher.match_char(ch, family.as_deref()) {
+                if let Some(font) = matcher.match_char(ch, Some("sans-serif")) {
                     matched.push((ch, font));
                 }
             }
@@ -513,11 +520,33 @@ impl LyricsRenderer {
     }
 
     pub(super) fn font_supports_cluster(&mut self, id: fontdb::ID, cluster: &str) -> bool {
+        // Prefer Skia's cmap coverage — it is authoritative (it's the same
+        // coverage source Flutter's whole text stack uses). cosmic-text's
+        // `get_font_supported_codepoints_in_word` reports **0** supported
+        // codepoints for some perfectly valid fonts — the variable "SF Pro" (even
+        // for plain Latin) and CJK OTC/CFF collection faces — which made the engine
+        // reject the user's own `FontResource` and fall *everything* back to system
+        // fonts (so a custom font appeared to have no effect). Every face in the
+        // user `font_stack` has a Skia typeface resolved in `register_loaded_face`,
+        // so this path is taken for exactly the faces this function is asked about.
+        if let Some(typeface) = self.skia_typefaces.get(&id) {
+            for ch in cluster.chars() {
+                if ch.is_control() {
+                    continue;
+                }
+                if typeface.unichar_to_glyph(ch as i32) == 0 {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        // No Skia typeface for this face (shouldn't happen for font_stack faces):
+        // fall back to cosmic-text's probe.
         let expected = cluster.chars().filter(|ch| !ch.is_control()).count();
         if expected == 0 {
             return true;
         }
-
         self.font_system
             .get_font_supported_codepoints_in_word(id, fontdb::Weight::NORMAL, cluster)
             .is_some_and(|count| count >= expected)

@@ -759,18 +759,36 @@ impl LyricsRenderer {
     }
 
     fn set_locale(&mut self, locale: &str) {
-        if self.font_system.locale() == locale {
-            self.locale = locale.to_string();
+        if self.locale == locale {
             return;
         }
 
-        let replacement = new_font_system(locale.to_string(), fontdb::Database::new());
-        let old = std::mem::replace(&mut self.font_system, replacement);
-        let (_, db) = old.into_locale_and_db();
-        self.font_system = new_font_system(locale.to_string(), db);
+        // cosmic-text's locale is baked into the FontSystem, so swap it (carrying
+        // the loaded db across) only when it actually differs.
+        if self.font_system.locale() != locale {
+            let replacement = new_font_system(locale.to_string(), fontdb::Database::new());
+            let old = std::mem::replace(&mut self.font_system, replacement);
+            let (_, db) = old.into_locale_and_db();
+            self.font_system = new_font_system(locale.to_string(), db);
+        }
         self.locale = locale.to_string();
         self.font_selection_cache.clear();
         self.reset_cpu_render_cache();
+
+        // The NDK `AFontMatcher` picks a different system family per locale for the
+        // same CJK codepoint (SC vs TC vs JP vs KR share Unicode ranges). It was
+        // never told the scene's locale, so it fell back to the device default —
+        // e.g. rendering a zh-Hant or ja song with Simplified glyphs. Sync it here
+        // and drop the per-char resolutions so they're recomputed for the new
+        // locale (fonts already loaded stay in the db).
+        #[cfg(target_os = "android")]
+        {
+            if let Some(matcher) = self.font_matcher.as_mut() {
+                matcher.set_locales(locale);
+            }
+            self.matched_char_family.clear();
+            self.matched_glyphs.clear();
+        }
     }
 
     pub fn metrics_json(&self) -> String {
@@ -1443,6 +1461,7 @@ impl PreparedScene {
     fn dynamic_line_layouts(&self, current_time_ms: i32) -> Vec<DynamicLineLayout> {
         let mut cursor_y = self.config.keep_alive;
         let mut layouts = Vec::with_capacity(self.lines.len());
+        let mut prev_cluster_index: Option<usize> = None;
 
         for line in &self.lines {
             let text_visibility = self.text_visibility_for_line(line, current_time_ms);
@@ -1458,12 +1477,18 @@ impl PreparedScene {
                 .unwrap_or(0.0);
             let base_height = line.base_height();
             let height = interlude_height * interlude_visibility + base_height * text_visibility;
-            // A nested accompaniment sits closer to / further from its main line by
-            // the configured gap. Scale it by the line's own visibility so the gap
-            // grows and shrinks with the accompaniment (no phantom gap while it's
-            // collapsed); default gap is 0, so this is a no-op unless configured.
-            if line.cluster_role.is_nested_accompaniment() {
-                cursor_y += self.config.accompaniment_gap * text_visibility;
+            // Lines that share a cluster — a main line and its nested
+            // accompaniment(s) — are separated by `accompaniment_gap` instead of the
+            // normal inter-line spacing. That normal spacing is `2 * padding_y`
+            // (each line box bakes in `padding_y` top and bottom), so shift the
+            // cursor by the difference to *replace* it rather than add to it: the
+            // gap between a main line and its accompaniment is now driven solely by
+            // `accompaniment_gap`, not by `padding_y` (`linePadding`). Scaled by the
+            // line's own visibility so the gap collapses as the accompaniment fades,
+            // which also restores the full padding between separate clusters.
+            if prev_cluster_index == Some(line.cluster_index) {
+                let normal_gap = self.config.padding_y * 2.0;
+                cursor_y += (self.config.accompaniment_gap - normal_gap) * text_visibility;
             }
             layouts.push(DynamicLineLayout {
                 top: cursor_y,
@@ -1472,6 +1497,7 @@ impl PreparedScene {
                 interlude_visibility,
             });
             cursor_y += height;
+            prev_cluster_index = Some(line.cluster_index);
         }
 
         layouts

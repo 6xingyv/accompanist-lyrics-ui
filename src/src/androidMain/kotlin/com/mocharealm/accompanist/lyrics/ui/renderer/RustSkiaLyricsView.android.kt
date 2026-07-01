@@ -62,7 +62,6 @@ class RustSkiaLyricsView @JvmOverloads constructor(
     private var rendererStyle = KaraokeLyricsConfig().toRendererStyle(
         Density(resources.displayMetrics.density, resources.configuration.fontScale)
     )
-    private var fontConfigKey = 0
     private var configuredFontBytes: ByteArray? = null
     @Volatile
     private var engineClosed = false
@@ -134,10 +133,15 @@ class RustSkiaLyricsView @JvmOverloads constructor(
     }
 
     fun configureFonts(fontBytes: ByteArray?) {
-        val key = fontBytes?.contentHashCode() ?: 0
-        if (fontConfigKey == key && !engineClosed) return
+        // `fontBytes` comes from rememberFontResourceBytes, which returns a *stable*
+        // instance across recompositions, so an identity check dedupes in O(1). The
+        // old `fontBytes.contentHashCode()` hashed the entire (multi-MB) font on
+        // every recomposition — i.e. ~60×/s during playback — which was the source
+        // of the heavy stutter whenever a FontResource was set. Reloading the font
+        // (below) rebuilds the whole scene, so it must only happen when the font
+        // actually changes.
+        if (configuredFontBytes === fontBytes && !engineClosed) return
 
-        fontConfigKey = key
         configuredFontBytes = fontBytes
         applyCurrentFontConfig()
     }

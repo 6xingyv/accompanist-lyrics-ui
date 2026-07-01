@@ -30,7 +30,7 @@ import kotlin.math.sin
 data class KaraokeBreathingDotsDefaults(
     val number: Int = 3,
     val size: Dp = 16.dp,
-    val margin: Dp = 12.dp,
+    val margin: Dp = 8.dp,
     val enterDurationMs: Int = 3000,
     val preExitStillDuration: Int = 200,
     val preExitDipAndRiseDuration: Int = 3000,

@@ -9,6 +9,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextMotion
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.TextUnit
+import androidx.compose.ui.unit.TextUnitType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.mocharealm.accompanist.lyrics.ui.renderer.NativeBlurStyle
@@ -47,42 +49,54 @@ data class KaraokeLyricsConfig(
 )
 
 /**
- * Per-role type. Font size/weight/italic come from the [TextStyle]s; the line-height
- * ratios and the translation-relative ratios (previously hardcoded `1.25/1.3/0.46/
- * 0.62` in the host builders) are exposed here.
+ * Per-role type. Every role — including the translation — is a full [TextStyle],
+ * so its font size, weight, italic **and line height** are specified in one place.
+ * (The translation used to be derived as a fraction of the normal font, `0.46/
+ * 0.62`, and could not be styled or sized independently.) Line height is taken
+ * from each style's [TextStyle.lineHeight]; when a style leaves it unspecified the
+ * matching `*LineHeightRatio` fallback is applied (× the font size).
  */
 data class KaraokeTypography(
     val normalTextStyle: TextStyle = TextStyle(
-        fontSize = 30.sp,
-        fontWeight = FontWeight.SemiBold,
+        fontSize = 34.sp,
+        fontWeight = FontWeight.Bold,
+        lineHeight = 40.sp,
     ),
     val accompanimentTextStyle: TextStyle = TextStyle(
         fontSize = 20.sp,
-        fontWeight = FontWeight.SemiBold,
+        fontWeight = FontWeight.Bold,
+        lineHeight = 26.sp,
+    ),
+    val translationTextStyle: TextStyle = TextStyle(
+        fontSize = 16.sp,
+        fontWeight = FontWeight.Normal,
+        lineHeight = 18.sp,
     ),
     val phoneticTextStyle: TextStyle = TextStyle(
         fontSize = 24.sp,
         fontWeight = FontWeight.Normal,
+        lineHeight = 30.sp,
     ),
+    /** Line-height fallback ratios (× font size), used only for a role whose
+     * [TextStyle.lineHeight] is [TextUnit.Unspecified]. */
     val normalLineHeightRatio: Float = 1.25f,
     val accompanimentLineHeightRatio: Float = 1.3f,
+    val translationLineHeightRatio: Float = 1.3f,
     val phoneticLineHeightRatio: Float = 1.25f,
-    val translationSizeRatio: Float = 0.46f,
-    val translationLineHeightRatio: Float = 0.62f,
-    val translationFontWeight: FontWeight = FontWeight.Normal,
 )
 
 /**
  * Vertical/horizontal spacing. `linePadding` is the per-line vertical padding, so
- * the gap between two main lines is `2 * linePadding`. `accompanimentGap` is a
- * distinct, additive gap inserted between a main line and its own nested
- * accompaniment line (0 = the previous padding-only behaviour). `focusTopOffset`
- * is where the focused line parks from the top (was `offset + keepAliveZone`).
+ * the gap between two separate lines is `2 * linePadding`. `accompanimentGap` is
+ * the gap between a main line and its own nested accompaniment line; it *replaces*
+ * the `linePadding`-derived gap for that boundary (it is not added on top), so the
+ * harmony line can sit tighter than normal lines. `focusTopOffset` is where the
+ * focused line parks from the top (was `offset + keepAliveZone`).
  */
 data class KaraokeSpacing(
     val horizontalPadding: Dp = 16.dp,
     val linePadding: Dp = 12.dp,
-    val accompanimentGap: Dp = 0.dp,
+    val accompanimentGap: Dp = 8.dp,
     val phoneticGap: Dp = 4.dp,
     val focusTopOffset: Dp = 64.dp,
 )
@@ -130,25 +144,30 @@ data class KaraokeManualScrollConfig(
  */
 internal fun KaraokeLyricsConfig.toRendererStyle(density: Density): NativeLyricsRendererStyle =
     with(density) {
-        val normalSizePx = typography.normalTextStyle.fontSize.toPx()
         NativeLyricsRendererStyle(
             typography = NativeTypographyStyle(
-                normalFontSizePx = normalSizePx,
-                normalLineHeightPx = normalSizePx * typography.normalLineHeightRatio,
+                normalFontSizePx = typography.normalTextStyle.fontSize.toPx(),
+                normalLineHeightPx = lineHeightPx(
+                    typography.normalTextStyle, typography.normalLineHeightRatio
+                ),
                 normalFontWeight = typography.normalTextStyle.fontWeight?.weight ?: 400,
                 normalFontItalic = typography.normalTextStyle.fontStyle == FontStyle.Italic,
                 accompanimentFontSizePx = typography.accompanimentTextStyle.fontSize.toPx(),
-                accompanimentLineHeightPx = typography.accompanimentTextStyle.fontSize.toPx() *
-                    typography.accompanimentLineHeightRatio,
+                accompanimentLineHeightPx = lineHeightPx(
+                    typography.accompanimentTextStyle, typography.accompanimentLineHeightRatio
+                ),
                 accompanimentFontWeight = typography.accompanimentTextStyle.fontWeight?.weight ?: 400,
                 accompanimentFontItalic = typography.accompanimentTextStyle.fontStyle == FontStyle.Italic,
-                translationFontSizePx = normalSizePx * typography.translationSizeRatio,
-                translationLineHeightPx = normalSizePx * typography.translationLineHeightRatio,
-                translationFontWeight = typography.translationFontWeight.weight,
-                translationFontItalic = false,
+                translationFontSizePx = typography.translationTextStyle.fontSize.toPx(),
+                translationLineHeightPx = lineHeightPx(
+                    typography.translationTextStyle, typography.translationLineHeightRatio
+                ),
+                translationFontWeight = typography.translationTextStyle.fontWeight?.weight ?: 400,
+                translationFontItalic = typography.translationTextStyle.fontStyle == FontStyle.Italic,
                 phoneticFontSizePx = typography.phoneticTextStyle.fontSize.toPx(),
-                phoneticLineHeightPx = typography.phoneticTextStyle.fontSize.toPx() *
-                    typography.phoneticLineHeightRatio,
+                phoneticLineHeightPx = lineHeightPx(
+                    typography.phoneticTextStyle, typography.phoneticLineHeightRatio
+                ),
                 phoneticFontWeight = typography.phoneticTextStyle.fontWeight?.weight ?: 400,
                 phoneticFontItalic = typography.phoneticTextStyle.fontStyle == FontStyle.Italic,
             ),
@@ -201,4 +220,16 @@ internal fun KaraokeLyricsConfig.toRendererStyle(density: Density): NativeLyrics
             showTranslation = showTranslation,
             showPhonetic = showPhonetic,
         )
+    }
+
+/**
+ * Resolve a role's line height to px: prefer the explicit [TextStyle.lineHeight]
+ * (sp, or em × font size), falling back to `fontSize * fallbackRatio` when it is
+ * [TextUnit.Unspecified].
+ */
+private fun Density.lineHeightPx(style: TextStyle, fallbackRatio: Float): Float =
+    when (style.lineHeight.type) {
+        TextUnitType.Sp -> style.lineHeight.toPx()
+        TextUnitType.Em -> style.fontSize.toPx() * style.lineHeight.value
+        else -> style.fontSize.toPx() * fallbackRatio
     }

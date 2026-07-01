@@ -599,6 +599,7 @@ fun PlayerLyrics(
         modifier=modifier.graphicsLayer{
             compositingStrategy = CompositingStrategy.Offscreen
             blendMode = BlendMode.Plus
-        }
+        },
+        fontResource = Res.font.sf_pro
     )
 }
