@@ -178,6 +178,25 @@ pub struct LyricsScene {
     pub breathing_dots_dip_ms: Option<f32>,
     pub breathing_dots_exit_ms: Option<f32>,
     pub breathing_dots_color: Option<u32>,
+    pub accompaniment_gap: Option<f32>,
+    pub blur_sharp_radius_lines: Option<f32>,
+    pub inactive_karaoke_alpha: Option<f32>,
+    pub focus_dim_min_alpha: Option<f32>,
+    pub focus_dim_falloff_ms: Option<f32>,
+    pub spring_stiffness: Option<f32>,
+    pub spring_damping: Option<f32>,
+    pub spring_chain_coupling: Option<f32>,
+    pub spring_distance_falloff: Option<f32>,
+    pub spring_min_response: Option<f32>,
+    pub manual_max_fling_velocity: Option<f32>,
+    pub manual_deceleration_rate: Option<f32>,
+    pub manual_overscroll_stiffness: Option<f32>,
+    pub manual_overscroll_damping: Option<f32>,
+    pub manual_rubber_band_limit: Option<f32>,
+    pub manual_rubber_band_coefficient: Option<f32>,
+    pub manual_blur_restore_ms: Option<u64>,
+    pub manual_blur_fade_in_rate: Option<f32>,
+    pub manual_blur_fade_out_rate: Option<f32>,
     pub lines: Vec<LyricsLineInput>,
 }
 
@@ -408,7 +427,60 @@ struct SceneConfig {
     show_phonetic: bool,
     use_blur_effect: bool,
     blur_delta: f32,
+    // Extra gap (px) between a main line and its own nested accompaniment.
+    accompaniment_gap: f32,
+    // Depth-of-field blur fully-sharp band radius, in line-height units.
+    blur_sharp_radius_lines: f32,
+    // Focus dimming / inactive karaoke syllable alpha.
+    inactive_karaoke_alpha: f32,
+    focus_dim_min_alpha: f32,
+    focus_dim_falloff_ms: f32,
     breathing_dots: BreathingDotsConfig,
+    // Scroll spring + manual-scroll physics (see [`ScrollParams`]).
+    scroll_params: ScrollParams,
+}
+
+/// Auto-scroll spring cascade + manual (touch) scroll physics. Grouped so the
+/// scroll module can read them as one `Copy` bundle. `Default` reproduces the
+/// original hard-coded constants, so a renderer with no scene (unit tests) and
+/// a scene that omits these JSON fields both behave exactly as before.
+#[derive(Debug, Clone, Copy)]
+struct ScrollParams {
+    spring_stiffness: f32,
+    spring_damping: f32,
+    chain_coupling: f32,
+    distance_falloff: f32,
+    min_response: f32,
+    max_fling_velocity: f32,
+    deceleration_rate: f32,
+    overscroll_stiffness: f32,
+    overscroll_damping: f32,
+    rubber_band_limit: f32,
+    rubber_band_coefficient: f32,
+    blur_restore_ms: u64,
+    blur_fade_in_rate: f32,
+    blur_fade_out_rate: f32,
+}
+
+impl Default for ScrollParams {
+    fn default() -> Self {
+        Self {
+            spring_stiffness: LINE_LAYOUT_SPRING_STIFFNESS,
+            spring_damping: LINE_LAYOUT_SPRING_DAMPING,
+            chain_coupling: LINE_LAYOUT_CHAIN_COUPLING,
+            distance_falloff: LINE_LAYOUT_DISTANCE_FALLOFF,
+            min_response: LINE_LAYOUT_MIN_RESPONSE,
+            max_fling_velocity: MANUAL_SCROLL_MAX_FLING_VELOCITY,
+            deceleration_rate: MANUAL_SCROLL_DECELERATION_RATE,
+            overscroll_stiffness: MANUAL_SCROLL_OVERSCROLL_STIFFNESS,
+            overscroll_damping: MANUAL_SCROLL_OVERSCROLL_DAMPING,
+            rubber_band_limit: MANUAL_SCROLL_RUBBER_BAND_LIMIT,
+            rubber_band_coefficient: MANUAL_SCROLL_RUBBER_BAND_COEFFICIENT,
+            blur_restore_ms: MANUAL_SCROLL_BLUR_RESTORE_MS,
+            blur_fade_in_rate: MANUAL_SCROLL_BLUR_FADE_IN_RATE,
+            blur_fade_out_rate: MANUAL_SCROLL_BLUR_FADE_OUT_RATE,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -549,6 +621,8 @@ struct KaraokeBrush {
     row_min_x: f32,
     row_max_x: f32,
     is_rtl: bool,
+    /// Alpha of the not-yet-sung part of the karaoke gradient (config-driven).
+    inactive_alpha: f32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -812,7 +886,7 @@ impl LyricsRenderer {
                         base_color,
                         line_alpha,
                         blur_radius,
-                        Some((current_time_ms, *is_rtl, syllables)),
+                        Some((current_time_ms, *is_rtl, scene.config.inactive_karaoke_alpha, syllables)),
                     );
                 }
                 PreparedLineKind::Synced { text } => {
@@ -1058,7 +1132,7 @@ impl LyricsRenderer {
                         base_color,
                         line_alpha,
                         blur_radius,
-                        Some((current_time_ms, *is_rtl, syllables)),
+                        Some((current_time_ms, *is_rtl, scene.config.inactive_karaoke_alpha, syllables)),
                     );
                 }
                 PreparedLineKind::Synced { text } => {
@@ -1270,12 +1344,13 @@ impl PreparedScene {
             return 1.0;
         }
 
+        let falloff = self.config.focus_dim_falloff_ms;
         let progress = if current_time_ms < line.start {
-            1.0 - (line.start - current_time_ms) as f32 / FOCUS_ALPHA_FALLOFF_MS
+            1.0 - (line.start - current_time_ms) as f32 / falloff
         } else {
-            1.0 - (current_time_ms - line.effective_end) as f32 / FOCUS_ALPHA_FALLOFF_MS
+            1.0 - (current_time_ms - line.effective_end) as f32 / falloff
         };
-        focus_alpha_from_progress(progress)
+        focus_alpha_from_progress(progress, self.config.focus_dim_min_alpha)
     }
 
     fn focus_index_range(&self, current_time_ms: i32) -> (usize, usize) {
@@ -1383,6 +1458,13 @@ impl PreparedScene {
                 .unwrap_or(0.0);
             let base_height = line.base_height();
             let height = interlude_height * interlude_visibility + base_height * text_visibility;
+            // A nested accompaniment sits closer to / further from its main line by
+            // the configured gap. Scale it by the line's own visibility so the gap
+            // grows and shrinks with the accompaniment (no phantom gap while it's
+            // collapsed); default gap is 0, so this is a no-op unless configured.
+            if line.cluster_role.is_nested_accompaniment() {
+                cursor_y += self.config.accompaniment_gap * text_visibility;
+            }
             layouts.push(DynamicLineLayout {
                 top: cursor_y,
                 height,
@@ -1420,7 +1502,7 @@ impl PreparedScene {
 
         let unit = self.config.normal_line_height.max(1.0);
         let lines_away = (screen_top - anchor_y).abs() / unit;
-        let blur_lines = (lines_away - BLUR_SHARP_RADIUS_LINES).clamp(0.0, 10.0);
+        let blur_lines = (lines_away - self.config.blur_sharp_radius_lines).clamp(0.0, 10.0);
         blur_lines * self.config.blur_delta
     }
 }
@@ -1447,10 +1529,10 @@ fn prepared_text_width(text: &PreparedText) -> f32 {
     text.rows.iter().map(|row| row.width).fold(0.0, f32::max)
 }
 
-fn focus_alpha_from_progress(progress: f32) -> f32 {
+fn focus_alpha_from_progress(progress: f32, min_alpha: f32) -> f32 {
     let t = progress.clamp(0.0, 1.0);
     let eased = t * t * (3.0 - 2.0 * t);
-    FOCUS_ALPHA_MIN + (1.0 - FOCUS_ALPHA_MIN) * eased
+    min_alpha + (1.0 - min_alpha) * eased
 }
 
 #[cfg(test)]
@@ -1490,6 +1572,11 @@ mod tests {
             show_phonetic: true,
             use_blur_effect: true,
             blur_delta: 3.0,
+            accompaniment_gap: 0.0,
+            blur_sharp_radius_lines: BLUR_SHARP_RADIUS_LINES,
+            inactive_karaoke_alpha: KARAOKE_INACTIVE_ALPHA,
+            focus_dim_min_alpha: FOCUS_ALPHA_MIN,
+            focus_dim_falloff_ms: FOCUS_ALPHA_FALLOFF_MS,
             breathing_dots: BreathingDotsConfig {
                 number: 3,
                 size: 16.0,
@@ -1500,6 +1587,7 @@ mod tests {
                 exit_ms: 200.0,
                 color: 0xffff_ffff,
             },
+            scroll_params: ScrollParams::default(),
         }
     }
 
@@ -1581,6 +1669,73 @@ mod tests {
         // At t=1000 only line 0 is focused, but line 1 begins before it ends, so
         // the forward walk pulls line 1 into the group.
         assert_eq!(scene.focus_group_range(1_000), (0, 1));
+    }
+
+    // Every newly-exposed knob must survive the Kotlin JSON keys → `SceneConfig`
+    // resolution (this is the wire contract the config data classes serialize to).
+    #[test]
+    fn scene_json_overrides_new_config_knobs() {
+        let mut renderer = LyricsRenderer::new();
+        let json = r#"{
+            "width": 300, "height": 200,
+            "accompaniment_gap": 40.0,
+            "blur_sharp_radius_lines": 9.0,
+            "inactive_karaoke_alpha": 0.5,
+            "focus_dim_min_alpha": 0.7,
+            "focus_dim_falloff_ms": 1234.0,
+            "spring_stiffness": 250.0,
+            "spring_damping": 30.0,
+            "spring_chain_coupling": 0.9,
+            "spring_distance_falloff": 0.5,
+            "spring_min_response": 0.2,
+            "manual_max_fling_velocity": 9999.0,
+            "manual_deceleration_rate": 0.99,
+            "manual_overscroll_stiffness": 88.0,
+            "manual_overscroll_damping": 11.0,
+            "manual_rubber_band_limit": 90.0,
+            "manual_rubber_band_coefficient": 0.3,
+            "manual_blur_restore_ms": 1500,
+            "manual_blur_fade_in_rate": 5.0,
+            "manual_blur_fade_out_rate": 9.0,
+            "lines": []
+        }"#;
+        let scene: LyricsScene = serde_json::from_str(json).unwrap();
+        let config = renderer.prepare_scene(scene).unwrap().config;
+
+        assert_eq!(config.accompaniment_gap, 40.0);
+        assert_eq!(config.blur_sharp_radius_lines, 9.0);
+        assert_eq!(config.inactive_karaoke_alpha, 0.5);
+        assert_eq!(config.focus_dim_min_alpha, 0.7);
+        assert_eq!(config.focus_dim_falloff_ms, 1234.0);
+        let sp = config.scroll_params;
+        assert_eq!(sp.spring_stiffness, 250.0);
+        assert_eq!(sp.spring_damping, 30.0);
+        assert_eq!(sp.chain_coupling, 0.9);
+        assert_eq!(sp.distance_falloff, 0.5);
+        assert_eq!(sp.min_response, 0.2);
+        assert_eq!(sp.max_fling_velocity, 9999.0);
+        assert_eq!(sp.rubber_band_limit, 90.0);
+        assert_eq!(sp.rubber_band_coefficient, 0.3);
+        assert_eq!(sp.blur_restore_ms, 1500);
+        assert_eq!(sp.blur_fade_out_rate, 9.0);
+    }
+
+    // The blur sharp-band knob must actually change the blur: a row 5 line-heights
+    // from the anchor blurs under the default 2.5-line band but stays crisp under a
+    // wide one.
+    #[test]
+    fn blur_sharp_radius_config_widens_the_sharp_band() {
+        let far = 5.0 * test_config().normal_line_height;
+
+        let mut narrow = test_config();
+        narrow.blur_sharp_radius_lines = 2.5;
+        let narrow_scene = PreparedScene { config: narrow, lines: vec![], content_height: 0.0 };
+        assert!(narrow_scene.blur_radius_for_screen_y(far, 0.0) > 0.0);
+
+        let mut wide = test_config();
+        wide.blur_sharp_radius_lines = 8.0;
+        let wide_scene = PreparedScene { config: wide, lines: vec![], content_height: 0.0 };
+        assert_eq!(wide_scene.blur_radius_for_screen_y(far, 0.0), 0.0);
     }
 
     #[test]

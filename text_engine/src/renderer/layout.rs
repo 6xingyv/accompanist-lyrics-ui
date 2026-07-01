@@ -63,6 +63,20 @@ impl LyricsRenderer {
             show_phonetic: scene.show_phonetic.unwrap_or(true),
             use_blur_effect: scene.use_blur_effect.unwrap_or(true),
             blur_delta: scene.blur_delta.unwrap_or(3.0).max(0.0),
+            accompaniment_gap: scene.accompaniment_gap.unwrap_or(0.0),
+            blur_sharp_radius_lines: scene
+                .blur_sharp_radius_lines
+                .unwrap_or(BLUR_SHARP_RADIUS_LINES)
+                .max(0.0),
+            inactive_karaoke_alpha: scene
+                .inactive_karaoke_alpha
+                .unwrap_or(KARAOKE_INACTIVE_ALPHA)
+                .clamp(0.0, 1.0),
+            focus_dim_min_alpha: scene
+                .focus_dim_min_alpha
+                .unwrap_or(FOCUS_ALPHA_MIN)
+                .clamp(0.0, 1.0),
+            focus_dim_falloff_ms: scene.focus_dim_falloff_ms.unwrap_or(FOCUS_ALPHA_FALLOFF_MS).max(1.0),
             breathing_dots: BreathingDotsConfig {
                 number: scene
                     .breathing_dots_number
@@ -95,6 +109,56 @@ impl LyricsRenderer {
                 color: scene
                     .breathing_dots_color
                     .unwrap_or_else(|| scene.text_color.unwrap_or(0xffff_ffff)),
+            },
+            scroll_params: ScrollParams {
+                spring_stiffness: scene
+                    .spring_stiffness
+                    .unwrap_or(LINE_LAYOUT_SPRING_STIFFNESS)
+                    .max(0.0),
+                spring_damping: scene.spring_damping.unwrap_or(LINE_LAYOUT_SPRING_DAMPING).max(0.0),
+                chain_coupling: scene.spring_chain_coupling.unwrap_or(LINE_LAYOUT_CHAIN_COUPLING),
+                distance_falloff: scene
+                    .spring_distance_falloff
+                    .unwrap_or(LINE_LAYOUT_DISTANCE_FALLOFF),
+                min_response: scene
+                    .spring_min_response
+                    .unwrap_or(LINE_LAYOUT_MIN_RESPONSE)
+                    .clamp(0.01, 1.0),
+                max_fling_velocity: scene
+                    .manual_max_fling_velocity
+                    .unwrap_or(MANUAL_SCROLL_MAX_FLING_VELOCITY)
+                    .max(0.0),
+                deceleration_rate: scene
+                    .manual_deceleration_rate
+                    .unwrap_or(MANUAL_SCROLL_DECELERATION_RATE)
+                    .clamp(0.0, 1.0),
+                overscroll_stiffness: scene
+                    .manual_overscroll_stiffness
+                    .unwrap_or(MANUAL_SCROLL_OVERSCROLL_STIFFNESS)
+                    .max(0.0),
+                overscroll_damping: scene
+                    .manual_overscroll_damping
+                    .unwrap_or(MANUAL_SCROLL_OVERSCROLL_DAMPING)
+                    .max(0.0),
+                rubber_band_limit: scene
+                    .manual_rubber_band_limit
+                    .unwrap_or(MANUAL_SCROLL_RUBBER_BAND_LIMIT)
+                    .max(1.0),
+                rubber_band_coefficient: scene
+                    .manual_rubber_band_coefficient
+                    .unwrap_or(MANUAL_SCROLL_RUBBER_BAND_COEFFICIENT)
+                    .max(0.0001),
+                blur_restore_ms: scene
+                    .manual_blur_restore_ms
+                    .unwrap_or(MANUAL_SCROLL_BLUR_RESTORE_MS),
+                blur_fade_in_rate: scene
+                    .manual_blur_fade_in_rate
+                    .unwrap_or(MANUAL_SCROLL_BLUR_FADE_IN_RATE)
+                    .max(0.0),
+                blur_fade_out_rate: scene
+                    .manual_blur_fade_out_rate
+                    .unwrap_or(MANUAL_SCROLL_BLUR_FADE_OUT_RATE)
+                    .max(0.0),
             },
         };
 

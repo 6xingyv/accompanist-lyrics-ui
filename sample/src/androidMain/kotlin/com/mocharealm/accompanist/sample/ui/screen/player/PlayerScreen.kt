@@ -27,7 +27,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
@@ -67,11 +66,15 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem
 import com.mocharealm.accompanist.lyrics.core.model.SyncedLyrics
 import com.mocharealm.accompanist.lyrics.core.model.karaoke.KaraokeLine
+import com.mocharealm.accompanist.lyrics.core.model.karaoke.mapper.toKaraokeLine
+import com.mocharealm.accompanist.lyrics.core.model.synced.SyncedLine
+import com.mocharealm.accompanist.lyrics.ui.composable.lyrics.KaraokeLyricsView
 import com.mocharealm.accompanist.lyrics.ui.renderer.RustSkiaLyricsView
 import com.mocharealm.accompanist.sample.Res
 import com.mocharealm.accompanist.sample.domain.model.MusicItem
 import com.mocharealm.accompanist.sample.empty
 import com.mocharealm.accompanist.sample.ic_ellipsis
+import com.mocharealm.accompanist.sample.sf_pro
 import com.mocharealm.accompanist.sample.ui.adaptive.LocalWindowLayoutType
 import com.mocharealm.accompanist.sample.ui.adaptive.WindowLayoutType
 import com.mocharealm.accompanist.sample.ui.composable.ModalScaffold
@@ -94,10 +97,8 @@ fun PlayerScreen(
     playerViewModel: PlayerViewModel = koinViewModel(),
     shareViewModel: ShareViewModel = koinViewModel(),
 ) {
-    val listState = rememberLazyListState()
     val animatedPositionState = remember { mutableLongStateOf(0L) }
 
-    // 2. 创建一个稳定的 Provider Lambda，它只会在真正被调用时读取 State
     val currentPositionProvider = remember {
         { animatedPositionState.longValue.toInt() }
     }
@@ -113,12 +114,9 @@ fun PlayerScreen(
                     latestPlaybackState.duration
                 )
 
-                // 读取当前值用于比较
                 val currentAnimPos = animatedPositionState.longValue
 
                 if (currentAnimPos <= newPosition || abs(newPosition - currentAnimPos) >= 100) {
-                    // 更新 State 对象的值，这不会导致当前 Composable (PlayerScreen) 重组，
-                    // 但会通知读取了该 State 的下游 DrawScope (例如 KaraokeLyricsView 中的 Canvas) 刷新
                     animatedPositionState.longValue = newPosition
                 }
                 awaitFrame()
@@ -148,7 +146,6 @@ fun PlayerScreen(
             when (LocalWindowLayoutType.current) {
                 WindowLayoutType.Phone -> {
                     MobilePlayerScreen(
-                        listState,
                         currentPositionProvider, // 3. 传入 Provider
                         playerViewModel,
                         shareViewModel,
@@ -158,7 +155,6 @@ fun PlayerScreen(
 
                 else -> {
                     PadPlayerScreen(
-                        listState,
                         currentPositionProvider, // 3. 传入 Provider
                         playerViewModel,
                         shareViewModel,
@@ -182,8 +178,7 @@ fun PlayerScreen(
 
 @Composable
 fun MobilePlayerScreen(
-    listState: LazyListState,
-    animatedPosition: ()-> Int,
+    animatedPosition: () -> Int,
     playerViewModel: PlayerViewModel,
     shareViewModel: ShareViewModel,
     uiState: PlayerUiState
@@ -231,7 +226,6 @@ fun MobilePlayerScreen(
         val cover =
             (uiState.backgroundState.bitmap ?: imageResource(Res.drawable.empty)).asAndroidBitmap()
         PlayerLyrics(
-            listState = listState,
             lyrics = uiState.lyrics,
             currentPosition = animatedPosition,
             onSeekTo = { playerViewModel.seekTo(it) },
@@ -258,8 +252,7 @@ fun MobilePlayerScreen(
 
 @Composable
 fun PadPlayerScreen(
-    listState: LazyListState,
-    animatedPosition: ()-> Int,
+    animatedPosition: () -> Int,
     playerViewModel: PlayerViewModel,
     shareViewModel: ShareViewModel,
     uiState: PlayerUiState
@@ -324,7 +317,6 @@ fun PadPlayerScreen(
                 (uiState.backgroundState.bitmap
                     ?: imageResource(Res.drawable.empty)).asAndroidBitmap()
             PlayerLyrics(
-                listState = listState,
                 lyrics = uiState.lyrics,
                 currentPosition = animatedPosition,
                 onSeekTo = { playerViewModel.seekTo(it) },
@@ -581,7 +573,6 @@ fun PlayerControls(
 
 @Composable
 fun PlayerLyrics(
-    listState: LazyListState,
     lyrics: SyncedLyrics?,
     currentPosition: () -> Int,
     onSeekTo: (Int) -> Unit,
@@ -590,37 +581,24 @@ fun PlayerLyrics(
 ) {
     if (lyrics == null) return
 
-    // Tap a line to seek to its start; long-press a karaoke line to share it.
-    // The hit test returns the index of the tapped line in `lyrics.lines`.
-    fun RustSkiaLyricsView.bindLineInteractions() {
-        setLineInteractionCallbacks(
-            onLineClicked = { index ->
-                lyrics.lines.getOrNull(index)?.let { onSeekTo(it.start) }
-            },
-            onLinePressed = { index ->
-                (lyrics.lines.getOrNull(index) as? KaraokeLine)?.let(onShare)
-            }
-        )
-    }
-
-    AndroidView(
-        factory = { context ->
-            RustSkiaLyricsView(context).apply {
-                setLyrics(lyrics)
-                setCurrentPosition(currentPosition())
-                bindLineInteractions()
-            }
+    KaraokeLyricsView(
+        lyrics = lyrics,
+        currentPosition = currentPosition,
+        onLineClicked = { line ->
+            onSeekTo(line.start)
         },
-        update = { view ->
-            view.setLyrics(lyrics)
-            view.setCurrentPosition(currentPosition())
-            view.bindLineInteractions()
+        onLinePressed = { line ->
+            run {
+                when (line) {
+                    is KaraokeLine -> line
+                    is SyncedLine -> line.toKaraokeLine()
+                    else -> null
+                }
+            }?.let(onShare)
         },
-        modifier = modifier
-            .fillMaxSize()
-            .graphicsLayer {
-                blendMode = BlendMode.Plus
-                compositingStrategy = CompositingStrategy.Offscreen
-            },
+        modifier=modifier.graphicsLayer{
+            compositingStrategy = CompositingStrategy.Offscreen
+            blendMode = BlendMode.Plus
+        }
     )
 }

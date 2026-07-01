@@ -17,7 +17,10 @@ import com.mocharealm.accompanist.lyrics.core.model.SyncedLyrics
 import com.mocharealm.accompanist.lyrics.text.NativeFontConfig
 import com.mocharealm.accompanist.lyrics.text.NativeFontSource
 import com.mocharealm.accompanist.lyrics.text.NativeTextEngine
+import androidx.compose.ui.unit.Density
+import com.mocharealm.accompanist.lyrics.ui.composable.lyrics.KaraokeLyricsConfig
 import com.mocharealm.accompanist.lyrics.ui.composable.lyrics.getFontSource
+import com.mocharealm.accompanist.lyrics.ui.composable.lyrics.toRendererStyle
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -53,7 +56,12 @@ class RustSkiaLyricsView @JvmOverloads constructor(
     private var currentTimeMs: Int = 0
     private var sceneDirty = true
     private var renderSurface: Surface? = null
-    private var rendererStyle = defaultStyle()
+    // Initial style is just the default config mapped at this view's density; the
+    // host overwrites it via setRendererStyle before the first frame when one is
+    // supplied. No separate hand-written default to drift from the config.
+    private var rendererStyle = KaraokeLyricsConfig().toRendererStyle(
+        Density(resources.displayMetrics.density, resources.configuration.fontScale)
+    )
     private var fontConfigKey = 0
     private var configuredFontBytes: ByteArray? = null
     @Volatile
@@ -631,45 +639,34 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         return true
     }
 
-    private fun defaultStyle(): NativeLyricsRendererStyle {
-        val density = resources.displayMetrics.density
-        val scaledDensity = density * resources.configuration.fontScale
-        return NativeLyricsRendererStyle(
-            normalFontSizePx = 34f * scaledDensity,
-            normalLineHeightPx = 42f * scaledDensity,
-            accompanimentFontSizePx = 20f * scaledDensity,
-            accompanimentLineHeightPx = 26f * scaledDensity,
-            translationFontSizePx = 16f * scaledDensity,
-            translationLineHeightPx = 21f * scaledDensity,
-            normalFontWeight = 600,
-            accompanimentFontWeight = 600,
-            translationFontWeight = 400,
-            phoneticFontWeight = 400,
-            paddingXPx = 16f * density,
-            paddingYPx = 16f * density,
-            keepAlivePx = 120f * density,
-            textColorArgb = Color.WHITE,
-        )
-    }
-
+    // Downscale only the px-spatial sub-styles. Spring/manual-scroll physics and
+    // the unitless focus/blur ratios stay unscaled — they matched fixed constants
+    // in the engine's (already downscaled) space before.
     private fun NativeLyricsRendererStyle.scaled(scale: Float): NativeLyricsRendererStyle {
         if (scale == 1f) return this
         return copy(
-            normalFontSizePx = normalFontSizePx * scale,
-            normalLineHeightPx = normalLineHeightPx * scale,
-            accompanimentFontSizePx = accompanimentFontSizePx * scale,
-            accompanimentLineHeightPx = accompanimentLineHeightPx * scale,
-            translationFontSizePx = translationFontSizePx * scale,
-            translationLineHeightPx = translationLineHeightPx * scale,
-            phoneticFontSizePx = phoneticFontSizePx * scale,
-            phoneticLineHeightPx = phoneticLineHeightPx * scale,
-            phoneticGapPx = phoneticGapPx * scale,
-            paddingXPx = paddingXPx * scale,
-            paddingYPx = paddingYPx * scale,
-            keepAlivePx = keepAlivePx * scale,
-            blurDelta = blurDelta * scale,
-            breathingDotsSizePx = breathingDotsSizePx * scale,
-            breathingDotsMarginPx = breathingDotsMarginPx * scale
+            typography = typography.copy(
+                normalFontSizePx = typography.normalFontSizePx * scale,
+                normalLineHeightPx = typography.normalLineHeightPx * scale,
+                accompanimentFontSizePx = typography.accompanimentFontSizePx * scale,
+                accompanimentLineHeightPx = typography.accompanimentLineHeightPx * scale,
+                translationFontSizePx = typography.translationFontSizePx * scale,
+                translationLineHeightPx = typography.translationLineHeightPx * scale,
+                phoneticFontSizePx = typography.phoneticFontSizePx * scale,
+                phoneticLineHeightPx = typography.phoneticLineHeightPx * scale,
+            ),
+            spacing = spacing.copy(
+                paddingXPx = spacing.paddingXPx * scale,
+                paddingYPx = spacing.paddingYPx * scale,
+                phoneticGapPx = spacing.phoneticGapPx * scale,
+                accompanimentGapPx = spacing.accompanimentGapPx * scale,
+                keepAlivePx = spacing.keepAlivePx * scale,
+            ),
+            blur = blur.copy(blurDelta = blur.blurDelta * scale),
+            breathingDots = breathingDots.copy(
+                sizePx = breathingDots.sizePx * scale,
+                marginPx = breathingDots.marginPx * scale,
+            ),
         )
     }
 

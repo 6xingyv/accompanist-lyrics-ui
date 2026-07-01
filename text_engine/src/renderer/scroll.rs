@@ -27,6 +27,16 @@ pub(super) struct ManualScrollState {
 }
 
 impl LyricsRenderer {
+    /// Scroll spring + manual-scroll physics for the current scene, or the
+    /// built-in defaults (identical to the original constants) when no scene is
+    /// set — so unit tests on a bare `LyricsRenderer` behave exactly as before.
+    fn scroll_params(&self) -> ScrollParams {
+        self.scene
+            .as_ref()
+            .map(|scene| scene.config.scroll_params)
+            .unwrap_or_default()
+    }
+
     pub(super) fn reset_layout_animation_state(&mut self) {
         self.spring_layouts.clear();
         self.last_spring_frame_at = None;
@@ -47,7 +57,7 @@ impl LyricsRenderer {
 
     fn engage_manual_scroll_blur(&mut self, now: Instant) {
         self.manual_scroll.blur_engaged_until =
-            Some(now + Duration::from_millis(MANUAL_SCROLL_BLUR_RESTORE_MS));
+            Some(now + Duration::from_millis(self.scroll_params().blur_restore_ms));
     }
 
     pub fn begin_manual_scroll(&mut self) {
@@ -75,10 +85,8 @@ impl LyricsRenderer {
     pub fn end_manual_scroll(&mut self, velocity_y: f32) {
         let now = Instant::now();
         self.manual_scroll.dragging = false;
-        self.manual_scroll.velocity = velocity_y.clamp(
-            -MANUAL_SCROLL_MAX_FLING_VELOCITY,
-            MANUAL_SCROLL_MAX_FLING_VELOCITY,
-        );
+        let max_fling = self.scroll_params().max_fling_velocity;
+        self.manual_scroll.velocity = velocity_y.clamp(-max_fling, max_fling);
         self.manual_scroll.return_to_auto_requested = true;
         self.manual_scroll_active = true;
         self.last_manual_scroll_frame_at = Some(now);
@@ -148,6 +156,7 @@ impl LyricsRenderer {
         max_scroll_y: f32,
         target_layout_count: usize,
     ) -> f32 {
+        let scroll = self.scroll_params();
         let now = Instant::now();
         let dt = self
             .last_manual_scroll_frame_at
@@ -190,7 +199,7 @@ impl LyricsRenderer {
             } else if self.manual_scroll.velocity.abs() > MANUAL_SCROLL_VELOCITY_EPSILON {
                 self.manual_scroll.offset += self.manual_scroll.velocity * dt;
                 // iOS exponential deceleration: v *= rate^(elapsed_ms).
-                self.manual_scroll.velocity *= MANUAL_SCROLL_DECELERATION_RATE.powf(dt * 1000.0);
+                self.manual_scroll.velocity *= scroll.deceleration_rate.powf(dt * 1000.0);
                 if self.manual_scroll.velocity.abs() <= MANUAL_SCROLL_VELOCITY_EPSILON {
                     self.manual_scroll.velocity = 0.0;
                 }
@@ -207,8 +216,8 @@ impl LyricsRenderer {
                     &mut self.manual_scroll.offset,
                     &mut self.manual_scroll.velocity,
                     bounded_offset,
-                    MANUAL_SCROLL_OVERSCROLL_STIFFNESS,
-                    MANUAL_SCROLL_OVERSCROLL_DAMPING,
+                    scroll.overscroll_stiffness,
+                    scroll.overscroll_damping,
                     dt,
                 );
             } else if self.manual_scroll.velocity.abs() <= MANUAL_SCROLL_VELOCITY_EPSILON
@@ -240,12 +249,13 @@ impl LyricsRenderer {
 
     fn update_manual_scroll_blur(&mut self, now: Instant, dt: f32, blur_engaged: bool) -> bool {
         let blur_target = if blur_engaged { 1.0 } else { 0.0 };
+        let scroll = self.scroll_params();
         let mut active = blur_engaged;
         if (self.manual_scroll_blur_release - blur_target).abs() > 0.001 {
             let rate = if blur_target > self.manual_scroll_blur_release {
-                MANUAL_SCROLL_BLUR_FADE_OUT_RATE
+                scroll.blur_fade_out_rate
             } else {
-                MANUAL_SCROLL_BLUR_FADE_IN_RATE
+                scroll.blur_fade_in_rate
             };
             let factor = 1.0 - (-rate * dt).exp();
             self.manual_scroll_blur_release +=
@@ -276,7 +286,13 @@ impl LyricsRenderer {
         max_scroll_y: f32,
     ) -> f32 {
         let raw_scroll_y = auto_scroll_y + self.manual_scroll.offset;
-        rubber_band_scroll(raw_scroll_y, max_scroll_y)
+        let scroll = self.scroll_params();
+        rubber_band_scroll(
+            raw_scroll_y,
+            max_scroll_y,
+            scroll.rubber_band_limit,
+            scroll.rubber_band_coefficient,
+        )
     }
 
     fn seed_manual_scroll_return_glide(
@@ -459,6 +475,9 @@ impl LyricsRenderer {
         // *below* the focus, so the upcoming lines stretch and settle one after
         // another while the already-sung lines above leave cleanly as a slab.
         let count = self.spring_layouts.len();
+        // Config-driven spring cascade parameters (defaults == the original
+        // constants). Snapshot before the `spring_layouts` mutable borrow below.
+        let scroll = self.scroll_params();
         // While a seek glides, every row chases the single target as one rigid
         // block (no chain, full response) so the list slides smoothly to the new
         // position. The cascade — which seeds each row's target from the row
@@ -471,7 +490,7 @@ impl LyricsRenderer {
         if !seek_glide {
             for index in (anchor_hi + 1)..count {
                 let previous_delta = self.spring_layouts[index - 1].scroll - target_scroll_y;
-                self.spring_chained_targets[index] += previous_delta * LINE_LAYOUT_CHAIN_COUPLING;
+                self.spring_chained_targets[index] += previous_delta * scroll.chain_coupling;
             }
         }
 
@@ -481,8 +500,8 @@ impl LyricsRenderer {
             // rows below the focus soften with distance to form the cascade. A
             // seek glide keeps every row rigid until it settles.
             let response = if !seek_glide && index > focus_end {
-                (1.0 - (index - focus_end) as f32 * LINE_LAYOUT_DISTANCE_FALLOFF)
-                    .clamp(LINE_LAYOUT_MIN_RESPONSE, 1.0)
+                (1.0 - (index - focus_end) as f32 * scroll.distance_falloff)
+                    .clamp(scroll.min_response, 1.0)
             } else {
                 1.0
             };
@@ -497,8 +516,8 @@ impl LyricsRenderer {
                 &mut state.scroll,
                 &mut state.velocity,
                 self.spring_chained_targets[index],
-                LINE_LAYOUT_SPRING_STIFFNESS * response,
-                LINE_LAYOUT_SPRING_DAMPING * damping_response,
+                scroll.spring_stiffness * response,
+                scroll.spring_damping * damping_response,
                 dt,
             );
         }
@@ -570,23 +589,22 @@ fn spring_step(
     }
 }
 
-fn rubber_band_scroll(raw_scroll_y: f32, max_scroll_y: f32) -> f32 {
+fn rubber_band_scroll(raw_scroll_y: f32, max_scroll_y: f32, limit: f32, coefficient: f32) -> f32 {
     if raw_scroll_y < 0.0 {
-        -rubber_band_distance(-raw_scroll_y)
+        -rubber_band_distance(-raw_scroll_y, limit, coefficient)
     } else if raw_scroll_y > max_scroll_y {
-        max_scroll_y + rubber_band_distance(raw_scroll_y - max_scroll_y)
+        max_scroll_y + rubber_band_distance(raw_scroll_y - max_scroll_y, limit, coefficient)
     } else {
         raw_scroll_y
     }
 }
 
-fn rubber_band_distance(distance: f32) -> f32 {
+fn rubber_band_distance(distance: f32, limit: f32, coefficient: f32) -> f32 {
     // iOS rubber-band damping (ktiays/fluid-scroll): the further you pull past the
     // edge, the harder it resists, asymptoting to `limit`. `c` softens the initial
     // resistance so the first bit of overscroll still moves with the finger.
     let distance = distance.max(0.0);
-    let limit = MANUAL_SCROLL_RUBBER_BAND_LIMIT;
-    (1.0 - 1.0 / (distance / limit * MANUAL_SCROLL_RUBBER_BAND_COEFFICIENT + 1.0)) * limit
+    (1.0 - 1.0 / (distance / limit * coefficient + 1.0)) * limit
 }
 
 #[cfg(test)]

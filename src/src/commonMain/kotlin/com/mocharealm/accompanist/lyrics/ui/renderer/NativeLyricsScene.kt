@@ -6,41 +6,100 @@ import com.mocharealm.accompanist.lyrics.core.model.karaoke.KaraokeAlignment
 import com.mocharealm.accompanist.lyrics.core.model.karaoke.KaraokeLine
 import com.mocharealm.accompanist.lyrics.core.model.synced.SyncedLine
 
+/**
+ * Flat, px-based render style handed to the Rust engine. Grouped into sub-styles
+ * that mirror [com.mocharealm.accompanist.lyrics.ui.composable.lyrics.KaraokeLyricsConfig];
+ * built only by that config's `toRendererStyle` mapper. The JSON wire keys are
+ * still flat (see `toNativeLyricsSceneJson`), so the engine side is unaffected.
+ */
 data class NativeLyricsRendererStyle(
-    val normalFontSizePx: Float,
-    val normalLineHeightPx: Float,
-    val accompanimentFontSizePx: Float,
-    val accompanimentLineHeightPx: Float,
-    val translationFontSizePx: Float,
-    val translationLineHeightPx: Float,
-    val phoneticFontSizePx: Float = translationFontSizePx,
-    val phoneticLineHeightPx: Float = translationLineHeightPx,
-    // Font weight (100..900) and italic per text role — independent of size.
-    val normalFontWeight: Int = 600,
-    val normalFontItalic: Boolean = false,
-    val accompanimentFontWeight: Int = 400,
-    val accompanimentFontItalic: Boolean = false,
-    val translationFontWeight: Int = 400,
-    val translationFontItalic: Boolean = false,
-    val phoneticFontWeight: Int = 400,
-    val phoneticFontItalic: Boolean = false,
-    val phoneticGapPx: Float = 4f,
-    val paddingXPx: Float,
-    val paddingYPx: Float,
-    val keepAlivePx: Float,
+    val typography: NativeTypographyStyle,
+    val spacing: NativeSpacingStyle,
+    val blur: NativeBlurStyle,
+    val focus: NativeFocusStyle,
+    val spring: NativeSpringStyle,
+    val manualScroll: NativeManualScrollStyle,
+    val breathingDots: NativeBreathingDotsStyle,
     val textColorArgb: Int,
     val showTranslation: Boolean = true,
     val showPhonetic: Boolean = true,
-    val useBlurEffect: Boolean = true,
-    val blurDelta: Float = 3f,
-    val breathingDotsNumber: Int = 3,
-    val breathingDotsSizePx: Float = 36f,
-    val breathingDotsMarginPx: Float = 18f,
-    val breathingDotsEnterMs: Int = 3000,
-    val breathingDotsStillMs: Int = 200,
-    val breathingDotsDipMs: Int = 3000,
-    val breathingDotsExitMs: Int = 200,
-    val breathingDotsColorArgb: Int = textColorArgb
+)
+
+/** Per-role font size / line height (px) / weight / italic. */
+data class NativeTypographyStyle(
+    val normalFontSizePx: Float,
+    val normalLineHeightPx: Float,
+    val normalFontWeight: Int,
+    val normalFontItalic: Boolean,
+    val accompanimentFontSizePx: Float,
+    val accompanimentLineHeightPx: Float,
+    val accompanimentFontWeight: Int,
+    val accompanimentFontItalic: Boolean,
+    val translationFontSizePx: Float,
+    val translationLineHeightPx: Float,
+    val translationFontWeight: Int,
+    val translationFontItalic: Boolean,
+    val phoneticFontSizePx: Float,
+    val phoneticLineHeightPx: Float,
+    val phoneticFontWeight: Int,
+    val phoneticFontItalic: Boolean,
+)
+
+/** Spacing (px). `accompanimentGapPx` is additive between a main line and its accompaniment. */
+data class NativeSpacingStyle(
+    val paddingXPx: Float,
+    val paddingYPx: Float,
+    val phoneticGapPx: Float,
+    val accompanimentGapPx: Float,
+    val keepAlivePx: Float,
+)
+
+/** Depth-of-field blur. `sharpRadiusLines` is in line-height units. */
+data class NativeBlurStyle(
+    val useBlurEffect: Boolean,
+    val blurDelta: Float,
+    val sharpRadiusLines: Float,
+)
+
+/** Focus dimming / inactive karaoke syllable alpha. */
+data class NativeFocusStyle(
+    val inactiveKaraokeAlpha: Float,
+    val dimMinAlpha: Float,
+    val dimFalloffMs: Int,
+)
+
+/** Per-line auto-scroll spring cascade. */
+data class NativeSpringStyle(
+    val stiffness: Float,
+    val damping: Float,
+    val chainCoupling: Float,
+    val distanceFalloff: Float,
+    val minResponse: Float,
+)
+
+/** Manual (touch) scroll physics. */
+data class NativeManualScrollStyle(
+    val maxFlingVelocity: Float,
+    val decelerationRate: Float,
+    val overscrollStiffness: Float,
+    val overscrollDamping: Float,
+    val rubberBandLimit: Float,
+    val rubberBandCoefficient: Float,
+    val blurRestoreMs: Int,
+    val blurFadeInRate: Float,
+    val blurFadeOutRate: Float,
+)
+
+/** Interlude breathing-dots geometry / timing. */
+data class NativeBreathingDotsStyle(
+    val number: Int,
+    val sizePx: Float,
+    val marginPx: Float,
+    val enterMs: Int,
+    val stillMs: Int,
+    val dipMs: Int,
+    val exitMs: Int,
+    val colorArgb: Int,
 )
 
 fun SyncedLyrics.toNativeLyricsSceneJson(
@@ -56,45 +115,52 @@ fun SyncedLyrics.toNativeLyricsSceneJson(
         append(',')
         appendJsonField("locale", detectNativeLyricsLocale())
         append(',')
-        appendJsonField("normal_font_size", style.normalFontSizePx)
+        val typography = style.typography
+        val spacing = style.spacing
+        val blur = style.blur
+        val focus = style.focus
+        val spring = style.spring
+        val manual = style.manualScroll
+        val dots = style.breathingDots
+        appendJsonField("normal_font_size", typography.normalFontSizePx)
         append(',')
-        appendJsonField("normal_line_height", style.normalLineHeightPx)
+        appendJsonField("normal_line_height", typography.normalLineHeightPx)
         append(',')
-        appendJsonField("normal_font_weight", style.normalFontWeight)
+        appendJsonField("normal_font_weight", typography.normalFontWeight)
         append(',')
-        appendJsonField("normal_font_italic", style.normalFontItalic)
+        appendJsonField("normal_font_italic", typography.normalFontItalic)
         append(',')
-        appendJsonField("accompaniment_font_size", style.accompanimentFontSizePx)
+        appendJsonField("accompaniment_font_size", typography.accompanimentFontSizePx)
         append(',')
-        appendJsonField("accompaniment_line_height", style.accompanimentLineHeightPx)
+        appendJsonField("accompaniment_line_height", typography.accompanimentLineHeightPx)
         append(',')
-        appendJsonField("accompaniment_font_weight", style.accompanimentFontWeight)
+        appendJsonField("accompaniment_font_weight", typography.accompanimentFontWeight)
         append(',')
-        appendJsonField("accompaniment_font_italic", style.accompanimentFontItalic)
+        appendJsonField("accompaniment_font_italic", typography.accompanimentFontItalic)
         append(',')
-        appendJsonField("translation_font_size", style.translationFontSizePx)
+        appendJsonField("translation_font_size", typography.translationFontSizePx)
         append(',')
-        appendJsonField("translation_line_height", style.translationLineHeightPx)
+        appendJsonField("translation_line_height", typography.translationLineHeightPx)
         append(',')
-        appendJsonField("translation_font_weight", style.translationFontWeight)
+        appendJsonField("translation_font_weight", typography.translationFontWeight)
         append(',')
-        appendJsonField("translation_font_italic", style.translationFontItalic)
+        appendJsonField("translation_font_italic", typography.translationFontItalic)
         append(',')
-        appendJsonField("phonetic_font_size", style.phoneticFontSizePx)
+        appendJsonField("phonetic_font_size", typography.phoneticFontSizePx)
         append(',')
-        appendJsonField("phonetic_line_height", style.phoneticLineHeightPx)
+        appendJsonField("phonetic_line_height", typography.phoneticLineHeightPx)
         append(',')
-        appendJsonField("phonetic_font_weight", style.phoneticFontWeight)
+        appendJsonField("phonetic_font_weight", typography.phoneticFontWeight)
         append(',')
-        appendJsonField("phonetic_font_italic", style.phoneticFontItalic)
+        appendJsonField("phonetic_font_italic", typography.phoneticFontItalic)
         append(',')
-        appendJsonField("phonetic_gap", style.phoneticGapPx)
+        appendJsonField("phonetic_gap", spacing.phoneticGapPx)
         append(',')
-        appendJsonField("padding_x", style.paddingXPx)
+        appendJsonField("padding_x", spacing.paddingXPx)
         append(',')
-        appendJsonField("padding_y", style.paddingYPx)
+        appendJsonField("padding_y", spacing.paddingYPx)
         append(',')
-        appendJsonField("keep_alive", style.keepAlivePx)
+        appendJsonField("keep_alive", spacing.keepAlivePx)
         append(',')
         appendJsonField("text_color", style.textColorArgb.toUInt().toLong())
         append(',')
@@ -102,25 +168,63 @@ fun SyncedLyrics.toNativeLyricsSceneJson(
         append(',')
         appendJsonField("show_phonetic", style.showPhonetic)
         append(',')
-        appendJsonField("use_blur_effect", style.useBlurEffect)
+        appendJsonField("use_blur_effect", blur.useBlurEffect)
         append(',')
-        appendJsonField("blur_delta", style.blurDelta)
+        appendJsonField("blur_delta", blur.blurDelta)
         append(',')
-        appendJsonField("breathing_dots_number", style.breathingDotsNumber)
+        appendJsonField("breathing_dots_number", dots.number)
         append(',')
-        appendJsonField("breathing_dots_size", style.breathingDotsSizePx)
+        appendJsonField("breathing_dots_size", dots.sizePx)
         append(',')
-        appendJsonField("breathing_dots_margin", style.breathingDotsMarginPx)
+        appendJsonField("breathing_dots_margin", dots.marginPx)
         append(',')
-        appendJsonField("breathing_dots_enter_ms", style.breathingDotsEnterMs)
+        appendJsonField("breathing_dots_enter_ms", dots.enterMs)
         append(',')
-        appendJsonField("breathing_dots_still_ms", style.breathingDotsStillMs)
+        appendJsonField("breathing_dots_still_ms", dots.stillMs)
         append(',')
-        appendJsonField("breathing_dots_dip_ms", style.breathingDotsDipMs)
+        appendJsonField("breathing_dots_dip_ms", dots.dipMs)
         append(',')
-        appendJsonField("breathing_dots_exit_ms", style.breathingDotsExitMs)
+        appendJsonField("breathing_dots_exit_ms", dots.exitMs)
         append(',')
-        appendJsonField("breathing_dots_color", style.breathingDotsColorArgb.toUInt().toLong())
+        appendJsonField("breathing_dots_color", dots.colorArgb.toUInt().toLong())
+        append(',')
+        appendJsonField("accompaniment_gap", spacing.accompanimentGapPx)
+        append(',')
+        appendJsonField("blur_sharp_radius_lines", blur.sharpRadiusLines)
+        append(',')
+        appendJsonField("inactive_karaoke_alpha", focus.inactiveKaraokeAlpha)
+        append(',')
+        appendJsonField("focus_dim_min_alpha", focus.dimMinAlpha)
+        append(',')
+        appendJsonField("focus_dim_falloff_ms", focus.dimFalloffMs)
+        append(',')
+        appendJsonField("spring_stiffness", spring.stiffness)
+        append(',')
+        appendJsonField("spring_damping", spring.damping)
+        append(',')
+        appendJsonField("spring_chain_coupling", spring.chainCoupling)
+        append(',')
+        appendJsonField("spring_distance_falloff", spring.distanceFalloff)
+        append(',')
+        appendJsonField("spring_min_response", spring.minResponse)
+        append(',')
+        appendJsonField("manual_max_fling_velocity", manual.maxFlingVelocity)
+        append(',')
+        appendJsonField("manual_deceleration_rate", manual.decelerationRate)
+        append(',')
+        appendJsonField("manual_overscroll_stiffness", manual.overscrollStiffness)
+        append(',')
+        appendJsonField("manual_overscroll_damping", manual.overscrollDamping)
+        append(',')
+        appendJsonField("manual_rubber_band_limit", manual.rubberBandLimit)
+        append(',')
+        appendJsonField("manual_rubber_band_coefficient", manual.rubberBandCoefficient)
+        append(',')
+        appendJsonField("manual_blur_restore_ms", manual.blurRestoreMs)
+        append(',')
+        appendJsonField("manual_blur_fade_in_rate", manual.blurFadeInRate)
+        append(',')
+        appendJsonField("manual_blur_fade_out_rate", manual.blurFadeOutRate)
         append(',')
         append("\"lines\":[")
         var emittedLine = false

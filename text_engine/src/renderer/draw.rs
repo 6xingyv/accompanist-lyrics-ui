@@ -29,24 +29,27 @@ pub(super) fn draw_prepared_text(
     base_color: (u8, u8, u8, u8),
     alpha: f32,
     blur_radius: f32,
-    karaoke: Option<(i32, bool, &Vec<PreparedSyllable>)>,
+    karaoke: Option<(i32, bool, f32, &Vec<PreparedSyllable>)>,
 ) {
     for row in &text.rows {
         let (row_min_x, row_max_x) =
             row_x_bounds(row, origin_x).unwrap_or((origin_x, origin_x + row.width));
-        let active_edge = karaoke.and_then(|(time, is_rtl, syllables)| {
+        let active_edge = karaoke.and_then(|(time, is_rtl, _inactive_alpha, syllables)| {
             active_edge_for_row(row, origin_x, time, is_rtl, syllables)
         });
         let karaoke_brush = active_edge.map(|active_edge| KaraokeBrush {
             active_edge,
             row_min_x,
             row_max_x,
-            is_rtl: karaoke.map(|(_, is_rtl, _)| is_rtl).unwrap_or(false),
+            is_rtl: karaoke.map(|(_, is_rtl, _, _)| is_rtl).unwrap_or(false),
+            inactive_alpha: karaoke
+                .map(|(_, _, inactive_alpha, _)| inactive_alpha)
+                .unwrap_or(KARAOKE_INACTIVE_ALPHA),
         });
 
         for (glyph_position, glyph) in row.glyphs.iter().enumerate() {
             let effect = karaoke
-                .and_then(|(time, _, syllables)| {
+                .and_then(|(time, _, _, syllables)| {
                     glyph_effect_for_time(glyph, row, glyph_position, time, syllables)
                 })
                 .unwrap_or_default();
@@ -175,7 +178,7 @@ pub(super) fn draw_prepared_text_skia(
     base_color: (u8, u8, u8, u8),
     alpha: f32,
     blur_radius: f32,
-    karaoke: Option<(i32, bool, &Vec<PreparedSyllable>)>,
+    karaoke: Option<(i32, bool, f32, &Vec<PreparedSyllable>)>,
 ) {
     // Out-of-focus lines blur as ONE gaussian layer (a single offscreen pass for
     // the whole line) instead of a `MaskFilter::blur` per glyph-batch (one pass
@@ -225,14 +228,17 @@ pub(super) fn draw_prepared_text_skia(
     for row in &text.rows {
         let (row_min_x, row_max_x) =
             row_x_bounds(row, origin_x).unwrap_or((origin_x, origin_x + row.width));
-        let active_edge = karaoke.and_then(|(time, is_rtl, syllables)| {
+        let active_edge = karaoke.and_then(|(time, is_rtl, _inactive_alpha, syllables)| {
             active_edge_for_row(row, origin_x, time, is_rtl, syllables)
         });
         let karaoke_brush = active_edge.map(|active_edge| KaraokeBrush {
             active_edge,
             row_min_x,
             row_max_x,
-            is_rtl: karaoke.map(|(_, is_rtl, _)| is_rtl).unwrap_or(false),
+            is_rtl: karaoke.map(|(_, is_rtl, _, _)| is_rtl).unwrap_or(false),
+            inactive_alpha: karaoke
+                .map(|(_, _, inactive_alpha, _)| inactive_alpha)
+                .unwrap_or(KARAOKE_INACTIVE_ALPHA),
         });
         let karaoke_shader = karaoke_brush.and_then(|brush| make_karaoke_shader(brush, base_color));
         let mut batcher = SkiaGlyphBatcher::default();
@@ -240,7 +246,7 @@ pub(super) fn draw_prepared_text_skia(
 
         for (glyph_position, glyph) in row.glyphs.iter().enumerate() {
             let effect = karaoke
-                .and_then(|(time, _, syllables)| {
+                .and_then(|(time, _, _, syllables)| {
                     glyph_effect_for_time(glyph, row, glyph_position, time, syllables)
                 })
                 .unwrap_or_default();
@@ -537,7 +543,7 @@ fn make_karaoke_shader(brush: KaraokeBrush, base_color: (u8, u8, u8, u8)) -> Opt
     }
 
     let active = skia_color(base_color, 1.0);
-    let inactive = skia_color(base_color, KARAOKE_INACTIVE_ALPHA);
+    let inactive = skia_color(base_color, brush.inactive_alpha);
     let colors = if brush.is_rtl {
         [inactive, active]
     } else {
@@ -1640,9 +1646,9 @@ impl KaraokeBrush {
         };
 
         if self.is_rtl {
-            KARAOKE_INACTIVE_ALPHA + (1.0 - KARAOKE_INACTIVE_ALPHA) * t
+            self.inactive_alpha + (1.0 - self.inactive_alpha) * t
         } else {
-            1.0 - (1.0 - KARAOKE_INACTIVE_ALPHA) * t
+            1.0 - (1.0 - self.inactive_alpha) * t
         }
     }
 }

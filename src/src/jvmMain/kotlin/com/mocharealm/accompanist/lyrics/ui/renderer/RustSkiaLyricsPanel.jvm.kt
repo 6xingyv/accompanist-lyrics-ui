@@ -4,8 +4,11 @@ import com.mocharealm.accompanist.lyrics.core.model.SyncedLyrics
 import com.mocharealm.accompanist.lyrics.text.NativeFontConfig
 import com.mocharealm.accompanist.lyrics.text.NativeFontSource
 import com.mocharealm.accompanist.lyrics.text.NativeTextEngine
+import androidx.compose.ui.unit.Density
+import com.mocharealm.accompanist.lyrics.ui.composable.lyrics.KaraokeLyricsConfig
 import com.mocharealm.accompanist.lyrics.ui.composable.lyrics.getFontSource
 import com.mocharealm.accompanist.lyrics.ui.composable.lyrics.getSystemFallbackFontSources
+import com.mocharealm.accompanist.lyrics.ui.composable.lyrics.toRendererStyle
 import java.awt.Color
 import java.awt.Graphics
 import java.awt.Graphics2D
@@ -33,7 +36,9 @@ class RustSkiaLyricsPanel : JPanel() {
     private var sceneDirty = true
     private var pixelBuffer: ByteBuffer? = null
     private var image: BufferedImage? = null
-    private var rendererStyle = defaultStyle()
+    // Initial style is the default config at density 1 (desktop px == config px);
+    // the host overwrites it via setRendererStyle when one is supplied.
+    private var rendererStyle = KaraokeLyricsConfig().toRendererStyle(Density(1f))
     private var fontConfigKey = 0
     private var onLineClicked: ((Int) -> Unit)? = null
     private var onLinePressed: ((Int) -> Unit)? = null
@@ -178,18 +183,4 @@ class RustSkiaLyricsPanel : JPanel() {
         }
     }
 
-    private fun defaultStyle(): NativeLyricsRendererStyle {
-        return NativeLyricsRendererStyle(
-            normalFontSizePx = 34f,
-            normalLineHeightPx = 42f,
-            accompanimentFontSizePx = 20f,
-            accompanimentLineHeightPx = 26f,
-            translationFontSizePx = 16f,
-            translationLineHeightPx = 21f,
-            paddingXPx = 16f,
-            paddingYPx = 8f,
-            keepAlivePx = 120f,
-            textColorArgb = Color.WHITE.rgb,
-        )
-    }
 }
