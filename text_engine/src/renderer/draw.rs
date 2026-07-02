@@ -699,7 +699,7 @@ pub(super) fn draw_breathing_dots_skia(
         config.padding_x
     };
     let origin_y = y + config.padding_y;
-    let (scale, alpha, reveal_progress) =
+    let (scale, alpha, enter_end, exit_start) =
         breathing_dots_state(interlude.start, interlude.end, current_time_ms, dots);
     if alpha <= 0.0 || scale <= 0.0 {
         return;
@@ -709,11 +709,11 @@ pub(super) fn draw_breathing_dots_skia(
     let current_time = current_time_ms as f32;
     let center_x = origin_x + total_width * 0.5;
     let center_y = origin_y + dots.size * 0.5;
-    let reveal_x = origin_x + total_width * reveal_progress.clamp(0.0, 1.0);
-    let dot_duration =
-        ((interlude.end - interlude.start) as f32 - dots.enter_ms - dots.exit_ms - dots.still_ms)
-            .max(1.0)
-            / dots.number as f32;
+    // No brush/wipe reveal: the whole slot fades in/out on the master `alpha`
+    // (enter 0->1, exit 1->0). Between enter-end and exit-start the dots simply
+    // light up one after another (0.4 -> 1.0, staggered across that window).
+    let light_window = (exit_start - enter_end).max(1.0);
+    let dot_span = light_window / dots.number as f32;
 
     for index in 0..dots.number {
         let base_x = origin_x + dots.size * 0.5 + (dots.size + dots.margin) * index as f32;
@@ -721,15 +721,10 @@ pub(super) fn draw_breathing_dots_skia(
         let scaled_x = center_x + (base_x - center_x) * scale;
         let scaled_y = center_y + (base_y - center_y) * scale;
         let radius = dots.size * 0.5 * scale;
-        let reveal_alpha = ((reveal_x - base_x + dots.size * 0.5) / dots.size).clamp(0.0, 1.0);
-        let dot_start = interlude.start as f32 + dots.enter_ms + dot_duration * index as f32;
-        let dot_alpha = if current_time >= interlude.start as f32 + dots.enter_ms {
-            ((current_time - dot_start) / dot_duration).clamp(0.0, 1.0) * 0.6 + 0.4
-        } else {
-            0.4
-        };
+        let dot_start = enter_end + dot_span * index as f32;
+        let dot_alpha = 0.4 + 0.6 * ((current_time - dot_start) / dot_span).clamp(0.0, 1.0);
 
-        let total_alpha = alpha * dot_alpha * reveal_alpha * line_alpha;
+        let total_alpha = alpha * dot_alpha * line_alpha;
         if radius <= 0.0 || total_alpha <= 0.0 {
             continue;
         }
@@ -741,12 +736,16 @@ pub(super) fn draw_breathing_dots_skia(
     }
 }
 
+/// Returns `(scale, alpha, enter_end_ms, exit_start_ms)`: the breathing scale and
+/// the master fade envelope for the whole slot, plus the (variable-length-window
+/// aware) instants when the enter fade finishes and the exit fade begins — the
+/// caller lights the individual dots up across exactly that middle window.
 fn breathing_dots_state(
     start_ms: i32,
     end_ms: i32,
     current_time_ms: i32,
     dots: BreathingDotsConfig,
-) -> (f32, f32, f32) {
+) -> (f32, f32, f32, f32) {
     const ENTER_BREATH_SCALE: f32 = 0.8;
     const FULL_SCALE: f32 = 1.0;
     // If the gap is only barely longer than enter+dip+still+exit, a single
@@ -783,7 +782,7 @@ fn breathing_dots_state(
     if current < enter_end {
         let progress = ((current - start) / (enter_end - start).max(f32::EPSILON)).clamp(0.0, 1.0);
         let eased = smooth_step(progress);
-        return (eased * enter_end_scale, eased, eased);
+        return (eased * enter_end_scale, eased, enter_end, exit_start);
     }
     if has_visible_breathing && current < dip_start {
         // Breathe at ~3000ms/cycle, but stretch the period slightly so a whole
@@ -803,23 +802,23 @@ fn breathing_dots_state(
         };
         let period = 2.0 * breathing_duration / half_cycles;
         let angle = ((current - enter_end) / period) * 2.0 * PI;
-        return (0.9 - 0.1 * angle.cos(), 1.0, 1.0);
+        return (0.9 - 0.1 * angle.cos(), 1.0, enter_end, exit_start);
     }
     if current < dip_start {
-        return (FULL_SCALE, 1.0, 1.0);
+        return (FULL_SCALE, 1.0, enter_end, exit_start);
     }
     if current < still_start {
         let progress =
             ((current - dip_start) / (still_start - dip_start).max(f32::EPSILON)).clamp(0.0, 1.0);
-        return (0.8 + 0.2 * (progress * 2.0 * PI).cos(), 1.0, 1.0);
+        return (0.8 + 0.2 * (progress * 2.0 * PI).cos(), 1.0, enter_end, exit_start);
     }
     if current < exit_start {
-        return (1.0, 1.0, 1.0);
+        return (1.0, 1.0, enter_end, exit_start);
     }
 
     let progress = ((end - current) / (end - exit_start).max(f32::EPSILON)).clamp(0.0, 1.0);
     let eased = smooth_step(progress);
-    (eased, eased, 1.0)
+    (eased, eased, enter_end, exit_start)
 }
 
 fn dots_total_width(dots: BreathingDotsConfig) -> f32 {

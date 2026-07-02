@@ -85,7 +85,7 @@ data class KaraokeBlurConfig(
 /** How far-from-focus lines dim, and how unsung karaoke syllables are greyed. */
 data class KaraokeFocusConfig(
     val inactiveKaraokeAlpha: Float = 0.2f,
-    val dimMinAlpha: Float = 0.4f,
+    val dimMinAlpha: Float = 0.2f,
     val dimFalloffMs: Int = 400,
 )
 

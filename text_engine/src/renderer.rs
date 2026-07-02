@@ -1073,6 +1073,16 @@ impl LyricsRenderer {
                 .unwrap_or(keep_alive)
         };
 
+        // Each cluster's main line index, so a nested accompaniment can borrow its
+        // main line's blur and stay bound to it (crisp/blurred as one unit).
+        let cluster_main_index: HashMap<usize, usize> = scene
+            .lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.cluster_role == ClusterRole::Main)
+            .map(|(index, line)| (line.cluster_index, index))
+            .collect();
+
         for (line_index, line) in scene.lines.iter().enumerate() {
             let Some(dynamic_layout) = dynamic_layouts.get(line_index) else {
                 continue;
@@ -1096,15 +1106,40 @@ impl LyricsRenderer {
             // Left edge of this line's text: `padding_x`, plus the duet right-band
             // shift for right-aligned lines of a duet song (zero otherwise).
             let origin_x = scene.config.padding_x + line.x_offset;
-            let distance_alpha =
-                scene.focus_alpha(line, current_time_ms) * dynamic_layout.text_visibility;
-            // The whole active cluster (the sung main line and its nested
-            // accompaniment, all with start<=t<=end) is always crisp; everything
-            // else blurs by its distance from the active line.
-            let blur_radius = if scene.is_line_focused(line, current_time_ms) {
+            let focus_alpha = scene.focus_alpha(line, current_time_ms);
+            let distance_alpha = focus_alpha * dynamic_layout.text_visibility;
+            // Unify the dim of already-sung and not-yet-sung lines: as a line dims
+            // away from focus, fade the karaoke "unsung" alpha back up to 1.0, so a
+            // fully-dimmed upcoming line reads at the same alpha as a fully-dimmed
+            // already-sung one (both just `focus_alpha`) instead of being an extra
+            // `inactive_karaoke_alpha` darker. At full focus it stays the configured
+            // inactive alpha, so the active line's karaoke sweep is unchanged.
+            let effective_inactive_karaoke_alpha = unified_inactive_karaoke_alpha(
+                focus_alpha,
+                scene.config.focus_dim_min_alpha,
+                scene.config.inactive_karaoke_alpha,
+            );
+            // A nested accompaniment shares its main line's blur so the whole
+            // main+accompaniment cluster sharpens/blurs as one unit — crisp
+            // whenever the main is the active line, and at the main line's blur
+            // radius otherwise — instead of blurring on its own screen position.
+            let blur_source_index = if line.cluster_role.is_nested_accompaniment() {
+                cluster_main_index
+                    .get(&line.cluster_index)
+                    .copied()
+                    .unwrap_or(line_index)
+            } else {
+                line_index
+            };
+            let blur_source_line = &scene.lines[blur_source_index];
+            let blur_source_y = dynamic_layouts
+                .get(blur_source_index)
+                .map(|layout| layout.top)
+                .unwrap_or(y);
+            let blur_radius = if scene.is_line_focused(blur_source_line, current_time_ms) {
                 0.0
             } else {
-                scene.blur_radius_for_screen_y(y, blur_anchor_y) * blur_scale
+                scene.blur_radius_for_screen_y(blur_source_y, blur_anchor_y) * blur_scale
             };
 
             if let Some(interlude) = &line.interlude {
@@ -1186,7 +1221,7 @@ impl LyricsRenderer {
                         Some((
                             current_time_ms,
                             *is_rtl,
-                            scene.config.inactive_karaoke_alpha,
+                            effective_inactive_karaoke_alpha,
                             syllables,
                         )),
                     );
@@ -1643,6 +1678,24 @@ fn focus_alpha_from_progress(progress: f32, min_alpha: f32) -> f32 {
     let t = progress.clamp(0.0, 1.0);
     let eased = t * t * (3.0 - 2.0 * t);
     min_alpha + (1.0 - min_alpha) * eased
+}
+
+/// The karaoke "unsung" multiplier, chosen so the unsung ("unplayed") text sits
+/// at a CONSTANT alpha for a line's whole life — the dimmed floor `dim_min`, which
+/// is also where a dimmed already-sung line sits, so played and unplayed lines are
+/// unified when dimmed. The caller multiplies the result by the line's
+/// `focus_alpha`, so returning `dim_min / focus_alpha` keeps that product pinned
+/// at `dim_min`: a line therefore never dims as it becomes active (no "darken then
+/// the brush appears" dip) — its words just fill from `dim_min` up to full. At
+/// full focus this yields `dim_min` (< 1.0), so the sung→unsung sweep still reads.
+/// `dim_min.max(inactive)` keeps at least the configured contrast if a scene sets
+/// `inactive` brighter than the dim floor.
+fn unified_inactive_karaoke_alpha(focus_alpha: f32, dim_min: f32, inactive: f32) -> f32 {
+    let target = dim_min.max(inactive);
+    if focus_alpha <= f32::EPSILON {
+        return 1.0;
+    }
+    (target / focus_alpha).clamp(0.0, 1.0)
 }
 
 #[cfg(test)]
@@ -2112,6 +2165,96 @@ mod tests {
         assert_eq!(scene.dynamic_line_layouts(900)[1].height, 0.0);
         // Fully open by main.start + enter window — long before its own start 2100.
         assert_eq!(scene.dynamic_line_layouts(1_600)[1].height, 30.0);
+    }
+
+    // A nested accompaniment must NOT run its own scroll spring: it rides the same
+    // scroll as the rest of its cluster, so a main line and its accompaniment move
+    // as one rigid block through the cascade instead of shearing apart. Regression
+    // guard for "伴唱行不应单独使用弹簧，应该和主歌词作为一个整体计算弹簧".
+    #[test]
+    fn nested_accompaniment_rides_its_main_line_spring() {
+        let mut renderer = LyricsRenderer::new();
+        let mut lines = vec![
+            indexed_line(0, 0, 1_000, 100.0),
+            indexed_line(1, 1_000, 2_000, 100.0),
+            indexed_line(2, 2_000, 3_000, 100.0),
+            indexed_line(3, 3_000, 4_000, 100.0),
+            indexed_line(4, 3_000, 4_000, 100.0),
+            indexed_line(5, 5_000, 6_000, 100.0),
+        ];
+        // Rows 3 (main) and 4 (accompaniment) share one scroll cluster.
+        lines[3].cluster_role = ClusterRole::Main;
+        lines[4].cluster_role = ClusterRole::AfterAccompaniment;
+        lines[4].cluster_index = lines[3].cluster_index;
+        renderer.scene = Some(PreparedScene {
+            config: test_config(),
+            lines,
+            content_height: 0.0,
+        });
+
+        let content: Vec<DynamicLineLayout> = (0..6)
+            .map(|i| DynamicLineLayout {
+                top: i as f32 * 100.0,
+                height: 100.0,
+                text_visibility: 1.0,
+                interlude_visibility: 0.0,
+            })
+            .collect();
+        let viewport = 600.0;
+        let scroll_of = |renderer: &LyricsRenderer, i: usize| content[i].top - renderer.frame_layouts[i].top;
+
+        // Settle at the top so the cluster (rows 3-4) sits below the focus.
+        for _ in 0..200 {
+            renderer.animate_frame_layout(1_000, &content, 0.0, viewport, 0);
+        }
+
+        // Advance the target so the rows below the focus cascade toward it. Across
+        // the whole transient the two cluster rows must keep exactly one scroll,
+        // while the cascade genuinely lags the other rows (else the test is moot).
+        let mut saw_cascade_spread = false;
+        for step in 0..40 {
+            let t = 1_000 + step * 30;
+            renderer.animate_frame_layout(t, &content, 300.0, viewport, 1);
+            let main_scroll = scroll_of(&renderer, 3);
+            let acc_scroll = scroll_of(&renderer, 4);
+            assert!(
+                (main_scroll - acc_scroll).abs() < LINE_LAYOUT_EPSILON,
+                "accompaniment scroll {acc_scroll} must track its main line's {main_scroll}"
+            );
+            if (scroll_of(&renderer, 2) - main_scroll).abs() > 1.0 {
+                saw_cascade_spread = true;
+            }
+        }
+        assert!(
+            saw_cascade_spread,
+            "cascade should lag rows relative to each other, otherwise the test proves nothing"
+        );
+    }
+
+    // The unsung ("unplayed") text alpha (= focus_alpha * the karaoke multiplier)
+    // must stay pinned at the dimmed floor for a line's whole focus range: that
+    // both unifies it with a dimmed already-sung line (also `dim_min`) AND means a
+    // line never darkens as it becomes active — it just fills in. Regression guard
+    // for "从未播放到正在播放会先变暗，然后笔刷才出现".
+    #[test]
+    fn unplayed_alpha_is_constant_so_activating_a_line_never_darkens_it() {
+        let dim_min = 0.4;
+        let inactive = 0.2;
+        let mut focus_alpha = dim_min;
+        while focus_alpha <= 1.0 + 1e-6 {
+            let unplayed = focus_alpha * unified_inactive_karaoke_alpha(focus_alpha, dim_min, inactive);
+            assert!(
+                (unplayed - dim_min).abs() < 1e-4,
+                "focus_alpha {focus_alpha}: unplayed {unplayed} should stay at {dim_min}"
+            );
+            focus_alpha += 0.05;
+        }
+        // The active line still has karaoke contrast: sung (1.0) brighter than unsung.
+        let active_unsung = 1.0 * unified_inactive_karaoke_alpha(1.0, dim_min, inactive);
+        assert!(
+            active_unsung < 1.0 && (active_unsung - dim_min).abs() < 1e-6,
+            "active unsung {active_unsung}"
+        );
     }
 
     #[test]

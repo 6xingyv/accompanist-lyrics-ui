@@ -493,7 +493,26 @@ impl LyricsRenderer {
         }
 
         let mut active = false;
-        for (index, state) in self.spring_layouts.iter_mut().enumerate() {
+        for index in 0..count {
+            // A nested accompaniment line is NOT sprung on its own. Any line that
+            // shares its cluster with the line above simply rides that line's
+            // scroll, so a main line and its accompaniment move as ONE rigid block
+            // through the cascade instead of each running an independent spring and
+            // shearing apart. (Ascending order guarantees the line above has
+            // already been advanced this frame; the oversized-cluster split gives
+            // over-tall accompaniments their own cluster, so they still spring.)
+            let rides_cluster_above = index > 0
+                && self.scene.as_ref().is_some_and(|scene| {
+                    scene
+                        .lines
+                        .get(index)
+                        .zip(scene.lines.get(index - 1))
+                        .is_some_and(|(line, above)| line.cluster_index == above.cluster_index)
+                });
+            if rides_cluster_above {
+                self.spring_layouts[index] = self.spring_layouts[index - 1];
+                continue;
+            }
             // Focus row and everything above it = rigid block (response 1.0); only
             // rows below the focus soften with distance to form the cascade. A
             // seek glide keeps every row rigid until it settles.
@@ -510,10 +529,12 @@ impl LyricsRenderer {
             // single soft stretch-and-settle like the leading row instead of
             // dropping underdamped and wobbling back and forth.
             let damping_response = response.powf(0.3);
+            let target = self.spring_chained_targets[index];
+            let state = &mut self.spring_layouts[index];
             active |= spring_step(
                 &mut state.scroll,
                 &mut state.velocity,
-                self.spring_chained_targets[index],
+                target,
                 scroll.spring_stiffness * response,
                 scroll.spring_damping * damping_response,
                 dt,
