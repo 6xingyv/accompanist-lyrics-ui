@@ -211,13 +211,8 @@ fun MobilePlayerScreen(
                         bitmap,
                         null,
                         Modifier
-                            .clip(ContinuousRoundedRectangle(6.dp))
-                            .border(
-                                1.dp,
-                                Color.White.copy(0.2f),
-                                ContinuousRoundedRectangle(6.dp)
-                            )
-                            .size(60.dp)
+                            .clip(ContinuousRoundedRectangle(14.dp))
+                            .size(68.dp)
                     )
                 }
                 PlayerMetadata(
@@ -289,12 +284,6 @@ fun PadPlayerScreen(
                 uiState.backgroundState.bitmap ?: imageResource(Res.drawable.empty),
                 null,
                 Modifier
-//                        .dropShadow(ContinuousRoundedRectangle(12.dp)) {
-//                            radius = 10f
-//                            color = Color.Black.copy(0.2f)
-//                            offset = Offset(0f, 16f)
-//                            spread = -10f
-//                        }
                     .border(
                         1.dp,
                         Color.White.copy(0.2f),
@@ -556,7 +545,8 @@ fun PlayerMetadata(
         Text(
             text = title,
             style = LocalTextStyle.current.copy(
-                fontWeight = FontWeight.Bold,
+                fontSize = 17.sp,
+                fontWeight = FontWeight.SemiBold,
                 textMotion = TextMotion.Animated
             ),
             color = Color.White,
@@ -574,6 +564,8 @@ fun PlayerMetadata(
                     repeatDelayMillis = 2000
                 ),
             style = LocalTextStyle.current.copy(
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Normal,
                 textMotion = TextMotion.Animated
             ),
             lineHeight = 1.em,
@@ -594,7 +586,7 @@ fun PlayerControls(
         Box(
             Modifier
                 .clip(CircleShape)
-                .background(Color.White.copy(0.2f))
+                .background(Color.White.copy(0.1f))
                 .clickable(onClick = onOpenSongSelection)
                 .padding(4.dp),
         ) {

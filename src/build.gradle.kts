@@ -11,6 +11,8 @@ import org.gradle.api.tasks.OutputDirectory
 import org.gradle.api.tasks.TaskAction
 import org.gradle.process.ExecOperations
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import java.io.File
+import java.util.Properties
 import javax.inject.Inject
 
 plugins {
@@ -169,6 +171,9 @@ abstract class BuildRustAndroidTask @Inject constructor(
     @get:Input
     abstract val libName: Property<String>
 
+    @get:Input
+    abstract val androidApiLevel: Property<Int>
+
     @get:OutputDirectory
     abstract val jniLibsDir: DirectoryProperty
 
@@ -176,8 +181,12 @@ abstract class BuildRustAndroidTask @Inject constructor(
     fun build() {
         val abiMap = mapOf(
             "arm64-v8a" to "aarch64-linux-android",
+            "armeabi-v7a" to "armv7-linux-androideabi",
             "x86_64" to "x86_64-linux-android"
         )
+        val androidNdkDir = resolveAndroidNdkDir()
+        val skiaNinjaCommand = resolveSkiaNinjaCommand()
+        val libclangPath = resolveLibclangPath(androidNdkDir)
 
         abiMap.forEach { (abi, target) ->
             // Ensure output directory exists
@@ -188,7 +197,21 @@ abstract class BuildRustAndroidTask @Inject constructor(
 
             execOps.exec {
                 workingDir = rustProjectDir.get().asFile
-                commandLine("cargo", "ndk", "-t", abi, "build", "--release")
+                commandLine(
+                    "cargo",
+                    "ndk",
+                    "-t", abi,
+                    "-P", androidApiLevel.get().toString(),
+                    "build",
+                    "--release"
+                )
+                environment("ANDROID_NDK", androidNdkDir.absolutePath)
+                environment("ANDROID_NDK_HOME", androidNdkDir.absolutePath)
+                environment("ANDROID_NDK_ROOT", androidNdkDir.absolutePath)
+                environment.remove("SDKROOT")
+                environment.remove("SDKTARGETSYSROOT")
+                skiaNinjaCommand?.let { environment("SKIA_NINJA_COMMAND", it.absolutePath) }
+                libclangPath?.let { environment("LIBCLANG_PATH", it.absolutePath) }
             }.assertNormalExitValue()
 
             fs.copy {
@@ -198,6 +221,183 @@ abstract class BuildRustAndroidTask @Inject constructor(
             }
         }
     }
+
+    private fun resolveAndroidNdkDir(): File {
+        listOf("ANDROID_NDK", "ANDROID_NDK_HOME", "ANDROID_NDK_ROOT").forEach { name ->
+            System.getenv(name)
+                ?.takeIf { it.isNotBlank() }
+                ?.let { File(it) }
+                ?.takeIf { it.isDirectory }
+                ?.let { return it }
+        }
+
+        localPropertiesFiles().forEach { propertiesFile ->
+            val properties = Properties()
+            propertiesFile.inputStream().use { properties.load(it) }
+
+            properties.getProperty("ndk.dir")
+                ?.takeIf { it.isNotBlank() }
+                ?.let { File(it) }
+                ?.takeIf { it.isDirectory }
+                ?.let { return it }
+
+            properties.getProperty("sdk.dir")
+                ?.takeIf { it.isNotBlank() }
+                ?.let { File(it) }
+                ?.let { sdkDir -> findLatestNdkInSdk(sdkDir) }
+                ?.let { return it }
+        }
+
+        listOf("ANDROID_HOME", "ANDROID_SDK_ROOT").forEach { name ->
+            System.getenv(name)
+                ?.takeIf { it.isNotBlank() }
+                ?.let { File(it) }
+                ?.let { sdkDir -> findLatestNdkInSdk(sdkDir) }
+                ?.let { return it }
+        }
+
+        throw org.gradle.api.GradleException(
+            "Android NDK not found. Set ANDROID_NDK or add ndk.dir/sdk.dir to local.properties."
+        )
+    }
+
+    private fun localPropertiesFiles(): List<File> =
+        listOf(
+            project.rootProject.file("local.properties"),
+            project.file("local.properties")
+        ).distinct().filter { it.isFile }
+
+    private fun findLatestNdkInSdk(sdkDir: File): File? {
+        val ndkRoot = File(sdkDir, "ndk")
+        val ndks = ndkRoot.listFiles { file ->
+            file.isDirectory && File(file, "source.properties").isFile
+        } ?: return null
+
+        return ndks.maxWithOrNull { left, right ->
+            compareVersionNames(left.name, right.name)
+        }
+    }
+
+    private fun compareVersionNames(left: String, right: String): Int {
+        val leftParts = left.split('.', '-').map { it.toIntOrNull() ?: 0 }
+        val rightParts = right.split('.', '-').map { it.toIntOrNull() ?: 0 }
+        repeat(maxOf(leftParts.size, rightParts.size)) { index ->
+            val diff = leftParts.getOrElse(index) { 0 } - rightParts.getOrElse(index) { 0 }
+            if (diff != 0) return diff
+        }
+        return left.compareTo(right)
+    }
+
+    private fun resolveSkiaNinjaCommand(): File? {
+        System.getenv("SKIA_NINJA_COMMAND")
+            ?.takeIf { it.isNotBlank() }
+            ?.let { File(it) }
+            ?.takeIf { it.isFile }
+            ?.let { return it }
+
+        findExecutableInPath("ninja")?.let { return it }
+
+        val executableName = if (isWindows()) "ninja.exe" else "ninja"
+        return listOf(
+            project.rootProject.file("../skiko/skia/third_party/ninja/$executableName"),
+            project.rootProject.file("../skiko/skiko/skia/third_party/ninja/$executableName"),
+            project.rootProject.file("../../skiko/skia/third_party/ninja/$executableName"),
+            project.rootProject.file("../../skiko/skiko/skia/third_party/ninja/$executableName")
+        ).firstOrNull { it.isFile }
+    }
+
+    private fun resolveLibclangPath(androidNdkDir: File): File? {
+        System.getenv("LIBCLANG_PATH")
+            ?.takeIf { it.isNotBlank() }
+            ?.let { File(it) }
+            ?.let { path ->
+                if (path.isFile) path.parentFile else path
+            }
+            ?.takeIf { it.isDirectory }
+            ?.let { return it }
+
+        val pathLibclang = findFileInPath(libclangLibraryNames())
+
+        if (isWindows()) {
+            val localAppData = System.getenv("LOCALAPPDATA")?.let { File(it) }
+            val swiftToolchains = localAppData?.resolve("Programs/Swift/Toolchains")
+            swiftToolchains?.listFiles { file -> file.isDirectory }
+                ?.asSequence()
+                ?.map { it.resolve("usr/bin") }
+                ?.firstOrNull { dir -> libclangLibraryNames().any { dir.resolve(it).isFile } }
+                ?.let { return it }
+
+            listOf(
+                File("C:/Program Files/LLVM/bin"),
+                File("C:/Program Files (x86)/LLVM/bin")
+            ).firstOrNull { dir ->
+                libclangLibraryNames().any { dir.resolve(it).isFile }
+            }?.let { return it }
+
+            pathLibclang
+                ?.takeUnless { isUnderDirectory(it, androidNdkDir) }
+                ?.parentFile
+                ?.let { return it }
+        } else {
+            pathLibclang?.parentFile?.let { return it }
+        }
+
+        findLibclangUnderNdk(androidNdkDir)?.let { return it }
+
+        return null
+    }
+
+    private fun findLibclangUnderNdk(androidNdkDir: File): File? {
+        val prebuiltRoot = androidNdkDir.resolve("toolchains/llvm/prebuilt")
+        return prebuiltRoot.listFiles { file -> file.isDirectory }
+            ?.asSequence()
+            ?.map { it.resolve("bin") }
+            ?.firstOrNull { dir -> libclangLibraryNames().any { dir.resolve(it).isFile } }
+    }
+
+    private fun findFileInPath(fileNames: List<String>): File? {
+        val path = System.getenv("PATH") ?: return null
+        return path.split(File.pathSeparator)
+            .asSequence()
+            .map { File(it) }
+            .filter { it.isDirectory }
+            .flatMap { dir -> fileNames.asSequence().map { fileName -> File(dir, fileName) } }
+            .firstOrNull { it.isFile }
+    }
+
+    private fun findExecutableInPath(command: String): File? {
+        val path = System.getenv("PATH") ?: return null
+        val extensions = if (isWindows()) listOf(".exe", ".cmd", ".bat", "") else listOf("")
+        return path.split(File.pathSeparator)
+            .asSequence()
+            .map { File(it) }
+            .filter { it.isDirectory }
+            .flatMap { dir ->
+                extensions.asSequence().map { extension ->
+                    if (command.endsWith(extension, ignoreCase = true)) {
+                        File(dir, command)
+                    } else {
+                        File(dir, "$command$extension")
+                    }
+                }
+            }
+            .firstOrNull { it.isFile }
+    }
+
+    private fun libclangLibraryNames(): List<String> = when {
+        isWindows() -> listOf("libclang.dll", "clang.dll")
+        System.getProperty("os.name").lowercase().contains("mac") -> listOf("libclang.dylib")
+        else -> listOf("libclang.so")
+    }
+
+    private fun isUnderDirectory(file: File, directory: File): Boolean {
+        val filePath = file.absoluteFile.normalize().path.lowercase()
+        val directoryPath = directory.absoluteFile.normalize().path.lowercase()
+        return filePath == directoryPath || filePath.startsWith("$directoryPath${File.separator}")
+    }
+
+    private fun isWindows(): Boolean =
+        System.getProperty("os.name").lowercase().contains("win")
 }
 
 abstract class BuildRustJvmTask @Inject constructor(
@@ -302,6 +502,7 @@ abstract class BuildRustAppleTask @Inject constructor(
 val buildRustAndroid = tasks.register<BuildRustAndroidTask>("buildRustAndroid") {
     rustProjectDir.set(rustDir)
     libName.set(rustLibName)
+    androidApiLevel.set(29)
     jniLibsDir.set(layout.projectDirectory.dir("src/androidMain/jniLibs"))
 }
 

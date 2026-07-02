@@ -92,6 +92,7 @@ android {
             isEnable = true
             reset()
             include("arm64-v8a")
+            include("armeabi-v7a")
             isUniversalApk = false
         }
     }
