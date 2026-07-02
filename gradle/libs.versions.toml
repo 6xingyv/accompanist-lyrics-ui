@@ -3,12 +3,12 @@ agp = "9.2.1"
 kotlin = "2.4.0"
 coreKtx = "1.19.0"
 lifecycleRuntimeKtx = "2.11.0"
-activityCompose = "1.12.2"
+activityCompose = "1.13.0"
 media3Exoplayer = "1.10.1"
 media3Session = "1.10.1"
 compose = "1.11.1"
 kotlinx-serialization = "2.4.0"
-kotlinx-serialization-json = "1.10.0"
+kotlinx-serialization-json = "1.11.0"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -18,7 +18,7 @@ androidx-activity-compose = { group = "androidx.activity", name = "activity-comp
 kotlinx-coroutines-guava = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-guava", version = "1.11.0" }
 androidx-media3-exoplayer = { group = "androidx.media3", name = "media3-exoplayer", version.ref = "media3Exoplayer" }
 androidx-media3-session = { group = "androidx.media3", name = "media3-session", version.ref = "media3Session" }
-accompanist-lyrics-core = { module = "com.mocharealm.accompanist:lyrics-core", version = "0.4.6" }
+accompanist-lyrics-core = { module = "com.mocharealm.accompanist:lyrics-core", version = "0.4.7" }
 gaze-capsule = { module = "com.mocharealm.gaze:capsule", version = "2.1.1-patch2" }
 koin-bom = { group = "io.insert-koin", name = "koin-bom", version = "4.1.1" }
 koin-compose = { group = "io.insert-koin", name = "koin-compose" }

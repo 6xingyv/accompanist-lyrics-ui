@@ -66,7 +66,10 @@ pub(super) fn skia_typeface_from_face_source(face: &fontdb::FaceInfo) -> Option<
     }
 }
 
-pub(super) fn collect_text_font_usage(text: &PreparedText, font_ids: &mut Vec<fontdb::ID>) -> usize {
+pub(super) fn collect_text_font_usage(
+    text: &PreparedText,
+    font_ids: &mut Vec<fontdb::ID>,
+) -> usize {
     let mut glyph_count = 0;
     for row in &text.rows {
         for glyph in &row.glyphs {
@@ -132,7 +135,6 @@ impl LyricsRenderer {
             .load_font_source(fontdb::Source::Binary(Arc::new(bytes)));
         self.register_loaded_face(ids.as_slice(), face_index, skia_typeface);
         self.font_selection_cache.clear();
-        self.reset_cpu_render_cache();
         self.reset_layout_animation_state();
         self.reset_manual_scroll();
         self.scene = None;
@@ -153,7 +155,6 @@ impl LyricsRenderer {
             .load_font_source(fontdb::Source::File(std::path::PathBuf::from(path)));
         self.register_loaded_face(ids.as_slice(), face_index, skia_typeface);
         self.font_selection_cache.clear();
-        self.reset_cpu_render_cache();
         self.reset_layout_animation_state();
         self.reset_manual_scroll();
         self.scene = None;
@@ -390,8 +391,8 @@ impl LyricsRenderer {
             // font keeps its axes (the drawn glyphs are later instanced at the
             // requested `wght` in `draw.rs`) and the exact concrete face is used.
             // Fall back to the system FontMgr only if the source can't be read.
-            let typeface = skia_typeface_from_face_source(face)
-                .or_else(|| match_skia_typeface_for_face(face));
+            let typeface =
+                skia_typeface_from_face_source(face).or_else(|| match_skia_typeface_for_face(face));
 
             match typeface {
                 Some(tf) => {
@@ -510,7 +511,10 @@ impl LyricsRenderer {
         // -text shapes with a family that actually has it, instead of one that
         // doesn't and dropping to its hard-coded Roboto/Droid preset fallback.
         #[cfg(target_os = "android")]
-        if let Some(ch) = cluster.chars().find(|c| !c.is_whitespace() && !c.is_control()) {
+        if let Some(ch) = cluster
+            .chars()
+            .find(|c| !c.is_whitespace() && !c.is_control())
+        {
             if let Some(family) = self.matched_char_family.get(&ch) {
                 return Some(family.clone());
             }

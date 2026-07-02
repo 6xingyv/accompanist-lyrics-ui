@@ -1,8 +1,6 @@
-#[cfg(not(target_os = "android"))]
-use cosmic_text::SwashCache;
 use cosmic_text::{
-    fontdb, Align, Attrs, Buffer, Family, FontSystem, Metrics, PhysicalGlyph, Shaping, Style, Weight,
-    Wrap,
+    fontdb, Align, Attrs, Buffer, Family, FontSystem, Metrics, PhysicalGlyph, Shaping, Style,
+    Weight, Wrap,
 };
 use serde::{Deserialize, Serialize};
 use skia_safe::{font_style, Data, FontMgr, FontStyle, Typeface};
@@ -22,11 +20,9 @@ use draw::{
     accompaniment_visibility, apply_vertical_fade_skia, draw_breathing_dots_skia,
     draw_prepared_text_skia, interlude_visibility, make_interlude_slot, rgba_from_argb,
 };
-use scroll::{ManualScrollState, SpringLineState};
-#[cfg(not(target_os = "android"))]
-use draw::{apply_vertical_fade, draw_breathing_dots, draw_prepared_text};
 use font_fallback::{cjk_family_priority, new_font_system};
 use fonts::*;
+use scroll::{ManualScrollState, SpringLineState};
 use text_utils::{
     contains_han, contains_rtl, has_trailing_whitespace, is_blank_text, is_punctuation_or_space,
     should_use_simple_animation, trailing_whitespace_count, trim_end_whitespace,
@@ -59,10 +55,6 @@ const DEFAULT_DOTS_STILL_MS: f32 = 200.0;
 const DEFAULT_DOTS_DIP_MS: f32 = 3000.0;
 const DEFAULT_DOTS_EXIT_MS: f32 = 200.0;
 const DOTS_VERTICAL_PADDING: f32 = 12.0;
-#[cfg(not(target_os = "android"))]
-const TOP_FADE_PX: f32 = 20.0;
-#[cfg(not(target_os = "android"))]
-const BOTTOM_FADE_PX: f32 = 100.0;
 const KARAOKE_INACTIVE_ALPHA: f32 = 0.2;
 // A line that leaves the focus dims to `FOCUS_ALPHA_MIN` over `..FALLOFF_MS` of
 // distance (time before it starts / after it ends). Kept short so the dim is
@@ -74,8 +66,6 @@ const FOCUS_ALPHA_FALLOFF_MS: f32 = 800.0;
 // accompaniment a line or two below it — further still when the main carries a
 // translation) is never blurred. Blur ramps up beyond this band.
 const BLUR_SHARP_RADIUS_LINES: f32 = 2.5;
-#[cfg(not(target_os = "android"))]
-const MAX_GLYPH_BLUR_RADIUS: f32 = 36.0;
 const SIMPLE_LIFT_PX: f32 = 4.0;
 const SIMPLE_ANIMATION_DURATION_MS: f32 = 700.0;
 const AWESOME_LIFT_PX: f32 = 4.0;
@@ -467,8 +457,6 @@ pub struct RendererMetrics {
 #[derive(Debug)]
 pub struct LyricsRenderer {
     font_system: FontSystem,
-    #[cfg(not(target_os = "android"))]
-    swash_cache: SwashCache,
     font_stack: Vec<RendererFontFace>,
     /// Glyph → family name the NDK `AFontMatcher` chose for characters the user's
     /// font chain can't cover (e.g. MiSans on Xiaomi, Noto elsewhere). The matcher
@@ -521,8 +509,6 @@ pub struct LyricsRenderer {
     /// Ramps toward 1.0 while the user manually scrolls so everything is sharp,
     /// and back toward 0.0 once the list settles at the auto position again.
     manual_scroll_blur_release: f32,
-    #[cfg(not(target_os = "android"))]
-    blurred_glyph_cache: HashMap<BlurredGlyphCacheKey, BlurredGlyphMask>,
     locale: String,
     scene: Option<PreparedScene>,
 }
@@ -844,23 +830,6 @@ struct GlyphRenderEffect {
     scale_pivot: Option<(f32, f32)>,
 }
 
-#[cfg(not(target_os = "android"))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct BlurredGlyphCacheKey {
-    cache_key: cosmic_text::CacheKey,
-    radius: u8,
-}
-
-#[cfg(not(target_os = "android"))]
-#[derive(Debug)]
-struct BlurredGlyphMask {
-    origin_x: i32,
-    origin_y: i32,
-    width: usize,
-    height: usize,
-    alpha: Vec<u8>,
-}
-
 impl Default for GlyphRenderEffect {
     fn default() -> Self {
         Self {
@@ -871,7 +840,6 @@ impl Default for GlyphRenderEffect {
         }
     }
 }
-
 
 #[derive(Debug, Clone)]
 struct MeasuredSyllable {
@@ -896,8 +864,6 @@ impl LyricsRenderer {
     pub fn new() -> Self {
         Self {
             font_system: new_font_system("en-US".to_string(), fontdb::Database::new()),
-            #[cfg(not(target_os = "android"))]
-            swash_cache: SwashCache::new(),
             font_stack: Vec::new(),
             matched_char_family: HashMap::new(),
             skia_typefaces: HashMap::new(),
@@ -926,22 +892,10 @@ impl LyricsRenderer {
             last_manual_scroll_frame_at: None,
             manual_scroll_active: false,
             manual_scroll_blur_release: 0.0,
-            #[cfg(not(target_os = "android"))]
-            blurred_glyph_cache: HashMap::new(),
             locale: "en-US".to_string(),
             scene: None,
         }
     }
-
-    #[cfg(not(target_os = "android"))]
-    fn reset_cpu_render_cache(&mut self) {
-        self.blurred_glyph_cache.clear();
-        self.swash_cache = SwashCache::new();
-    }
-
-    #[cfg(target_os = "android")]
-    fn reset_cpu_render_cache(&mut self) {}
-
 
     fn should_log_render_debug(&mut self, current_time_ms: i32) -> bool {
         let should_log = self
@@ -984,7 +938,6 @@ impl LyricsRenderer {
         }
         self.locale = locale.to_string();
         self.font_selection_cache.clear();
-        self.reset_cpu_render_cache();
 
         // The NDK `AFontMatcher` picks a different system family per locale for the
         // same CJK codepoint (SC vs TC vs JP vs KR share Unicode ranges). It was
@@ -1013,172 +966,6 @@ impl LyricsRenderer {
             content_height: scene.content_height,
         })
         .unwrap_or_else(|_| "{}".to_string())
-    }
-
-    #[cfg(not(target_os = "android"))]
-    pub fn render_frame_into(&mut self, current_time_ms: i32, pixels: &mut [u8]) -> i32 {
-        let Some(scene) = &self.scene else {
-            return -3;
-        };
-
-        let width = scene.config.width.max(DEFAULT_WIDTH);
-        let height = scene.config.height.max(DEFAULT_HEIGHT);
-        let required = width as usize * height as usize * 4;
-        if pixels.len() < required {
-            return -2;
-        }
-
-        pixels[..required].fill(0);
-
-        let dynamic_layouts = scene.dynamic_line_layouts(current_time_ms);
-        let scroll_y = scene.scroll_y_for_time_with_layouts(current_time_ms, &dynamic_layouts);
-        let visible_top = scroll_y - scene.config.keep_alive;
-        let visible_bottom = scroll_y + height as f32 + scene.config.keep_alive;
-        let base_color = rgba_from_argb(scene.config.text_color);
-
-        // Blur anchor = the currently sung line's on-screen position (see the
-        // Android path for the rationale); focused lines are forced fully sharp.
-        let blur_anchor_y = {
-            let idx = scene.focus_anchor_index(current_time_ms);
-            dynamic_layouts
-                .get(idx)
-                .map(|layout| layout.top - scroll_y)
-                .unwrap_or(scene.config.keep_alive)
-        };
-
-        for (line_index, line) in scene.lines.iter().enumerate() {
-            let Some(dynamic_layout) = dynamic_layouts.get(line_index) else {
-                continue;
-            };
-            if dynamic_layout.height <= 0.001 {
-                continue;
-            }
-
-            let line_top = dynamic_layout.top;
-            let line_bottom = dynamic_layout.top + dynamic_layout.height;
-            if line_bottom < visible_top || line_top > visible_bottom {
-                continue;
-            }
-
-            let y = line_top - scroll_y;
-            let text_y_offset = line
-                .interlude
-                .as_ref()
-                .map(|slot| slot.height * dynamic_layout.interlude_visibility)
-                .unwrap_or(0.0);
-            let distance_alpha =
-                scene.focus_alpha(line, current_time_ms) * dynamic_layout.text_visibility;
-            let blur_radius = if scene.is_line_focused(line, current_time_ms) {
-                0.0
-            } else {
-                scene.blur_radius_for_screen_y(y, blur_anchor_y)
-            };
-
-            if let Some(interlude) = &line.interlude {
-                if dynamic_layout.interlude_visibility > 0.001 {
-                    draw_breathing_dots(
-                        pixels,
-                        width,
-                        height,
-                        y + DOTS_VERTICAL_PADDING,
-                        interlude,
-                        &scene.config,
-                        current_time_ms,
-                        scene.focus_alpha(line, current_time_ms)
-                            * dynamic_layout.interlude_visibility,
-                    );
-                }
-            }
-
-            if dynamic_layout.text_visibility <= 0.001 {
-                continue;
-            }
-
-            match &line.kind {
-                PreparedLineKind::Karaoke {
-                    is_accompaniment,
-                    is_rtl,
-                    syllables,
-                    text,
-                } => {
-                    let line_alpha = if *is_accompaniment { 0.68 } else { 1.0 } * distance_alpha;
-                    draw_prepared_text(
-                        &mut self.font_system,
-                        &mut self.swash_cache,
-                        pixels,
-                        width,
-                        height,
-                        &mut self.blurred_glyph_cache,
-                        text,
-                        scene.config.padding_x,
-                        y + text_y_offset + scene.config.padding_y,
-                        base_color,
-                        line_alpha,
-                        blur_radius,
-                        Some((current_time_ms, *is_rtl, scene.config.inactive_karaoke_alpha, syllables)),
-                    );
-                }
-                PreparedLineKind::Synced { text } => {
-                    draw_prepared_text(
-                        &mut self.font_system,
-                        &mut self.swash_cache,
-                        pixels,
-                        width,
-                        height,
-                        &mut self.blurred_glyph_cache,
-                        text,
-                        scene.config.padding_x,
-                        y + text_y_offset + scene.config.padding_y,
-                        base_color,
-                        distance_alpha,
-                        blur_radius,
-                        None,
-                    );
-                }
-            }
-
-            let detail_gap = line.detail_gap(&scene.config);
-            let mut detail_y =
-                y + text_y_offset + scene.config.padding_y + line.main_text_height() + detail_gap;
-            if let Some(translation) = &line.translation {
-                draw_prepared_text(
-                    &mut self.font_system,
-                    &mut self.swash_cache,
-                    pixels,
-                    width,
-                    height,
-                    &mut self.blurred_glyph_cache,
-                    translation,
-                    scene.config.padding_x,
-                    detail_y,
-                    base_color,
-                    0.42 * distance_alpha,
-                    blur_radius,
-                    None,
-                );
-                detail_y += translation.height + detail_gap;
-            }
-            if let Some(phonetic) = &line.phonetic {
-                draw_prepared_text(
-                    &mut self.font_system,
-                    &mut self.swash_cache,
-                    pixels,
-                    width,
-                    height,
-                    &mut self.blurred_glyph_cache,
-                    phonetic,
-                    scene.config.padding_x,
-                    detail_y,
-                    base_color,
-                    0.55 * distance_alpha,
-                    blur_radius,
-                    None,
-                );
-            }
-        }
-
-        apply_vertical_fade(pixels, width, height, TOP_FADE_PX, BOTTOM_FADE_PX);
-        0
     }
 
     pub fn render_frame_to_canvas(
@@ -1396,7 +1183,12 @@ impl LyricsRenderer {
                         base_color,
                         line_alpha,
                         blur_radius,
-                        Some((current_time_ms, *is_rtl, scene.config.inactive_karaoke_alpha, syllables)),
+                        Some((
+                            current_time_ms,
+                            *is_rtl,
+                            scene.config.inactive_karaoke_alpha,
+                            syllables,
+                        )),
                     );
                 }
                 PreparedLineKind::Synced { text } => {
@@ -1537,17 +1329,13 @@ impl LyricsRenderer {
             scene.max_scroll_for_layouts(&dynamic_layouts),
         );
         let content_y = y + scroll_y;
-        let hit = scene
-            .lines
-            .iter()
-            .enumerate()
-            .find(|(index, _)| {
-                dynamic_layouts.get(*index).is_some_and(|layout| {
-                    layout.text_visibility > 0.001
-                        && content_y >= layout.top
-                        && content_y <= layout.top + layout.height
-                })
-            });
+        let hit = scene.lines.iter().enumerate().find(|(index, _)| {
+            dynamic_layouts.get(*index).is_some_and(|layout| {
+                layout.text_visibility > 0.001
+                    && content_y >= layout.top
+                    && content_y <= layout.top + layout.height
+            })
+        });
         if let Some((_, line)) = hit {
             let source_index = line.source_index;
             self.pending_lyric_click_seek = Some(PendingLyricClickSeek {
@@ -1561,8 +1349,6 @@ impl LyricsRenderer {
             -1
         }
     }
-
-
 }
 
 #[derive(Debug)]
@@ -1571,7 +1357,6 @@ struct FontTextSpan {
     metadata: usize,
     family_name: Option<String>,
 }
-
 
 impl PreparedScene {
     fn max_scroll_for_layouts(&self, layouts: &[DynamicLineLayout]) -> f32 {
@@ -2107,12 +1892,20 @@ mod tests {
 
         let mut narrow = test_config();
         narrow.blur_sharp_radius_lines = 2.5;
-        let narrow_scene = PreparedScene { config: narrow, lines: vec![], content_height: 0.0 };
+        let narrow_scene = PreparedScene {
+            config: narrow,
+            lines: vec![],
+            content_height: 0.0,
+        };
         assert!(narrow_scene.blur_radius_for_screen_y(far, 0.0) > 0.0);
 
         let mut wide = test_config();
         wide.blur_sharp_radius_lines = 8.0;
-        let wide_scene = PreparedScene { config: wide, lines: vec![], content_height: 0.0 };
+        let wide_scene = PreparedScene {
+            config: wide,
+            lines: vec![],
+            content_height: 0.0,
+        };
         assert_eq!(wide_scene.blur_radius_for_screen_y(far, 0.0), 0.0);
     }
 
@@ -2135,7 +1928,10 @@ mod tests {
         }
 
         assert_eq!(scene.focus_alpha(line, line.start - 800), FOCUS_ALPHA_MIN);
-        assert_eq!(scene.focus_alpha(line, line.effective_end + 800), FOCUS_ALPHA_MIN);
+        assert_eq!(
+            scene.focus_alpha(line, line.effective_end + 800),
+            FOCUS_ALPHA_MIN
+        );
     }
 
     #[test]
@@ -2210,6 +2006,63 @@ mod tests {
         assert_eq!(text.rows[0].min_x, -40.0);
         assert_eq!(text.rows[0].max_x, 100.0);
         assert_eq!(syllables[0].layout_x, -40.0);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn synced_line_wrap_height_matches_prepared_rows() {
+        let mut renderer = LyricsRenderer::new();
+        renderer.font_system.db_mut().load_system_fonts();
+        if renderer.font_system.db().is_empty() {
+            return;
+        }
+
+        let json = r#"{
+            "width": 170,
+            "height": 220,
+            "style": {
+                "typography": {
+                    "normalFontSize": 20.0,
+                    "normalLineHeight": 28.0
+                },
+                "spacing": {
+                    "horizontalPadding": 10.0,
+                    "linePadding": 6.0,
+                    "focusTopOffset": 20.0
+                },
+                "blur": { "enabled": false },
+                "showTranslation": false,
+                "showPhonetic": false
+            },
+            "lines": [{
+                "kind": "synced",
+                "sourceIndex": 0,
+                "clusterIndex": 0,
+                "clusterRole": "standalone",
+                "start": 0,
+                "end": 4000,
+                "content": "one two three four five six seven eight nine ten eleven twelve",
+                "translation": null
+            }]
+        }"#;
+        let scene: LyricsScene = serde_json::from_str(json).unwrap();
+        let prepared = renderer.prepare_scene(scene).unwrap();
+        let line = prepared.lines.first().unwrap();
+        let PreparedLineKind::Synced { text } = &line.kind else {
+            panic!("expected synced line");
+        };
+
+        assert!(
+            text.rows.len() > 1,
+            "expected wrapped synced text rows, got {:?}",
+            text.rows
+        );
+        assert!((text.height - text.rows.len() as f32 * 28.0).abs() < 0.01);
+        assert!((line.height - (text.height + 12.0)).abs() < 0.01);
+        for (index, row) in text.rows.iter().enumerate() {
+            assert!(row.width <= 150.5, "row overflowed: {row:?}");
+            assert!((row.y - index as f32 * 28.0).abs() < 0.01);
+        }
     }
 
     #[test]

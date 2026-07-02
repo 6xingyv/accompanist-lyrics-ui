@@ -1,6 +1,4 @@
 use cosmic_text::fontdb;
-#[cfg(not(target_os = "android"))]
-use cosmic_text::{Color as CosmicColor, FontSystem, PhysicalGlyph, SwashCache};
 use skia_safe::{
     canvas::SaveLayerRec,
     font,
@@ -14,97 +12,6 @@ use std::collections::HashMap;
 use std::f32::consts::PI;
 
 use super::*;
-
-#[cfg(not(target_os = "android"))]
-pub(super) fn draw_prepared_text(
-    font_system: &mut FontSystem,
-    swash_cache: &mut SwashCache,
-    pixels: &mut [u8],
-    width: u32,
-    height: u32,
-    blurred_glyph_cache: &mut HashMap<BlurredGlyphCacheKey, BlurredGlyphMask>,
-    text: &PreparedText,
-    origin_x: f32,
-    origin_y: f32,
-    base_color: (u8, u8, u8, u8),
-    alpha: f32,
-    blur_radius: f32,
-    karaoke: Option<(i32, bool, f32, &Vec<PreparedSyllable>)>,
-) {
-    for row in &text.rows {
-        let (row_min_x, row_max_x) =
-            row_x_bounds(row, origin_x).unwrap_or((origin_x, origin_x + row.width));
-        let active_edge = karaoke.and_then(|(time, is_rtl, _inactive_alpha, syllables)| {
-            active_edge_for_row(row, origin_x, time, is_rtl, syllables)
-        });
-        let karaoke_brush = active_edge.map(|active_edge| KaraokeBrush {
-            active_edge,
-            row_min_x,
-            row_max_x,
-            is_rtl: karaoke.map(|(_, is_rtl, _, _)| is_rtl).unwrap_or(false),
-            inactive_alpha: karaoke
-                .map(|(_, _, inactive_alpha, _)| inactive_alpha)
-                .unwrap_or(KARAOKE_INACTIVE_ALPHA),
-        });
-
-        for (glyph_position, glyph) in row.glyphs.iter().enumerate() {
-            let effect = karaoke
-                .and_then(|(time, _, _, syllables)| {
-                    glyph_effect_for_time(glyph, row, glyph_position, time, syllables)
-                })
-                .unwrap_or_default();
-            let physical = PhysicalGlyph {
-                cache_key: glyph.physical.cache_key,
-                x: glyph.physical.x + origin_x.round() as i32,
-                y: glyph.physical.y + origin_y.round() as i32 + effect.offset_y.round() as i32,
-            };
-            let scale_pivot = effect
-                .scale_pivot
-                .map(|(x, y)| (origin_x + x, origin_y + y));
-            let glyph_alpha = alpha * glyph.alpha_multiplier;
-
-            if glyph_alpha <= 0.0 {
-                continue;
-            }
-
-            if effect.shadow_blur_radius > 0.1 && !glyph.is_phonetic {
-                // Keep the shadow locked to the same scale/pivot as the glyph so
-                // it tracks the awesome syllable swell instead of lagging behind.
-                draw_glyph_with_optional_blur(
-                    font_system,
-                    swash_cache,
-                    pixels,
-                    width,
-                    height,
-                    blurred_glyph_cache,
-                    physical.clone(),
-                    base_color,
-                    glyph_alpha * 0.4,
-                    effect.shadow_blur_radius,
-                    effect.scale,
-                    scale_pivot,
-                    karaoke_brush,
-                );
-            }
-
-            draw_glyph_with_optional_blur(
-                font_system,
-                swash_cache,
-                pixels,
-                width,
-                height,
-                blurred_glyph_cache,
-                physical,
-                base_color,
-                glyph_alpha,
-                blur_radius,
-                effect.scale,
-                scale_pivot,
-                karaoke_brush,
-            );
-        }
-    }
-}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct SkiaGlyphBatchKey {
@@ -216,9 +123,12 @@ pub(super) fn draw_prepared_text_skia(
             origin_y + text.height + pad,
         );
         let mut layer_paint = Paint::default();
-        if let Some(filter) =
-            image_filters::blur((blur_radius, blur_radius), None, None, CropRect::NO_CROP_RECT)
-        {
+        if let Some(filter) = image_filters::blur(
+            (blur_radius, blur_radius),
+            None,
+            None,
+            CropRect::NO_CROP_RECT,
+        ) {
             layer_paint.set_image_filter(filter);
         }
         canvas.save_layer(&SaveLayerRec::default().bounds(&bounds).paint(&layer_paint));
@@ -355,15 +265,21 @@ fn draw_skia_glyph_batch(
         }
     }
 
-    with_skia_font(batch.key.font_id, font_size, batch.key.weight, typefaces, |font| {
-        canvas.draw_glyphs_at(
-            &batch.glyphs,
-            &batch.positions[..],
-            Point::new(0.0, 0.0),
-            font,
-            &paint,
-        );
-    });
+    with_skia_font(
+        batch.key.font_id,
+        font_size,
+        batch.key.weight,
+        typefaces,
+        |font| {
+            canvas.draw_glyphs_at(
+                &batch.glyphs,
+                &batch.positions[..],
+                Point::new(0.0, 0.0),
+                font,
+                &paint,
+            );
+        },
+    );
 }
 
 fn draw_skia_glyph(
@@ -404,19 +320,25 @@ fn draw_skia_glyph(
 
     let glyphs: [GlyphId; 1] = [cache_key.glyph_id];
     let positions = [Point::new(x, y)];
-    with_skia_font(cache_key.font_id, font_size, cache_key.font_weight.0, typefaces, |font| {
-        if (scale - 1.0).abs() > 0.001 {
-            let (pivot_x, pivot_y) = scale_pivot.unwrap_or((x, y));
-            canvas.save();
-            canvas.translate((pivot_x, pivot_y));
-            canvas.scale((scale, scale));
-            canvas.translate((-pivot_x, -pivot_y));
-            canvas.draw_glyphs_at(&glyphs, &positions[..], Point::new(0.0, 0.0), font, &paint);
-            canvas.restore();
-        } else {
-            canvas.draw_glyphs_at(&glyphs, &positions[..], Point::new(0.0, 0.0), font, &paint);
-        }
-    });
+    with_skia_font(
+        cache_key.font_id,
+        font_size,
+        cache_key.font_weight.0,
+        typefaces,
+        |font| {
+            if (scale - 1.0).abs() > 0.001 {
+                let (pivot_x, pivot_y) = scale_pivot.unwrap_or((x, y));
+                canvas.save();
+                canvas.translate((pivot_x, pivot_y));
+                canvas.scale((scale, scale));
+                canvas.translate((-pivot_x, -pivot_y));
+                canvas.draw_glyphs_at(&glyphs, &positions[..], Point::new(0.0, 0.0), font, &paint);
+                canvas.restore();
+            } else {
+                canvas.draw_glyphs_at(&glyphs, &positions[..], Point::new(0.0, 0.0), font, &paint);
+            }
+        },
+    );
 }
 
 /// A Skia `Font` is immutable for a given (typeface, size), so build each one
@@ -459,8 +381,9 @@ fn typeface_at_weight(typeface: &Typeface, weight: u16) -> Typeface {
         axis: FourByteTag::from_chars('w', 'g', 'h', 't'),
         value: weight as f32,
     }];
-    let arguments = FontArguments::new()
-        .set_variation_design_position(VariationPosition { coordinates: &coordinates });
+    let arguments = FontArguments::new().set_variation_design_position(VariationPosition {
+        coordinates: &coordinates,
+    });
     typeface
         .clone_with_arguments(&arguments)
         .unwrap_or_else(|| typeface.clone())
@@ -644,369 +567,6 @@ pub(super) fn awesome_glyph_effect_for_char(
     }
 }
 
-#[cfg(not(target_os = "android"))]
-fn draw_glyph_with_optional_blur(
-    font_system: &mut FontSystem,
-    swash_cache: &mut SwashCache,
-    pixels: &mut [u8],
-    width: u32,
-    height: u32,
-    blurred_glyph_cache: &mut HashMap<BlurredGlyphCacheKey, BlurredGlyphMask>,
-    physical: PhysicalGlyph,
-    base_color: (u8, u8, u8, u8),
-    glyph_alpha: f32,
-    blur_radius: f32,
-    scale: f32,
-    scale_pivot: Option<(f32, f32)>,
-    karaoke_brush: Option<KaraokeBrush>,
-) {
-    if blur_radius <= 0.1 {
-        draw_glyph_pixels(
-            font_system,
-            swash_cache,
-            pixels,
-            width,
-            height,
-            physical,
-            base_color,
-            glyph_alpha,
-            scale,
-            scale_pivot,
-            karaoke_brush,
-        );
-    } else {
-        draw_blurred_glyph_pixels(
-            font_system,
-            swash_cache,
-            pixels,
-            width,
-            height,
-            blurred_glyph_cache,
-            physical,
-            base_color,
-            glyph_alpha,
-            blur_radius,
-            scale,
-            scale_pivot,
-            karaoke_brush,
-        );
-    }
-}
-
-#[cfg(not(target_os = "android"))]
-fn draw_glyph_pixels(
-    font_system: &mut FontSystem,
-    swash_cache: &mut SwashCache,
-    pixels: &mut [u8],
-    width: u32,
-    height: u32,
-    physical: PhysicalGlyph,
-    base_color: (u8, u8, u8, u8),
-    glyph_alpha: f32,
-    scale: f32,
-    scale_pivot: Option<(f32, f32)>,
-    karaoke_brush: Option<KaraokeBrush>,
-) {
-    let color = CosmicColor::rgba(
-        base_color.0,
-        base_color.1,
-        base_color.2,
-        ((base_color.3 as f32) * glyph_alpha)
-            .round()
-            .clamp(0.0, 255.0) as u8,
-    );
-
-    if (scale - 1.0).abs() > 0.01 {
-        draw_scaled_glyph_pixels(
-            font_system,
-            swash_cache,
-            pixels,
-            width,
-            height,
-            physical,
-            color,
-            scale,
-            scale_pivot,
-            karaoke_brush,
-        );
-        return;
-    }
-
-    swash_cache.with_pixels(font_system, physical.cache_key, color, |x, y, color| {
-        let dst_x = physical.x + x;
-        let dst_y = physical.y + y;
-        let brushed_color = karaoke_brush
-            .map(|brush| brush.sample_color(dst_x as f32, color))
-            .unwrap_or(color);
-        if brushed_color.a() == 0 {
-            return;
-        }
-        blend_pixel(pixels, width, height, dst_x, dst_y, brushed_color);
-    });
-}
-
-#[cfg(not(target_os = "android"))]
-fn draw_scaled_glyph_pixels(
-    font_system: &mut FontSystem,
-    swash_cache: &mut SwashCache,
-    pixels: &mut [u8],
-    width: u32,
-    height: u32,
-    physical: PhysicalGlyph,
-    color: CosmicColor,
-    scale: f32,
-    scale_pivot: Option<(f32, f32)>,
-    karaoke_brush: Option<KaraokeBrush>,
-) {
-    let mut samples = Vec::new();
-    let mut min_x = i32::MAX;
-    let mut min_y = i32::MAX;
-    let mut max_x = i32::MIN;
-    let mut max_y = i32::MIN;
-
-    swash_cache.with_pixels(font_system, physical.cache_key, color, |x, y, color| {
-        if color.a() == 0 {
-            return;
-        }
-        let dst_x = physical.x + x;
-        let dst_y = physical.y + y;
-        min_x = min_x.min(dst_x);
-        min_y = min_y.min(dst_y);
-        max_x = max_x.max(dst_x);
-        max_y = max_y.max(dst_y);
-        samples.push((dst_x, dst_y, color));
-    });
-
-    if samples.is_empty() {
-        return;
-    }
-
-    let (center_x, center_y) =
-        scale_pivot.unwrap_or_else(|| ((min_x + max_x) as f32 * 0.5, (min_y + max_y) as f32 * 0.5));
-    let cover = scale.ceil().max(1.0) as i32;
-    let cover_offset = cover / 2;
-    for (sample_x, sample_y, color) in samples {
-        let scaled_x = (center_x + (sample_x as f32 - center_x) * scale).round() as i32;
-        let scaled_y = (center_y + (sample_y as f32 - center_y) * scale).round() as i32;
-        for y in 0..cover {
-            for x in 0..cover {
-                let dst_x = scaled_x + x - cover_offset;
-                let dst_y = scaled_y + y - cover_offset;
-                let brushed_color = karaoke_brush
-                    .map(|brush| brush.sample_color(dst_x as f32, color))
-                    .unwrap_or(color);
-                blend_pixel(pixels, width, height, dst_x, dst_y, brushed_color);
-            }
-        }
-    }
-}
-
-#[cfg(not(target_os = "android"))]
-fn draw_blurred_glyph_pixels(
-    font_system: &mut FontSystem,
-    swash_cache: &mut SwashCache,
-    pixels: &mut [u8],
-    width: u32,
-    height: u32,
-    blurred_glyph_cache: &mut HashMap<BlurredGlyphCacheKey, BlurredGlyphMask>,
-    physical: PhysicalGlyph,
-    base_color: (u8, u8, u8, u8),
-    glyph_alpha: f32,
-    blur_radius: f32,
-    scale: f32,
-    scale_pivot: Option<(f32, f32)>,
-    karaoke_brush: Option<KaraokeBrush>,
-) {
-    let radius = blur_radius.ceil().clamp(1.0, MAX_GLYPH_BLUR_RADIUS) as u8;
-    let Some(mask) = get_blurred_glyph_mask(
-        font_system,
-        swash_cache,
-        blurred_glyph_cache,
-        physical.cache_key,
-        radius,
-    ) else {
-        return;
-    };
-
-    let color_alpha = (base_color.3 as f32) * glyph_alpha.clamp(0.0, 1.0);
-    if color_alpha <= 0.0 {
-        return;
-    }
-
-    let scaled = (scale - 1.0).abs() > 0.01;
-    let (pivot_x, pivot_y) = scale_pivot.unwrap_or_else(|| {
-        (
-            (physical.x + mask.origin_x) as f32 + mask.width as f32 * 0.5,
-            (physical.y + mask.origin_y) as f32 + mask.height as f32 * 0.5,
-        )
-    });
-    let cover = if scaled {
-        scale.ceil().max(1.0) as i32
-    } else {
-        1
-    };
-    let cover_offset = cover / 2;
-
-    for local_y in 0..mask.height {
-        let base_y = physical.y + mask.origin_y + local_y as i32;
-        for local_x in 0..mask.width {
-            let alpha = mask.alpha[local_y * mask.width + local_x];
-            if alpha == 0 {
-                continue;
-            }
-            let base_x = physical.x + mask.origin_x + local_x as i32;
-            let color = CosmicColor::rgba(
-                base_color.0,
-                base_color.1,
-                base_color.2,
-                ((alpha as f32 / 255.0) * color_alpha)
-                    .round()
-                    .clamp(0.0, 255.0) as u8,
-            );
-            if scaled {
-                let scaled_x = (pivot_x + (base_x as f32 - pivot_x) * scale).round() as i32;
-                let scaled_y = (pivot_y + (base_y as f32 - pivot_y) * scale).round() as i32;
-                for y in 0..cover {
-                    for x in 0..cover {
-                        let dst_x = scaled_x + x - cover_offset;
-                        let dst_y = scaled_y + y - cover_offset;
-                        let brushed_color = karaoke_brush
-                            .map(|brush| brush.sample_color(dst_x as f32, color))
-                            .unwrap_or(color);
-                        blend_pixel(pixels, width, height, dst_x, dst_y, brushed_color);
-                    }
-                }
-            } else {
-                let brushed_color = karaoke_brush
-                    .map(|brush| brush.sample_color(base_x as f32, color))
-                    .unwrap_or(color);
-                blend_pixel(pixels, width, height, base_x, base_y, brushed_color);
-            }
-        }
-    }
-}
-
-#[cfg(not(target_os = "android"))]
-fn get_blurred_glyph_mask<'a>(
-    font_system: &mut FontSystem,
-    swash_cache: &mut SwashCache,
-    blurred_glyph_cache: &'a mut HashMap<BlurredGlyphCacheKey, BlurredGlyphMask>,
-    cache_key: cosmic_text::CacheKey,
-    radius: u8,
-) -> Option<&'a BlurredGlyphMask> {
-    let key = BlurredGlyphCacheKey { cache_key, radius };
-    if !blurred_glyph_cache.contains_key(&key) {
-        let mask = build_blurred_glyph_mask(font_system, swash_cache, cache_key, radius)?;
-        blurred_glyph_cache.insert(key, mask);
-    }
-    blurred_glyph_cache.get(&key)
-}
-
-#[cfg(not(target_os = "android"))]
-fn build_blurred_glyph_mask(
-    font_system: &mut FontSystem,
-    swash_cache: &mut SwashCache,
-    cache_key: cosmic_text::CacheKey,
-    radius: u8,
-) -> Option<BlurredGlyphMask> {
-    let color = CosmicColor::rgba(255, 255, 255, 255);
-    let mut samples = Vec::new();
-    let mut min_x = i32::MAX;
-    let mut min_y = i32::MAX;
-    let mut max_x = i32::MIN;
-    let mut max_y = i32::MIN;
-
-    swash_cache.with_pixels(font_system, cache_key, color, |x, y, color| {
-        if color.a() == 0 {
-            return;
-        }
-        min_x = min_x.min(x);
-        min_y = min_y.min(y);
-        max_x = max_x.max(x);
-        max_y = max_y.max(y);
-        samples.push((x, y, color.a() as f32 / 255.0));
-    });
-
-    if samples.is_empty() {
-        return None;
-    }
-
-    let radius = radius as i32;
-    let pad = radius;
-    let origin_x = min_x - pad;
-    let origin_y = min_y - pad;
-    let mask_width = (max_x - min_x + 1 + pad * 2).max(1) as usize;
-    let mask_height = (max_y - min_y + 1 + pad * 2).max(1) as usize;
-    let mut mask = vec![0.0f32; mask_width * mask_height];
-
-    for (x, y, alpha) in samples {
-        let local_x = (x - origin_x) as usize;
-        let local_y = (y - origin_y) as usize;
-        let index = local_y * mask_width + local_x;
-        mask[index] = mask[index].max(alpha);
-    }
-
-    let blurred = box_blur_alpha(&mask, mask_width, mask_height, radius as usize);
-    let alpha = blurred
-        .into_iter()
-        .map(|value| {
-            if value <= 1.0 / 255.0 {
-                0
-            } else {
-                (value * 255.0).round().clamp(0.0, 255.0) as u8
-            }
-        })
-        .collect::<Vec<_>>();
-
-    Some(BlurredGlyphMask {
-        origin_x,
-        origin_y,
-        width: mask_width,
-        height: mask_height,
-        alpha,
-    })
-}
-
-#[cfg(not(target_os = "android"))]
-fn box_blur_alpha(source: &[f32], width: usize, height: usize, radius: usize) -> Vec<f32> {
-    if source.is_empty() || width == 0 || height == 0 || radius == 0 {
-        return source.to_vec();
-    }
-
-    let mut horizontal = vec![0.0f32; source.len()];
-    let mut output = vec![0.0f32; source.len()];
-    let kernel = (radius * 2 + 1) as f32;
-
-    for y in 0..height {
-        let row_start = y * width;
-        let row = &source[row_start..row_start + width];
-        let mut prefix = vec![0.0f32; width + 1];
-        for x in 0..width {
-            prefix[x + 1] = prefix[x] + row[x];
-        }
-        for x in 0..width {
-            let start = x.saturating_sub(radius);
-            let end = (x + radius + 1).min(width);
-            horizontal[row_start + x] = (prefix[end] - prefix[start]) / kernel;
-        }
-    }
-
-    let mut prefix = vec![0.0f32; height + 1];
-    for x in 0..width {
-        prefix.fill(0.0);
-        for y in 0..height {
-            prefix[y + 1] = prefix[y] + horizontal[y * width + x];
-        }
-        for y in 0..height {
-            let start = y.saturating_sub(radius);
-            let end = (y + radius + 1).min(height);
-            output[y * width + x] = (prefix[end] - prefix[start]) / kernel;
-        }
-    }
-
-    output
-}
-
 fn active_edge_for_row(
     row: &PreparedRow,
     origin_x: f32,
@@ -1117,72 +677,6 @@ pub(super) fn make_interlude_slot(
         right_aligned,
         height,
     })
-}
-
-#[cfg(not(target_os = "android"))]
-pub(super) fn draw_breathing_dots(
-    pixels: &mut [u8],
-    width: u32,
-    height: u32,
-    y: f32,
-    interlude: &PreparedInterlude,
-    config: &SceneConfig,
-    current_time_ms: i32,
-    line_alpha: f32,
-) {
-    let dots = config.breathing_dots;
-    let total_width = dots_total_width(dots);
-    if total_width <= 0.0 {
-        return;
-    }
-
-    let origin_x = if interlude.right_aligned {
-        config.width as f32 - config.padding_x - total_width
-    } else {
-        config.padding_x
-    };
-    let origin_y = y + config.padding_y;
-    let (scale, alpha, reveal_progress) =
-        breathing_dots_state(interlude.start, interlude.end, current_time_ms, dots);
-    if alpha <= 0.0 || scale <= 0.0 {
-        return;
-    }
-
-    let color = rgba_from_argb(dots.color);
-    let current_time = current_time_ms as f32;
-    let center_x = origin_x + total_width * 0.5;
-    let center_y = origin_y + dots.size * 0.5;
-    let reveal_x = origin_x + total_width * reveal_progress.clamp(0.0, 1.0);
-    let dot_duration =
-        ((interlude.end - interlude.start) as f32 - dots.enter_ms - dots.exit_ms - dots.still_ms)
-            .max(1.0)
-            / dots.number as f32;
-
-    for index in 0..dots.number {
-        let base_x = origin_x + dots.size * 0.5 + (dots.size + dots.margin) * index as f32;
-        let base_y = origin_y + dots.size * 0.5;
-        let scaled_x = center_x + (base_x - center_x) * scale;
-        let scaled_y = center_y + (base_y - center_y) * scale;
-        let radius = dots.size * 0.5 * scale;
-        let reveal_alpha = ((reveal_x - base_x + dots.size * 0.5) / dots.size).clamp(0.0, 1.0);
-        let dot_start = interlude.start as f32 + dots.enter_ms + dot_duration * index as f32;
-        let dot_alpha = if current_time >= interlude.start as f32 + dots.enter_ms {
-            ((current_time - dot_start) / dot_duration).clamp(0.0, 1.0) * 0.6 + 0.4
-        } else {
-            0.4
-        };
-
-        draw_circle_rgba(
-            pixels,
-            width,
-            height,
-            scaled_x,
-            scaled_y,
-            radius,
-            color,
-            alpha * dot_alpha * reveal_alpha * line_alpha,
-        );
-    }
 }
 
 pub(super) fn draw_breathing_dots_skia(
@@ -1401,90 +895,6 @@ mod tests {
     }
 }
 
-#[cfg(not(target_os = "android"))]
-fn draw_circle_rgba(
-    pixels: &mut [u8],
-    width: u32,
-    height: u32,
-    cx: f32,
-    cy: f32,
-    radius: f32,
-    color: (u8, u8, u8, u8),
-    alpha: f32,
-) {
-    if radius <= 0.0 || alpha <= 0.0 {
-        return;
-    }
-
-    let min_x = (cx - radius - 1.0).floor() as i32;
-    let max_x = (cx + radius + 1.0).ceil() as i32;
-    let min_y = (cy - radius - 1.0).floor() as i32;
-    let max_y = (cy + radius + 1.0).ceil() as i32;
-    let color_alpha = color.3 as f32 * alpha.clamp(0.0, 1.0);
-
-    for y in min_y..=max_y {
-        for x in min_x..=max_x {
-            let dx = x as f32 + 0.5 - cx;
-            let dy = y as f32 + 0.5 - cy;
-            let distance = (dx * dx + dy * dy).sqrt();
-            let edge_alpha = (radius + 0.5 - distance).clamp(0.0, 1.0);
-            if edge_alpha <= 0.0 {
-                continue;
-            }
-            blend_pixel(
-                pixels,
-                width,
-                height,
-                x,
-                y,
-                CosmicColor::rgba(
-                    color.0,
-                    color.1,
-                    color.2,
-                    (color_alpha * edge_alpha).round().clamp(0.0, 255.0) as u8,
-                ),
-            );
-        }
-    }
-}
-
-#[cfg(not(target_os = "android"))]
-pub(super) fn apply_vertical_fade(
-    pixels: &mut [u8],
-    width: u32,
-    height: u32,
-    top_px: f32,
-    bottom_px: f32,
-) {
-    if width == 0 || height == 0 {
-        return;
-    }
-
-    for y in 0..height {
-        let top_factor = if top_px > 0.0 {
-            (y as f32 / top_px).clamp(0.0, 1.0)
-        } else {
-            1.0
-        };
-        let bottom_distance = height.saturating_sub(1).saturating_sub(y) as f32;
-        let bottom_factor = if bottom_px > 0.0 {
-            (bottom_distance / bottom_px).clamp(0.0, 1.0)
-        } else {
-            1.0
-        };
-        let factor = top_factor.min(bottom_factor);
-        if factor >= 0.999 {
-            continue;
-        }
-        let row_start = (y * width * 4) as usize;
-        let row_end = (row_start + width as usize * 4).min(pixels.len());
-        let row = &mut pixels[row_start..row_end];
-        for pixel in row.chunks_exact_mut(4) {
-            pixel[3] = ((pixel[3] as f32) * factor).round().clamp(0.0, 255.0) as u8;
-        }
-    }
-}
-
 fn smooth_step(value: f32) -> f32 {
     let t = value.clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
@@ -1613,17 +1023,6 @@ fn newton_interpolation_3(fraction: f32, p0: (f32, f32), p1: (f32, f32), p2: (f3
 }
 
 impl KaraokeBrush {
-    #[cfg(not(target_os = "android"))]
-    fn sample_color(self, x: f32, glyph_color: CosmicColor) -> CosmicColor {
-        let alpha = self.sample_alpha(x);
-        CosmicColor::rgba(
-            glyph_color.r(),
-            glyph_color.g(),
-            glyph_color.b(),
-            ((glyph_color.a() as f32) * alpha).round().clamp(0.0, 255.0) as u8,
-        )
-    }
-
     fn fade_bounds(self) -> (f32, f32) {
         let total_width = (self.row_max_x - self.row_min_x).max(1.0);
         let fade_range = (FADE_WIDTH / total_width).min(1.0);
@@ -1652,50 +1051,6 @@ impl KaraokeBrush {
             1.0 - (1.0 - self.inactive_alpha) * t
         }
     }
-}
-
-#[cfg(not(target_os = "android"))]
-fn blend_pixel(pixels: &mut [u8], width: u32, height: u32, x: i32, y: i32, color: CosmicColor) {
-    if x < 0 || y < 0 || x >= width as i32 || y >= height as i32 {
-        return;
-    }
-
-    let index = ((y as u32 * width + x as u32) * 4) as usize;
-    if index + 3 >= pixels.len() {
-        return;
-    }
-
-    let source_a = color.a() as f32 / 255.0;
-    if source_a <= 0.0 {
-        return;
-    }
-
-    let source_r = color.r() as f32;
-    let source_g = color.g() as f32;
-    let source_b = color.b() as f32;
-    let dest_a = pixels[index + 3] as f32 / 255.0;
-    let out_a = source_a + dest_a * (1.0 - source_a);
-    if out_a <= 0.0 {
-        pixels[index] = 0;
-        pixels[index + 1] = 0;
-        pixels[index + 2] = 0;
-        pixels[index + 3] = 0;
-        return;
-    }
-
-    pixels[index] = ((source_r * source_a + pixels[index] as f32 * dest_a * (1.0 - source_a))
-        / out_a)
-        .round()
-        .clamp(0.0, 255.0) as u8;
-    pixels[index + 1] =
-        ((source_g * source_a + pixels[index + 1] as f32 * dest_a * (1.0 - source_a)) / out_a)
-            .round()
-            .clamp(0.0, 255.0) as u8;
-    pixels[index + 2] =
-        ((source_b * source_a + pixels[index + 2] as f32 * dest_a * (1.0 - source_a)) / out_a)
-            .round()
-            .clamp(0.0, 255.0) as u8;
-    pixels[index + 3] = (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
 }
 
 pub(super) fn rgba_from_argb(argb: u32) -> (u8, u8, u8, u8) {

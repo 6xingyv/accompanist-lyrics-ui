@@ -323,11 +323,6 @@ impl TextEngine {
         self.renderer.metrics_json()
     }
 
-    #[cfg(not(target_os = "android"))]
-    pub fn render_lyrics_frame_into(&mut self, current_time_ms: i32, pixels: &mut [u8]) -> i32 {
-        self.renderer.render_frame_into(current_time_ms, pixels)
-    }
-
     #[cfg(target_os = "android")]
     pub unsafe fn set_android_render_surface(
         &mut self,

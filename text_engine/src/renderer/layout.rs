@@ -172,22 +172,26 @@ impl LyricsRenderer {
                     // An accompaniment line renders its translation at its own font
                     // size/attrs and its own body-to-translation gap; a main line
                     // uses the primary translation role and gap.
-                    let (translation_font_size, translation_line_height, translation_attrs, detail_gap) =
-                        if line.is_accompaniment {
-                            (
-                                config.accompaniment_translation_font_size,
-                                config.accompaniment_translation_line_height,
-                                config.accompaniment_translation_attrs,
-                                config.accompaniment_translation_gap,
-                            )
-                        } else {
-                            (
-                                config.translation_font_size,
-                                config.translation_line_height,
-                                config.translation_attrs,
-                                config.translation_gap,
-                            )
-                        };
+                    let (
+                        translation_font_size,
+                        translation_line_height,
+                        translation_attrs,
+                        detail_gap,
+                    ) = if line.is_accompaniment {
+                        (
+                            config.accompaniment_translation_font_size,
+                            config.accompaniment_translation_line_height,
+                            config.accompaniment_translation_attrs,
+                            config.accompaniment_translation_gap,
+                        )
+                    } else {
+                        (
+                            config.translation_font_size,
+                            config.translation_line_height,
+                            config.translation_attrs,
+                            config.translation_gap,
+                        )
+                    };
                     let translation = if config.show_translation {
                         self.text_attrs = translation_attrs;
                         line.translation.as_deref().and_then(|translation| {
@@ -233,7 +237,11 @@ impl LyricsRenderer {
                         entrance_start: line.start,
                         height,
                         right_aligned,
-                        x_offset: if right_aligned { right_align_offset } else { 0.0 },
+                        x_offset: if right_aligned {
+                            right_align_offset
+                        } else {
+                            0.0
+                        },
                         interlude: None,
                         kind: PreparedLineKind::Karaoke {
                             is_accompaniment: line.is_accompaniment,
@@ -1107,7 +1115,11 @@ impl LyricsRenderer {
             first_baseline.get_or_insert(run.line_y - run.line_top);
             let mut glyphs = Vec::with_capacity(run.glyphs.len());
             for glyph in run.glyphs.iter() {
-                let syllable_index = (glyph.metadata > 0).then_some(glyph.metadata - 1);
+                let syllable_index = if glyph.metadata > 0 {
+                    Some(glyph.metadata - 1)
+                } else {
+                    None
+                };
                 let glyph_index_in_syllable = syllable_index
                     .map(|index| {
                         let counter = glyph_counters_by_syllable.entry(index).or_insert(0);

@@ -114,11 +114,10 @@ impl LyricsRenderer {
         target_layout_count: usize,
     ) {
         let now = Instant::now();
-        if self
-            .pending_lyric_click_seek
-            .is_some_and(|pending| now.duration_since(pending.recorded_at)
-                > Duration::from_millis(LYRIC_CLICK_SEEK_PENDING_MS))
-        {
+        if self.pending_lyric_click_seek.is_some_and(|pending| {
+            now.duration_since(pending.recorded_at)
+                > Duration::from_millis(LYRIC_CLICK_SEEK_PENDING_MS)
+        }) {
             self.pending_lyric_click_seek = None;
         }
 
@@ -220,8 +219,7 @@ impl LyricsRenderer {
                     scroll.overscroll_damping,
                     dt,
                 );
-            } else if self.manual_scroll.velocity.abs() <= MANUAL_SCROLL_VELOCITY_EPSILON
-            {
+            } else if self.manual_scroll.velocity.abs() <= MANUAL_SCROLL_VELOCITY_EPSILON {
                 self.manual_scroll.velocity = 0.0;
             }
         }
@@ -637,7 +635,11 @@ mod tests {
         max - min
     }
 
-    fn set_pending_click(renderer: &mut LyricsRenderer, source_index: usize, visible_scroll_y: f32) {
+    fn set_pending_click(
+        renderer: &mut LyricsRenderer,
+        source_index: usize,
+        visible_scroll_y: f32,
+    ) {
         renderer.pending_lyric_click_seek = Some(PendingLyricClickSeek {
             source_index,
             visible_scroll_y,
@@ -836,12 +838,10 @@ mod tests {
         assert_eq!(renderer.manual_scroll.offset, 0.0);
         assert!(!renderer.manual_scroll_plain_list_active());
         assert!(!renderer.seek_glide_active);
-        assert!(
-            renderer
-                .spring_layouts
-                .iter()
-                .all(|state| (state.scroll - 4_900.0).abs() <= LINE_LAYOUT_EPSILON)
-        );
+        assert!(renderer
+            .spring_layouts
+            .iter()
+            .all(|state| (state.scroll - 4_900.0).abs() <= LINE_LAYOUT_EPSILON));
 
         renderer.last_spring_frame_at = Some(Instant::now() - Duration::from_millis(16));
         renderer.animate_frame_layout(20_000, &content, 5_000.0, viewport, 50);
@@ -875,12 +875,10 @@ mod tests {
         assert_eq!(renderer.manual_scroll.offset, 0.0);
         assert!(!renderer.manual_scroll_plain_list_active());
         assert!(!renderer.seek_glide_active);
-        assert!(
-            renderer
-                .spring_layouts
-                .iter()
-                .all(|state| (state.scroll - 5_100.0).abs() <= LINE_LAYOUT_EPSILON)
-        );
+        assert!(renderer
+            .spring_layouts
+            .iter()
+            .all(|state| (state.scroll - 5_100.0).abs() <= LINE_LAYOUT_EPSILON));
 
         renderer.last_spring_frame_at = Some(Instant::now() - Duration::from_millis(16));
         renderer.animate_frame_layout(10_000, &content, 5_000.0, viewport, 50);
@@ -916,12 +914,10 @@ mod tests {
         assert_eq!(renderer.manual_scroll.velocity, 0.0);
         assert!(!renderer.manual_scroll.return_to_auto_requested);
         assert!(renderer.seek_glide_active);
-        assert!(
-            renderer
-                .spring_layouts
-                .iter()
-                .all(|state| (state.scroll - 320.0).abs() <= LINE_LAYOUT_EPSILON)
-        );
+        assert!(renderer
+            .spring_layouts
+            .iter()
+            .all(|state| (state.scroll - 320.0).abs() <= LINE_LAYOUT_EPSILON));
 
         renderer.animate_frame_layout(1_016, &content, 200.0, viewport, 2);
 
@@ -949,12 +945,10 @@ mod tests {
         assert_eq!(projected, 200.0);
         assert_eq!(renderer.spring_layouts.len(), content.len());
         assert!(renderer.seek_glide_active);
-        assert!(
-            renderer
-                .spring_layouts
-                .iter()
-                .all(|state| (state.scroll - 320.0).abs() <= LINE_LAYOUT_EPSILON)
-        );
+        assert!(renderer
+            .spring_layouts
+            .iter()
+            .all(|state| (state.scroll - 320.0).abs() <= LINE_LAYOUT_EPSILON));
 
         renderer.animate_frame_layout(1_000, &content, 200.0, viewport, 2);
 

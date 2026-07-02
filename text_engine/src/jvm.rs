@@ -519,20 +519,13 @@ pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeTextE
 #[cfg(not(target_os = "android"))]
 #[no_mangle]
 pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeTextEngine_nativeRenderLyricsFrameDirect(
-    env: JNIEnv,
+    _env: JNIEnv,
     _this: JObject,
-    handle: jlong,
-    current_time_ms: jint,
-    buffer: JByteBuffer,
+    _handle: jlong,
+    _current_time_ms: jint,
+    _buffer: JByteBuffer,
 ) -> jint {
-    let buf: &mut [u8] = match env.get_direct_buffer_address(buffer) {
-        Ok(slice) => slice,
-        Err(_) => return -1,
-    };
-
-    with_engine_mut(handle, -1, |engine| {
-        engine.render_lyrics_frame_into(current_time_ms, buf)
-    })
+    -20
 }
 
 #[cfg(target_os = "android")]
