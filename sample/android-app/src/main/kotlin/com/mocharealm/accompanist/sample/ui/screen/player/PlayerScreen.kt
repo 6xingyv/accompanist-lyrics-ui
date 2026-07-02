@@ -239,7 +239,13 @@ fun MobilePlayerScreen(
                 uiState.lyrics?.let { lyrics ->
                     playerViewModel.onShareRequested()
                     val context = ShareContext(
-                        lyrics = lyrics,
+                        lyrics = lyrics.copy(lines = lyrics.lines.map { line ->
+                            when (line) {
+                                is KaraokeLine -> line
+                                is SyncedLine -> line.toKaraokeLine()
+                                else -> null
+                            }
+                        }.filterNotNull()),
                         initialLine = line,
                         backgroundState = uiState.backgroundState,
                         title = uiState.currentMusicItem?.label ?: "Unknown Title",
@@ -328,7 +334,13 @@ fun PadPlayerScreen(
                     uiState.lyrics?.let { lyrics ->
                         playerViewModel.onShareRequested()
                         val context = ShareContext(
-                            lyrics = lyrics,
+                            lyrics = lyrics.copy(lines = lyrics.lines.map { line ->
+                                when (line) {
+                                    is KaraokeLine -> line
+                                    is SyncedLine -> line.toKaraokeLine()
+                                    else -> null
+                                }
+                            }.filterNotNull()),
                             initialLine = line,
                             backgroundState = uiState.backgroundState,
                             title = uiState.currentMusicItem?.label ?: "Unknown Title",
@@ -615,15 +627,16 @@ fun PlayerLyrics(
             onSeekTo(line.start)
         },
         onLinePressed = { line ->
-            run {
-                when (line) {
-                    is KaraokeLine -> line
-                    is SyncedLine -> line.toKaraokeLine()
-                    else -> null
-                }
-            }?.let(onShare)
+            val karaokeLine = when (line) {
+                is KaraokeLine -> line
+                is SyncedLine -> line.toKaraokeLine()
+                else -> null
+            }
+            karaokeLine?.let {
+                onShare(it)
+            }
         },
-        modifier=modifier.graphicsLayer{
+        modifier = modifier.graphicsLayer {
             compositingStrategy = CompositingStrategy.Offscreen
             blendMode = BlendMode.Plus
         },
