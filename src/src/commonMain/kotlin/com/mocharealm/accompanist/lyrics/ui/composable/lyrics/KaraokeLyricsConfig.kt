@@ -20,16 +20,6 @@ import com.mocharealm.accompanist.lyrics.ui.renderer.NativeSpacingStyle
 import com.mocharealm.accompanist.lyrics.ui.renderer.NativeSpringStyle
 import com.mocharealm.accompanist.lyrics.ui.renderer.NativeTypographyStyle
 
-/**
- * Single source of truth for every tunable of the native karaoke renderer.
- *
- * Previously these lived scattered across the [KaraokeLyricsView] parameter list,
- * two `defaultStyle()` functions and both platform host builders (with conflicting
- * values), while several knobs — the per-line scroll spring, manual-scroll physics,
- * blur sharp band and focus dimming — were only reachable as Rust constants. They
- * are now grouped here, each with a default that reproduces the previous look
- * exactly, so a single `KaraokeLyricsConfig()` renders identically to before.
- */
 data class KaraokeLyricsConfig(
     val typography: KaraokeTypography = KaraokeTypography(),
     val spacing: KaraokeSpacing = KaraokeSpacing(),
@@ -46,14 +36,6 @@ data class KaraokeLyricsConfig(
     val showDebugRectangles: Boolean = false,
 )
 
-/**
- * Per-role type. Every role — including the translation — is a full [TextStyle],
- * so its font size, weight, italic **and line height** are specified in one place.
- * (The translation used to be derived as a fraction of the normal font, `0.46/
- * 0.62`, and could not be styled or sized independently.) Line height is taken
- * from each style's [TextStyle.lineHeight]; when a style leaves it unspecified the
- * matching `*LineHeightRatio` fallback is applied (× the font size).
- */
 data class KaraokeTypography(
     val normalTextStyle: TextStyle = TextStyle(
         fontSize = 34.sp,
@@ -84,18 +66,13 @@ data class KaraokeTypography(
 )
 
 /**
- * Vertical/horizontal spacing. `linePadding` is the per-line vertical padding, so
- * the gap between two separate lines is `2 * linePadding`. `accompanimentGap` is
- * the gap between a main line and its own nested accompaniment line; it *replaces*
- * the `linePadding`-derived gap for that boundary (it is not added on top), so the
- * harmony line can sit tighter than normal lines. `focusTopOffset` is where the
- * focused line parks from the top (was `offset + keepAliveZone`).
+ * Vertical/horizontal spacing.
  */
 data class KaraokeSpacing(
     val horizontalPadding: Dp = 16.dp,
     val linePadding: Dp = 12.dp,
     val accompanimentGap: Dp = 8.dp,
-    val phoneticGap: Dp = 4.dp,
+    val phoneticGap: Dp = 8.dp,
     val focusTopOffset: Dp = 64.dp,
 )
 
