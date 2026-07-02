@@ -8,7 +8,6 @@ import androidx.compose.ui.unit.Density
 import com.mocharealm.accompanist.lyrics.ui.composable.lyrics.KaraokeLyricsConfig
 import com.mocharealm.accompanist.lyrics.ui.composable.lyrics.getFontSource
 import com.mocharealm.accompanist.lyrics.ui.composable.lyrics.getSystemFallbackFontSources
-import com.mocharealm.accompanist.lyrics.ui.composable.lyrics.toRendererStyle
 import java.awt.Color
 import java.awt.Graphics
 import java.awt.Graphics2D
@@ -37,8 +36,8 @@ class RustSkiaLyricsPanel : JPanel() {
     private var pixelBuffer: ByteBuffer? = null
     private var image: BufferedImage? = null
     // Initial style is the default config at density 1 (desktop px == config px);
-    // the host overwrites it via setRendererStyle when one is supplied.
-    private var rendererStyle = KaraokeLyricsConfig().toRendererStyle(Density(1f))
+    // the host overwrites it via setStyle when one is supplied.
+    private var sceneStyle = KaraokeLyricsConfig().toSceneStyle(Density(1f))
     private var fontConfigKey = 0
     private var onLineClicked: ((Int) -> Unit)? = null
     private var onLinePressed: ((Int) -> Unit)? = null
@@ -100,9 +99,9 @@ class RustSkiaLyricsPanel : JPanel() {
         repaint()
     }
 
-    fun setRendererStyle(style: NativeLyricsRendererStyle) {
-        if (rendererStyle == style) return
-        rendererStyle = style
+    internal fun setStyle(style: SceneStyle) {
+        if (sceneStyle == style) return
+        sceneStyle = style
         sceneDirty = true
         repaint()
     }
@@ -144,7 +143,7 @@ class RustSkiaLyricsPanel : JPanel() {
     private fun ensureScene(width: Int, height: Int): Boolean {
         val sceneLyrics = lyrics ?: return false
         if (sceneDirty) {
-            engine.setLyricsScene(sceneLyrics.toNativeLyricsSceneJson(width, height, rendererStyle))
+            engine.setLyricsScene(sceneLyrics.toSceneJson(width, height, sceneStyle))
             sceneDirty = false
         }
         return true

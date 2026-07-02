@@ -2,23 +2,11 @@ package com.mocharealm.accompanist.lyrics.ui.composable.lyrics
 
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.Dp
-import androidx.compose.ui.unit.TextUnitType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.mocharealm.accompanist.lyrics.ui.renderer.NativeBlurStyle
-import com.mocharealm.accompanist.lyrics.ui.renderer.NativeBreathingDotsStyle
-import com.mocharealm.accompanist.lyrics.ui.renderer.NativeFocusStyle
-import com.mocharealm.accompanist.lyrics.ui.renderer.NativeLyricsRendererStyle
-import com.mocharealm.accompanist.lyrics.ui.renderer.NativeManualScrollStyle
-import com.mocharealm.accompanist.lyrics.ui.renderer.NativeSpacingStyle
-import com.mocharealm.accompanist.lyrics.ui.renderer.NativeSpringStyle
-import com.mocharealm.accompanist.lyrics.ui.renderer.NativeTypographyStyle
 
 data class KaraokeLyricsConfig(
     val typography: KaraokeTypography = KaraokeTypography(),
@@ -50,7 +38,13 @@ data class KaraokeTypography(
     val translationTextStyle: TextStyle = TextStyle(
         fontSize = 16.sp,
         fontWeight = FontWeight.Normal,
-        lineHeight = 18.sp,
+        lineHeight = 20.sp,
+    ),
+    /** Translation shown under an accompaniment (background-vocal) line. */
+    val accompanimentTranslationTextStyle: TextStyle = TextStyle(
+        fontSize = 12.sp,
+        fontWeight = FontWeight.Normal,
+        lineHeight = 16.sp,
     ),
     val phoneticTextStyle: TextStyle = TextStyle(
         fontSize = 24.sp,
@@ -62,6 +56,7 @@ data class KaraokeTypography(
     val normalLineHeightRatio: Float = 1.25f,
     val accompanimentLineHeightRatio: Float = 1.3f,
     val translationLineHeightRatio: Float = 1.3f,
+    val accompanimentTranslationLineHeightRatio: Float = 1.3f,
     val phoneticLineHeightRatio: Float = 1.25f,
 )
 
@@ -73,7 +68,11 @@ data class KaraokeSpacing(
     val linePadding: Dp = 12.dp,
     val accompanimentGap: Dp = 8.dp,
     val phoneticGap: Dp = 8.dp,
-    val focusTopOffset: Dp = 64.dp,
+    val focusTopOffset: Dp = 50.dp,
+    /** Gap between a main line's body and its translation. */
+    val translationGap: Dp = 8.dp,
+    /** Gap between an accompaniment line's body and its translation. */
+    val accompanimentTranslationGap: Dp = 4.dp,
 )
 
 /** Depth-of-field blur. `sharpRadiusLines` is the fully-sharp band around the focus. */
@@ -93,9 +92,9 @@ data class KaraokeFocusConfig(
 /** The per-line auto-scroll spring cascade. */
 data class KaraokeSpringConfig(
     val stiffness: Float = 80f,
-    val damping: Float = 12f,
+    val damping: Float = 14f,
     val chainCoupling: Float = 0.65f,
-    val distanceFalloff: Float = 0.25f,
+    val distanceFalloff: Float = 0.2f,
     val minResponse: Float = 0.35f,
 )
 
@@ -111,100 +110,3 @@ data class KaraokeManualScrollConfig(
     val blurFadeInRate: Float = 6f,
     val blurFadeOutRate: Float = 12f,
 )
-
-/**
- * Flattens the grouped config into the px-based wire struct handed to the Rust
- * engine. This is the single place density conversion happens — it replaces the
- * duplicated `NativeLyricsRendererStyle(...)` blocks in the platform host builders.
- */
-internal fun KaraokeLyricsConfig.toRendererStyle(density: Density): NativeLyricsRendererStyle =
-    with(density) {
-        NativeLyricsRendererStyle(
-            typography = NativeTypographyStyle(
-                normalFontSizePx = typography.normalTextStyle.fontSize.toPx(),
-                normalLineHeightPx = lineHeightPx(
-                    typography.normalTextStyle, typography.normalLineHeightRatio
-                ),
-                normalFontWeight = typography.normalTextStyle.fontWeight?.weight ?: 400,
-                normalFontItalic = typography.normalTextStyle.fontStyle == FontStyle.Italic,
-                accompanimentFontSizePx = typography.accompanimentTextStyle.fontSize.toPx(),
-                accompanimentLineHeightPx = lineHeightPx(
-                    typography.accompanimentTextStyle, typography.accompanimentLineHeightRatio
-                ),
-                accompanimentFontWeight = typography.accompanimentTextStyle.fontWeight?.weight ?: 400,
-                accompanimentFontItalic = typography.accompanimentTextStyle.fontStyle == FontStyle.Italic,
-                translationFontSizePx = typography.translationTextStyle.fontSize.toPx(),
-                translationLineHeightPx = lineHeightPx(
-                    typography.translationTextStyle, typography.translationLineHeightRatio
-                ),
-                translationFontWeight = typography.translationTextStyle.fontWeight?.weight ?: 400,
-                translationFontItalic = typography.translationTextStyle.fontStyle == FontStyle.Italic,
-                phoneticFontSizePx = typography.phoneticTextStyle.fontSize.toPx(),
-                phoneticLineHeightPx = lineHeightPx(
-                    typography.phoneticTextStyle, typography.phoneticLineHeightRatio
-                ),
-                phoneticFontWeight = typography.phoneticTextStyle.fontWeight?.weight ?: 400,
-                phoneticFontItalic = typography.phoneticTextStyle.fontStyle == FontStyle.Italic,
-            ),
-            spacing = NativeSpacingStyle(
-                paddingXPx = spacing.horizontalPadding.toPx(),
-                paddingYPx = spacing.linePadding.toPx(),
-                phoneticGapPx = spacing.phoneticGap.toPx(),
-                accompanimentGapPx = spacing.accompanimentGap.toPx(),
-                keepAlivePx = spacing.focusTopOffset.toPx(),
-            ),
-            blur = NativeBlurStyle(
-                useBlurEffect = blur.enabled,
-                blurDelta = blur.delta,
-                sharpRadiusLines = blur.sharpRadiusLines,
-            ),
-            focus = NativeFocusStyle(
-                inactiveKaraokeAlpha = focus.inactiveKaraokeAlpha,
-                dimMinAlpha = focus.dimMinAlpha,
-                dimFalloffMs = focus.dimFalloffMs,
-            ),
-            spring = NativeSpringStyle(
-                stiffness = autoScrollSpring.stiffness,
-                damping = autoScrollSpring.damping,
-                chainCoupling = autoScrollSpring.chainCoupling,
-                distanceFalloff = autoScrollSpring.distanceFalloff,
-                minResponse = autoScrollSpring.minResponse,
-            ),
-            manualScroll = NativeManualScrollStyle(
-                maxFlingVelocity = manualScroll.maxFlingVelocity,
-                decelerationRate = manualScroll.decelerationRate,
-                overscrollStiffness = manualScroll.overscrollStiffness,
-                overscrollDamping = manualScroll.overscrollDamping,
-                rubberBandLimit = manualScroll.rubberBandLimit,
-                rubberBandCoefficient = manualScroll.rubberBandCoefficient,
-                blurRestoreMs = manualScroll.blurRestoreMs,
-                blurFadeInRate = manualScroll.blurFadeInRate,
-                blurFadeOutRate = manualScroll.blurFadeOutRate,
-            ),
-            breathingDots = NativeBreathingDotsStyle(
-                number = breathingDots.number,
-                sizePx = breathingDots.size.toPx(),
-                marginPx = breathingDots.margin.toPx(),
-                enterMs = breathingDots.enterDurationMs,
-                stillMs = breathingDots.preExitStillDuration,
-                dipMs = breathingDots.preExitDipAndRiseDuration,
-                exitMs = breathingDots.exitDurationMs,
-                colorArgb = breathingDots.breathingDotsColor.toArgb(),
-            ),
-            textColorArgb = textColor.toArgb(),
-            showTranslation = showTranslation,
-            showPhonetic = showPhonetic,
-        )
-    }
-
-/**
- * Resolve a role's line height to px: prefer the explicit [TextStyle.lineHeight]
- * (sp, or em × font size), falling back to `fontSize * fallbackRatio` when it is
- * [TextUnit.Unspecified].
- */
-private fun Density.lineHeightPx(style: TextStyle, fallbackRatio: Float): Float =
-    when (style.lineHeight.type) {
-        TextUnitType.Sp -> style.lineHeight.toPx()
-        TextUnitType.Em -> style.fontSize.toPx() * style.lineHeight.value
-        else -> style.fontSize.toPx() * fallbackRatio
-    }

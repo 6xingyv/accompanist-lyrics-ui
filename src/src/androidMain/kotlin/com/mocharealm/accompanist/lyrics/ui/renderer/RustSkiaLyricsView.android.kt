@@ -20,7 +20,6 @@ import com.mocharealm.accompanist.lyrics.text.NativeTextEngine
 import androidx.compose.ui.unit.Density
 import com.mocharealm.accompanist.lyrics.ui.composable.lyrics.KaraokeLyricsConfig
 import com.mocharealm.accompanist.lyrics.ui.composable.lyrics.getFontSource
-import com.mocharealm.accompanist.lyrics.ui.composable.lyrics.toRendererStyle
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -57,9 +56,9 @@ class RustSkiaLyricsView @JvmOverloads constructor(
     private var sceneDirty = true
     private var renderSurface: Surface? = null
     // Initial style is just the default config mapped at this view's density; the
-    // host overwrites it via setRendererStyle before the first frame when one is
-    // supplied. No separate hand-written default to drift from the config.
-    private var rendererStyle = KaraokeLyricsConfig().toRendererStyle(
+    // host overwrites it via setStyle before the first frame when one is supplied.
+    // No separate hand-written default to drift from the config.
+    private var sceneStyle = KaraokeLyricsConfig().toSceneStyle(
         Density(resources.displayMetrics.density, resources.configuration.fontScale)
     )
     private var configuredFontBytes: ByteArray? = null
@@ -173,9 +172,9 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         requestRender()
     }
 
-    fun setRendererStyle(style: NativeLyricsRendererStyle) {
-        if (rendererStyle == style && !engineClosed) return
-        rendererStyle = style
+    internal fun setStyle(style: SceneStyle) {
+        if (sceneStyle == style && !engineClosed) return
+        sceneStyle = style
         resetManualScroll()
         sceneDirty = true
         rebuildSceneAndRender()
@@ -520,10 +519,10 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         val sceneHeight = renderHeight.takeIf { it > 0 } ?: height
         if (sceneDirty) {
             engine.setLyricsScene(
-                sceneLyrics.toNativeLyricsSceneJson(
+                sceneLyrics.toSceneJson(
                     sceneWidth,
                     sceneHeight,
-                    rendererStyle.scaled(renderScale)
+                    sceneStyle.scaled(renderScale)
                 )
             )
             sceneDirty = false
@@ -641,37 +640,6 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         renderScale = scale
         sceneDirty = true
         return true
-    }
-
-    // Downscale only the px-spatial sub-styles. Spring/manual-scroll physics and
-    // the unitless focus/blur ratios stay unscaled — they matched fixed constants
-    // in the engine's (already downscaled) space before.
-    private fun NativeLyricsRendererStyle.scaled(scale: Float): NativeLyricsRendererStyle {
-        if (scale == 1f) return this
-        return copy(
-            typography = typography.copy(
-                normalFontSizePx = typography.normalFontSizePx * scale,
-                normalLineHeightPx = typography.normalLineHeightPx * scale,
-                accompanimentFontSizePx = typography.accompanimentFontSizePx * scale,
-                accompanimentLineHeightPx = typography.accompanimentLineHeightPx * scale,
-                translationFontSizePx = typography.translationFontSizePx * scale,
-                translationLineHeightPx = typography.translationLineHeightPx * scale,
-                phoneticFontSizePx = typography.phoneticFontSizePx * scale,
-                phoneticLineHeightPx = typography.phoneticLineHeightPx * scale,
-            ),
-            spacing = spacing.copy(
-                paddingXPx = spacing.paddingXPx * scale,
-                paddingYPx = spacing.paddingYPx * scale,
-                phoneticGapPx = spacing.phoneticGapPx * scale,
-                accompanimentGapPx = spacing.accompanimentGapPx * scale,
-                keepAlivePx = spacing.keepAlivePx * scale,
-            ),
-            blur = blur.copy(blurDelta = blur.blurDelta * scale),
-            breathingDots = breathingDots.copy(
-                sizePx = breathingDots.sizePx * scale,
-                marginPx = breathingDots.marginPx * scale,
-            ),
-        )
     }
 
     private companion object {

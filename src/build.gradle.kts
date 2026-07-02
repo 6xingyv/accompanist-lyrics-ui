@@ -18,6 +18,7 @@ plugins {
     alias(libs.plugins.jetbrains.compose)
     alias(libs.plugins.android.kotlin.multiplatform.library)
     alias(libs.plugins.compose.compiler)
+    alias(libs.plugins.kotlinx.serialization)
     alias(libs.plugins.maven.publish)
     alias(libs.plugins.dokka)
 }
@@ -90,6 +91,7 @@ kotlin {
                 implementation(compose.components.uiToolingPreview)
 
                 implementation(libs.accompanist.lyrics.core)
+                implementation(libs.kotlinx.serialization.json)
 
                 implementation(compose.components.resources)
             }

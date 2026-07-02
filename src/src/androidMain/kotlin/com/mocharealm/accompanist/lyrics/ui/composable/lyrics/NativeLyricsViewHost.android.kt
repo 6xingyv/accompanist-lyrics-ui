@@ -8,6 +8,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import com.mocharealm.accompanist.lyrics.core.model.ISyncedLine
 import com.mocharealm.accompanist.lyrics.core.model.SyncedLyrics
 import com.mocharealm.accompanist.lyrics.ui.renderer.RustSkiaLyricsView
+import com.mocharealm.accompanist.lyrics.ui.renderer.toSceneStyle
 import org.jetbrains.compose.resources.FontResource
 
 @Composable
@@ -22,13 +23,13 @@ internal actual fun NativeLyricsViewHost(
 ) {
     val density = LocalDensity.current
     val fontResourceBytes = rememberFontResourceBytes(fontResource)
-    val style = config.toRendererStyle(density)
+    val style = config.toSceneStyle(density)
 
     AndroidView(
         factory = { context ->
             RustSkiaLyricsView(context).apply {
                 configureFonts(fontResourceBytes)
-                setRendererStyle(style)
+                setStyle(style)
                 setLyrics(lyrics)
                 setCurrentPosition(currentPosition())
                 setLineInteractionCallbacks(
@@ -39,7 +40,7 @@ internal actual fun NativeLyricsViewHost(
         },
         update = { view ->
             view.configureFonts(fontResourceBytes)
-            view.setRendererStyle(style)
+            view.setStyle(style)
             view.setLyrics(lyrics)
             view.setCurrentPosition(currentPosition())
             view.setLineInteractionCallbacks(

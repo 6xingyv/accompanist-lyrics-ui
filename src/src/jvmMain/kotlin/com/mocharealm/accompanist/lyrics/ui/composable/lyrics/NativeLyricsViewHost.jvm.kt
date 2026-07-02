@@ -8,6 +8,7 @@ import androidx.compose.ui.platform.LocalDensity
 import com.mocharealm.accompanist.lyrics.core.model.ISyncedLine
 import com.mocharealm.accompanist.lyrics.core.model.SyncedLyrics
 import com.mocharealm.accompanist.lyrics.ui.renderer.RustSkiaLyricsPanel
+import com.mocharealm.accompanist.lyrics.ui.renderer.toSceneStyle
 import org.jetbrains.compose.resources.FontResource
 
 @Composable
@@ -22,13 +23,13 @@ internal actual fun NativeLyricsViewHost(
 ) {
     val density = LocalDensity.current
     val fontResourceBytes = rememberFontResourceBytes(fontResource)
-    val style = config.toRendererStyle(density)
+    val style = config.toSceneStyle(density)
 
     SwingPanel(
         factory = {
             RustSkiaLyricsPanel().apply {
                 configureFonts(fontResourceBytes)
-                setRendererStyle(style)
+                setStyle(style)
                 setLyrics(lyrics)
                 setCurrentPosition(currentPosition())
                 setLineInteractionCallbacks(
@@ -39,7 +40,7 @@ internal actual fun NativeLyricsViewHost(
         },
         update = { panel ->
             panel.configureFonts(fontResourceBytes)
-            panel.setRendererStyle(style)
+            panel.setStyle(style)
             panel.setLyrics(lyrics)
             panel.setCurrentPosition(currentPosition())
             panel.setLineInteractionCallbacks(

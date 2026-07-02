@@ -46,6 +46,8 @@ const DEFAULT_ACCOMPANIMENT_FONT_SIZE: f32 = 20.0;
 const DEFAULT_ACCOMPANIMENT_LINE_HEIGHT: f32 = 26.0;
 const DEFAULT_TRANSLATION_FONT_SIZE: f32 = 16.0;
 const DEFAULT_TRANSLATION_LINE_HEIGHT: f32 = 21.0;
+const DEFAULT_ACCOMPANIMENT_TRANSLATION_FONT_SIZE: f32 = 14.0;
+const DEFAULT_ACCOMPANIMENT_TRANSLATION_LINE_HEIGHT: f32 = 18.0;
 const FADE_WIDTH: f32 = 100.0;
 const ROW_GAP: f32 = 32.0;
 const INTERLUDE_THRESHOLD_MS: i32 = 5000;
@@ -150,64 +152,246 @@ const MAX_SCROLL_GROUP_ROWS: usize = 3;
 // in the middle. Solo songs use the full width.
 const DUET_LINE_WIDTH_RATIO: f32 = 0.85;
 
+// Wire contract with the Kotlin data layer. The grouped shape and camelCase field
+// names are kept identical to `SceneStyle`/`LyricsSceneWire` in
+// `ui/renderer/NativeLyricsScene.kt`, so the two sides share one vocabulary. Every
+// group carries `#[serde(default)]` + a `Default` holding the same constants used
+// by the engine, so a partial scene JSON still deserializes to sensible values.
 #[derive(Debug, Deserialize)]
 pub struct LyricsScene {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub locale: Option<String>,
-    pub normal_font_size: Option<f32>,
-    pub normal_line_height: Option<f32>,
-    pub normal_font_weight: Option<u16>,
-    pub normal_font_italic: Option<bool>,
-    pub accompaniment_font_size: Option<f32>,
-    pub accompaniment_line_height: Option<f32>,
-    pub accompaniment_font_weight: Option<u16>,
-    pub accompaniment_font_italic: Option<bool>,
-    pub translation_font_size: Option<f32>,
-    pub translation_line_height: Option<f32>,
-    pub translation_font_weight: Option<u16>,
-    pub translation_font_italic: Option<bool>,
-    pub phonetic_gap: Option<f32>,
-    pub padding_x: Option<f32>,
-    pub padding_y: Option<f32>,
-    pub keep_alive: Option<f32>,
-    pub text_color: Option<u32>,
-    pub show_translation: Option<bool>,
-    pub show_phonetic: Option<bool>,
-    pub use_blur_effect: Option<bool>,
-    pub blur_delta: Option<f32>,
-    pub phonetic_font_size: Option<f32>,
-    pub phonetic_line_height: Option<f32>,
-    pub phonetic_font_weight: Option<u16>,
-    pub phonetic_font_italic: Option<bool>,
-    pub breathing_dots_number: Option<u32>,
-    pub breathing_dots_size: Option<f32>,
-    pub breathing_dots_margin: Option<f32>,
-    pub breathing_dots_enter_ms: Option<f32>,
-    pub breathing_dots_still_ms: Option<f32>,
-    pub breathing_dots_dip_ms: Option<f32>,
-    pub breathing_dots_exit_ms: Option<f32>,
-    pub breathing_dots_color: Option<u32>,
-    pub accompaniment_gap: Option<f32>,
-    pub blur_sharp_radius_lines: Option<f32>,
-    pub inactive_karaoke_alpha: Option<f32>,
-    pub focus_dim_min_alpha: Option<f32>,
-    pub focus_dim_falloff_ms: Option<f32>,
-    pub spring_stiffness: Option<f32>,
-    pub spring_damping: Option<f32>,
-    pub spring_chain_coupling: Option<f32>,
-    pub spring_distance_falloff: Option<f32>,
-    pub spring_min_response: Option<f32>,
-    pub manual_max_fling_velocity: Option<f32>,
-    pub manual_deceleration_rate: Option<f32>,
-    pub manual_overscroll_stiffness: Option<f32>,
-    pub manual_overscroll_damping: Option<f32>,
-    pub manual_rubber_band_limit: Option<f32>,
-    pub manual_rubber_band_coefficient: Option<f32>,
-    pub manual_blur_restore_ms: Option<u64>,
-    pub manual_blur_fade_in_rate: Option<f32>,
-    pub manual_blur_fade_out_rate: Option<f32>,
+    #[serde(default)]
+    pub style: SceneStyleInput,
+    #[serde(default)]
     pub lines: Vec<LyricsLineInput>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SceneStyleInput {
+    pub typography: TypographyInput,
+    pub spacing: SpacingInput,
+    pub blur: BlurInput,
+    pub focus: FocusInput,
+    pub auto_scroll_spring: SpringInput,
+    pub manual_scroll: ManualScrollInput,
+    pub breathing_dots: BreathingDotsInput,
+    pub text_color: u32,
+    pub show_translation: bool,
+    pub show_phonetic: bool,
+}
+
+impl Default for SceneStyleInput {
+    fn default() -> Self {
+        Self {
+            typography: TypographyInput::default(),
+            spacing: SpacingInput::default(),
+            blur: BlurInput::default(),
+            focus: FocusInput::default(),
+            auto_scroll_spring: SpringInput::default(),
+            manual_scroll: ManualScrollInput::default(),
+            breathing_dots: BreathingDotsInput::default(),
+            text_color: 0xffff_ffff,
+            show_translation: true,
+            show_phonetic: true,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct TypographyInput {
+    pub normal_font_size: f32,
+    pub normal_line_height: f32,
+    pub normal_font_weight: u16,
+    pub normal_font_italic: bool,
+    pub accompaniment_font_size: f32,
+    pub accompaniment_line_height: f32,
+    pub accompaniment_font_weight: u16,
+    pub accompaniment_font_italic: bool,
+    pub translation_font_size: f32,
+    pub translation_line_height: f32,
+    pub translation_font_weight: u16,
+    pub translation_font_italic: bool,
+    pub accompaniment_translation_font_size: f32,
+    pub accompaniment_translation_line_height: f32,
+    pub accompaniment_translation_font_weight: u16,
+    pub accompaniment_translation_font_italic: bool,
+    pub phonetic_font_size: f32,
+    pub phonetic_line_height: f32,
+    pub phonetic_font_weight: u16,
+    pub phonetic_font_italic: bool,
+}
+
+impl Default for TypographyInput {
+    fn default() -> Self {
+        Self {
+            normal_font_size: DEFAULT_NORMAL_FONT_SIZE,
+            normal_line_height: DEFAULT_NORMAL_LINE_HEIGHT,
+            normal_font_weight: 400,
+            normal_font_italic: false,
+            accompaniment_font_size: DEFAULT_ACCOMPANIMENT_FONT_SIZE,
+            accompaniment_line_height: DEFAULT_ACCOMPANIMENT_LINE_HEIGHT,
+            accompaniment_font_weight: 400,
+            accompaniment_font_italic: false,
+            translation_font_size: DEFAULT_TRANSLATION_FONT_SIZE,
+            translation_line_height: DEFAULT_TRANSLATION_LINE_HEIGHT,
+            translation_font_weight: 400,
+            translation_font_italic: false,
+            accompaniment_translation_font_size: DEFAULT_ACCOMPANIMENT_TRANSLATION_FONT_SIZE,
+            accompaniment_translation_line_height: DEFAULT_ACCOMPANIMENT_TRANSLATION_LINE_HEIGHT,
+            accompaniment_translation_font_weight: 400,
+            accompaniment_translation_font_italic: false,
+            phonetic_font_size: DEFAULT_TRANSLATION_FONT_SIZE,
+            phonetic_line_height: DEFAULT_TRANSLATION_LINE_HEIGHT,
+            phonetic_font_weight: 400,
+            phonetic_font_italic: false,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SpacingInput {
+    pub horizontal_padding: f32,
+    pub line_padding: f32,
+    pub accompaniment_gap: f32,
+    pub phonetic_gap: f32,
+    pub focus_top_offset: f32,
+    pub translation_gap: f32,
+    pub accompaniment_translation_gap: f32,
+}
+
+impl Default for SpacingInput {
+    fn default() -> Self {
+        Self {
+            horizontal_padding: DEFAULT_PADDING_X,
+            line_padding: DEFAULT_PADDING_Y,
+            accompaniment_gap: 0.0,
+            phonetic_gap: 4.0,
+            focus_top_offset: DEFAULT_KEEP_ALIVE,
+            translation_gap: ROW_GAP,
+            accompaniment_translation_gap: ROW_GAP,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct BlurInput {
+    pub enabled: bool,
+    pub delta: f32,
+    pub sharp_radius_lines: f32,
+}
+
+impl Default for BlurInput {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            delta: 3.0,
+            sharp_radius_lines: BLUR_SHARP_RADIUS_LINES,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct FocusInput {
+    pub inactive_karaoke_alpha: f32,
+    pub dim_min_alpha: f32,
+    pub dim_falloff_ms: f32,
+}
+
+impl Default for FocusInput {
+    fn default() -> Self {
+        Self {
+            inactive_karaoke_alpha: KARAOKE_INACTIVE_ALPHA,
+            dim_min_alpha: FOCUS_ALPHA_MIN,
+            dim_falloff_ms: FOCUS_ALPHA_FALLOFF_MS,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SpringInput {
+    pub stiffness: f32,
+    pub damping: f32,
+    pub chain_coupling: f32,
+    pub distance_falloff: f32,
+    pub min_response: f32,
+}
+
+impl Default for SpringInput {
+    fn default() -> Self {
+        Self {
+            stiffness: LINE_LAYOUT_SPRING_STIFFNESS,
+            damping: LINE_LAYOUT_SPRING_DAMPING,
+            chain_coupling: LINE_LAYOUT_CHAIN_COUPLING,
+            distance_falloff: LINE_LAYOUT_DISTANCE_FALLOFF,
+            min_response: LINE_LAYOUT_MIN_RESPONSE,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ManualScrollInput {
+    pub max_fling_velocity: f32,
+    pub deceleration_rate: f32,
+    pub overscroll_stiffness: f32,
+    pub overscroll_damping: f32,
+    pub rubber_band_limit: f32,
+    pub rubber_band_coefficient: f32,
+    pub blur_restore_ms: u64,
+    pub blur_fade_in_rate: f32,
+    pub blur_fade_out_rate: f32,
+}
+
+impl Default for ManualScrollInput {
+    fn default() -> Self {
+        Self {
+            max_fling_velocity: MANUAL_SCROLL_MAX_FLING_VELOCITY,
+            deceleration_rate: MANUAL_SCROLL_DECELERATION_RATE,
+            overscroll_stiffness: MANUAL_SCROLL_OVERSCROLL_STIFFNESS,
+            overscroll_damping: MANUAL_SCROLL_OVERSCROLL_DAMPING,
+            rubber_band_limit: MANUAL_SCROLL_RUBBER_BAND_LIMIT,
+            rubber_band_coefficient: MANUAL_SCROLL_RUBBER_BAND_COEFFICIENT,
+            blur_restore_ms: MANUAL_SCROLL_BLUR_RESTORE_MS,
+            blur_fade_in_rate: MANUAL_SCROLL_BLUR_FADE_IN_RATE,
+            blur_fade_out_rate: MANUAL_SCROLL_BLUR_FADE_OUT_RATE,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct BreathingDotsInput {
+    pub number: u32,
+    pub size: f32,
+    pub margin: f32,
+    pub enter_ms: f32,
+    pub still_ms: f32,
+    pub dip_ms: f32,
+    pub exit_ms: f32,
+    pub color: u32,
+}
+
+impl Default for BreathingDotsInput {
+    fn default() -> Self {
+        Self {
+            number: DEFAULT_DOTS_NUMBER,
+            size: DEFAULT_DOTS_SIZE,
+            margin: DEFAULT_DOTS_MARGIN,
+            enter_ms: DEFAULT_DOTS_ENTER_MS,
+            still_ms: DEFAULT_DOTS_STILL_MS,
+            dip_ms: DEFAULT_DOTS_DIP_MS,
+            exit_ms: DEFAULT_DOTS_EXIT_MS,
+            color: 0xffff_ffff,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -220,6 +404,7 @@ pub enum LyricsLineInput {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct KaraokeLineInput {
     pub source_index: Option<usize>,
     pub cluster_index: Option<usize>,
@@ -234,6 +419,7 @@ pub struct KaraokeLineInput {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SyncedLineInput {
     pub source_index: Option<usize>,
     pub cluster_index: Option<usize>,
@@ -425,10 +611,17 @@ struct SceneConfig {
     translation_font_size: f32,
     translation_line_height: f32,
     translation_attrs: TextAttrs,
+    accompaniment_translation_font_size: f32,
+    accompaniment_translation_line_height: f32,
+    accompaniment_translation_attrs: TextAttrs,
     phonetic_font_size: f32,
     phonetic_line_height: f32,
     phonetic_attrs: TextAttrs,
     phonetic_gap: f32,
+    // Gap (px) between a line's body and its translation: `translation_gap` for a
+    // main/synced line, `accompaniment_translation_gap` for an accompaniment line.
+    translation_gap: f32,
+    accompaniment_translation_gap: f32,
     padding_x: f32,
     padding_y: f32,
     keep_alive: f32,
@@ -944,8 +1137,9 @@ impl LyricsRenderer {
                 }
             }
 
+            let detail_gap = line.detail_gap(&scene.config);
             let mut detail_y =
-                y + text_y_offset + scene.config.padding_y + line.main_text_height() + ROW_GAP;
+                y + text_y_offset + scene.config.padding_y + line.main_text_height() + detail_gap;
             if let Some(translation) = &line.translation {
                 draw_prepared_text(
                     &mut self.font_system,
@@ -962,7 +1156,7 @@ impl LyricsRenderer {
                     blur_radius,
                     None,
                 );
-                detail_y += translation.height + ROW_GAP;
+                detail_y += translation.height + detail_gap;
             }
             if let Some(phonetic) = &line.phonetic {
                 draw_prepared_text(
@@ -1226,8 +1420,9 @@ impl LyricsRenderer {
                 }
             }
 
+            let detail_gap = line.detail_gap(&scene.config);
             let mut detail_y =
-                y + text_y_offset + scene.config.padding_y + line.main_text_height() + ROW_GAP;
+                y + text_y_offset + scene.config.padding_y + line.main_text_height() + detail_gap;
             if let Some(translation) = &line.translation {
                 if should_log_debug {
                     frame_stats.visible_glyphs +=
@@ -1246,7 +1441,7 @@ impl LyricsRenderer {
                     blur_radius,
                     None,
                 );
-                detail_y += translation.height + ROW_GAP;
+                detail_y += translation.height + detail_gap;
             }
             if let Some(phonetic) = &line.phonetic {
                 if should_log_debug {
@@ -1634,6 +1829,25 @@ impl PreparedLine {
             PreparedLineKind::Synced { text } => text.rows.len().max(1),
         }
     }
+
+    fn is_accompaniment(&self) -> bool {
+        matches!(
+            self.kind,
+            PreparedLineKind::Karaoke {
+                is_accompaniment: true,
+                ..
+            }
+        )
+    }
+
+    /// Gap between this line's body and its translation/phonetic detail rows.
+    fn detail_gap(&self, config: &SceneConfig) -> f32 {
+        if self.is_accompaniment() {
+            config.accompaniment_translation_gap
+        } else {
+            config.translation_gap
+        }
+    }
 }
 
 fn prepared_text_width(text: &PreparedText) -> f32 {
@@ -1671,10 +1885,15 @@ mod tests {
             translation_font_size: 16.0,
             translation_line_height: 21.0,
             translation_attrs: TextAttrs::default(),
+            accompaniment_translation_font_size: 14.0,
+            accompaniment_translation_line_height: 18.0,
+            accompaniment_translation_attrs: TextAttrs::default(),
             phonetic_font_size: 13.0,
             phonetic_line_height: 16.0,
             phonetic_attrs: TextAttrs::default(),
             phonetic_gap: 4.0,
+            translation_gap: ROW_GAP,
+            accompaniment_translation_gap: ROW_GAP,
             padding_x: 16.0,
             padding_y: 8.0,
             keep_alive: 32.0,
@@ -1815,35 +2034,57 @@ mod tests {
         let mut renderer = LyricsRenderer::new();
         let json = r#"{
             "width": 300, "height": 200,
-            "accompaniment_gap": 40.0,
-            "blur_sharp_radius_lines": 9.0,
-            "inactive_karaoke_alpha": 0.5,
-            "focus_dim_min_alpha": 0.7,
-            "focus_dim_falloff_ms": 1234.0,
-            "spring_stiffness": 250.0,
-            "spring_damping": 30.0,
-            "spring_chain_coupling": 0.9,
-            "spring_distance_falloff": 0.5,
-            "spring_min_response": 0.2,
-            "manual_max_fling_velocity": 9999.0,
-            "manual_deceleration_rate": 0.99,
-            "manual_overscroll_stiffness": 88.0,
-            "manual_overscroll_damping": 11.0,
-            "manual_rubber_band_limit": 90.0,
-            "manual_rubber_band_coefficient": 0.3,
-            "manual_blur_restore_ms": 1500,
-            "manual_blur_fade_in_rate": 5.0,
-            "manual_blur_fade_out_rate": 9.0,
+            "style": {
+                "typography": {
+                    "accompanimentTranslationFontSize": 12.0,
+                    "accompanimentTranslationLineHeight": 15.0
+                },
+                "spacing": {
+                    "accompanimentGap": 40.0,
+                    "translationGap": 24.0,
+                    "accompanimentTranslationGap": 10.0
+                },
+                "blur": { "sharpRadiusLines": 9.0 },
+                "focus": {
+                    "inactiveKaraokeAlpha": 0.5,
+                    "dimMinAlpha": 0.7,
+                    "dimFalloffMs": 1234.0
+                },
+                "autoScrollSpring": {
+                    "stiffness": 250.0,
+                    "damping": 30.0,
+                    "chainCoupling": 0.9,
+                    "distanceFalloff": 0.5,
+                    "minResponse": 0.2
+                },
+                "manualScroll": {
+                    "maxFlingVelocity": 9999.0,
+                    "decelerationRate": 0.99,
+                    "overscrollStiffness": 88.0,
+                    "overscrollDamping": 11.0,
+                    "rubberBandLimit": 90.0,
+                    "rubberBandCoefficient": 0.3,
+                    "blurRestoreMs": 1500,
+                    "blurFadeInRate": 5.0,
+                    "blurFadeOutRate": 9.0
+                }
+            },
             "lines": []
         }"#;
         let scene: LyricsScene = serde_json::from_str(json).unwrap();
         let config = renderer.prepare_scene(scene).unwrap().config;
 
         assert_eq!(config.accompaniment_gap, 40.0);
+        assert_eq!(config.translation_gap, 24.0);
+        assert_eq!(config.accompaniment_translation_gap, 10.0);
+        assert_eq!(config.accompaniment_translation_font_size, 12.0);
+        assert_eq!(config.accompaniment_translation_line_height, 15.0);
         assert_eq!(config.blur_sharp_radius_lines, 9.0);
         assert_eq!(config.inactive_karaoke_alpha, 0.5);
         assert_eq!(config.focus_dim_min_alpha, 0.7);
         assert_eq!(config.focus_dim_falloff_ms, 1234.0);
+        // Groups omitted from the JSON fall back to the wire `Default`s.
+        assert_eq!(config.normal_font_size, DEFAULT_NORMAL_FONT_SIZE);
         let sp = config.scroll_params;
         assert_eq!(sp.spring_stiffness, 250.0);
         assert_eq!(sp.spring_damping, 30.0);

@@ -8,6 +8,7 @@ media3Exoplayer = "1.10.1"
 media3Session = "1.10.1"
 compose = "1.11.1"
 kotlinx-serialization = "2.4.0"
+kotlinx-serialization-json = "1.10.0"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -24,6 +25,7 @@ koin-compose = { group = "io.insert-koin", name = "koin-compose" }
 koin-compose-viewmodel = { group = "io.insert-koin", name = "koin-compose-viewmodel" }
 cloudy = { module = "com.github.skydoves:cloudy", version = "0.4.0" }
 hiddenapibypass = { module = "org.lsposed.hiddenapibypass:hiddenapibypass", version = "6.1" }
+kotlinx-serialization-json = { group = "org.jetbrains.kotlinx", name = "kotlinx-serialization-json", version.ref = "kotlinx-serialization-json" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

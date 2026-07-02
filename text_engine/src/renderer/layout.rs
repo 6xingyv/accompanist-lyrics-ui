@@ -9,156 +9,89 @@ impl LyricsRenderer {
         let locale = scene.locale.as_deref().unwrap_or("en-US");
         self.set_locale(locale);
 
+        // All style defaults now live in the wire `*Input` structs' `Default`
+        // impls, so this just copies the (already-defaulted) values across and
+        // applies the engine's validation clamps.
+        let style = &scene.style;
+        let typography = &style.typography;
+        let spacing = &style.spacing;
+        let dots = &style.breathing_dots;
+        let spring = &style.auto_scroll_spring;
+        let manual = &style.manual_scroll;
         let config = SceneConfig {
             width: scene.width.unwrap_or(DEFAULT_WIDTH).max(DEFAULT_WIDTH),
             height: scene.height.unwrap_or(DEFAULT_HEIGHT).max(DEFAULT_HEIGHT),
-            normal_font_size: scene.normal_font_size.unwrap_or(DEFAULT_NORMAL_FONT_SIZE),
-            normal_line_height: scene
-                .normal_line_height
-                .unwrap_or(DEFAULT_NORMAL_LINE_HEIGHT),
+            normal_font_size: typography.normal_font_size,
+            normal_line_height: typography.normal_line_height,
             normal_attrs: TextAttrs {
-                weight: scene.normal_font_weight.unwrap_or(400),
-                italic: scene.normal_font_italic.unwrap_or(false),
+                weight: typography.normal_font_weight,
+                italic: typography.normal_font_italic,
             },
-            accompaniment_font_size: scene
-                .accompaniment_font_size
-                .unwrap_or(DEFAULT_ACCOMPANIMENT_FONT_SIZE),
-            accompaniment_line_height: scene
-                .accompaniment_line_height
-                .unwrap_or(DEFAULT_ACCOMPANIMENT_LINE_HEIGHT),
+            accompaniment_font_size: typography.accompaniment_font_size,
+            accompaniment_line_height: typography.accompaniment_line_height,
             accompaniment_attrs: TextAttrs {
-                weight: scene.accompaniment_font_weight.unwrap_or(400),
-                italic: scene.accompaniment_font_italic.unwrap_or(false),
+                weight: typography.accompaniment_font_weight,
+                italic: typography.accompaniment_font_italic,
             },
-            translation_font_size: scene
-                .translation_font_size
-                .unwrap_or(DEFAULT_TRANSLATION_FONT_SIZE),
-            translation_line_height: scene
-                .translation_line_height
-                .unwrap_or(DEFAULT_TRANSLATION_LINE_HEIGHT),
+            translation_font_size: typography.translation_font_size,
+            translation_line_height: typography.translation_line_height,
             translation_attrs: TextAttrs {
-                weight: scene.translation_font_weight.unwrap_or(400),
-                italic: scene.translation_font_italic.unwrap_or(false),
+                weight: typography.translation_font_weight,
+                italic: typography.translation_font_italic,
             },
-            phonetic_font_size: scene.phonetic_font_size.unwrap_or_else(|| {
-                scene
-                    .translation_font_size
-                    .unwrap_or(DEFAULT_TRANSLATION_FONT_SIZE)
-            }),
-            phonetic_line_height: scene.phonetic_line_height.unwrap_or_else(|| {
-                scene
-                    .translation_line_height
-                    .unwrap_or(DEFAULT_TRANSLATION_LINE_HEIGHT)
-            }),
+            accompaniment_translation_font_size: typography.accompaniment_translation_font_size,
+            accompaniment_translation_line_height: typography.accompaniment_translation_line_height,
+            accompaniment_translation_attrs: TextAttrs {
+                weight: typography.accompaniment_translation_font_weight,
+                italic: typography.accompaniment_translation_font_italic,
+            },
+            phonetic_font_size: typography.phonetic_font_size,
+            phonetic_line_height: typography.phonetic_line_height,
             phonetic_attrs: TextAttrs {
-                weight: scene.phonetic_font_weight.unwrap_or(400),
-                italic: scene.phonetic_font_italic.unwrap_or(false),
+                weight: typography.phonetic_font_weight,
+                italic: typography.phonetic_font_italic,
             },
-            phonetic_gap: scene.phonetic_gap.unwrap_or(4.0).max(0.0),
-            padding_x: scene.padding_x.unwrap_or(DEFAULT_PADDING_X),
-            padding_y: scene.padding_y.unwrap_or(DEFAULT_PADDING_Y),
-            keep_alive: scene.keep_alive.unwrap_or(DEFAULT_KEEP_ALIVE),
-            text_color: scene.text_color.unwrap_or(0xffff_ffff),
-            show_translation: scene.show_translation.unwrap_or(true),
-            show_phonetic: scene.show_phonetic.unwrap_or(true),
-            use_blur_effect: scene.use_blur_effect.unwrap_or(true),
-            blur_delta: scene.blur_delta.unwrap_or(3.0).max(0.0),
-            accompaniment_gap: scene.accompaniment_gap.unwrap_or(0.0),
-            blur_sharp_radius_lines: scene
-                .blur_sharp_radius_lines
-                .unwrap_or(BLUR_SHARP_RADIUS_LINES)
-                .max(0.0),
-            inactive_karaoke_alpha: scene
-                .inactive_karaoke_alpha
-                .unwrap_or(KARAOKE_INACTIVE_ALPHA)
-                .clamp(0.0, 1.0),
-            focus_dim_min_alpha: scene
-                .focus_dim_min_alpha
-                .unwrap_or(FOCUS_ALPHA_MIN)
-                .clamp(0.0, 1.0),
-            focus_dim_falloff_ms: scene.focus_dim_falloff_ms.unwrap_or(FOCUS_ALPHA_FALLOFF_MS).max(1.0),
+            phonetic_gap: spacing.phonetic_gap.max(0.0),
+            translation_gap: spacing.translation_gap.max(0.0),
+            accompaniment_translation_gap: spacing.accompaniment_translation_gap.max(0.0),
+            padding_x: spacing.horizontal_padding,
+            padding_y: spacing.line_padding,
+            keep_alive: spacing.focus_top_offset,
+            text_color: style.text_color,
+            show_translation: style.show_translation,
+            show_phonetic: style.show_phonetic,
+            use_blur_effect: style.blur.enabled,
+            blur_delta: style.blur.delta.max(0.0),
+            accompaniment_gap: spacing.accompaniment_gap,
+            blur_sharp_radius_lines: style.blur.sharp_radius_lines.max(0.0),
+            inactive_karaoke_alpha: style.focus.inactive_karaoke_alpha.clamp(0.0, 1.0),
+            focus_dim_min_alpha: style.focus.dim_min_alpha.clamp(0.0, 1.0),
+            focus_dim_falloff_ms: style.focus.dim_falloff_ms.max(1.0),
             breathing_dots: BreathingDotsConfig {
-                number: scene
-                    .breathing_dots_number
-                    .unwrap_or(DEFAULT_DOTS_NUMBER)
-                    .clamp(1, 8),
-                size: scene
-                    .breathing_dots_size
-                    .unwrap_or(DEFAULT_DOTS_SIZE)
-                    .max(1.0),
-                margin: scene
-                    .breathing_dots_margin
-                    .unwrap_or(DEFAULT_DOTS_MARGIN)
-                    .max(0.0),
-                enter_ms: scene
-                    .breathing_dots_enter_ms
-                    .unwrap_or(DEFAULT_DOTS_ENTER_MS)
-                    .max(1.0),
-                still_ms: scene
-                    .breathing_dots_still_ms
-                    .unwrap_or(DEFAULT_DOTS_STILL_MS)
-                    .max(0.0),
-                dip_ms: scene
-                    .breathing_dots_dip_ms
-                    .unwrap_or(DEFAULT_DOTS_DIP_MS)
-                    .max(1.0),
-                exit_ms: scene
-                    .breathing_dots_exit_ms
-                    .unwrap_or(DEFAULT_DOTS_EXIT_MS)
-                    .max(1.0),
-                color: scene
-                    .breathing_dots_color
-                    .unwrap_or_else(|| scene.text_color.unwrap_or(0xffff_ffff)),
+                number: dots.number.clamp(1, 8),
+                size: dots.size.max(1.0),
+                margin: dots.margin.max(0.0),
+                enter_ms: dots.enter_ms.max(1.0),
+                still_ms: dots.still_ms.max(0.0),
+                dip_ms: dots.dip_ms.max(1.0),
+                exit_ms: dots.exit_ms.max(1.0),
+                color: dots.color,
             },
             scroll_params: ScrollParams {
-                spring_stiffness: scene
-                    .spring_stiffness
-                    .unwrap_or(LINE_LAYOUT_SPRING_STIFFNESS)
-                    .max(0.0),
-                spring_damping: scene.spring_damping.unwrap_or(LINE_LAYOUT_SPRING_DAMPING).max(0.0),
-                chain_coupling: scene.spring_chain_coupling.unwrap_or(LINE_LAYOUT_CHAIN_COUPLING),
-                distance_falloff: scene
-                    .spring_distance_falloff
-                    .unwrap_or(LINE_LAYOUT_DISTANCE_FALLOFF),
-                min_response: scene
-                    .spring_min_response
-                    .unwrap_or(LINE_LAYOUT_MIN_RESPONSE)
-                    .clamp(0.01, 1.0),
-                max_fling_velocity: scene
-                    .manual_max_fling_velocity
-                    .unwrap_or(MANUAL_SCROLL_MAX_FLING_VELOCITY)
-                    .max(0.0),
-                deceleration_rate: scene
-                    .manual_deceleration_rate
-                    .unwrap_or(MANUAL_SCROLL_DECELERATION_RATE)
-                    .clamp(0.0, 1.0),
-                overscroll_stiffness: scene
-                    .manual_overscroll_stiffness
-                    .unwrap_or(MANUAL_SCROLL_OVERSCROLL_STIFFNESS)
-                    .max(0.0),
-                overscroll_damping: scene
-                    .manual_overscroll_damping
-                    .unwrap_or(MANUAL_SCROLL_OVERSCROLL_DAMPING)
-                    .max(0.0),
-                rubber_band_limit: scene
-                    .manual_rubber_band_limit
-                    .unwrap_or(MANUAL_SCROLL_RUBBER_BAND_LIMIT)
-                    .max(1.0),
-                rubber_band_coefficient: scene
-                    .manual_rubber_band_coefficient
-                    .unwrap_or(MANUAL_SCROLL_RUBBER_BAND_COEFFICIENT)
-                    .max(0.0001),
-                blur_restore_ms: scene
-                    .manual_blur_restore_ms
-                    .unwrap_or(MANUAL_SCROLL_BLUR_RESTORE_MS),
-                blur_fade_in_rate: scene
-                    .manual_blur_fade_in_rate
-                    .unwrap_or(MANUAL_SCROLL_BLUR_FADE_IN_RATE)
-                    .max(0.0),
-                blur_fade_out_rate: scene
-                    .manual_blur_fade_out_rate
-                    .unwrap_or(MANUAL_SCROLL_BLUR_FADE_OUT_RATE)
-                    .max(0.0),
+                spring_stiffness: spring.stiffness.max(0.0),
+                spring_damping: spring.damping.max(0.0),
+                chain_coupling: spring.chain_coupling,
+                distance_falloff: spring.distance_falloff,
+                min_response: spring.min_response.clamp(0.01, 1.0),
+                max_fling_velocity: manual.max_fling_velocity.max(0.0),
+                deceleration_rate: manual.deceleration_rate.clamp(0.0, 1.0),
+                overscroll_stiffness: manual.overscroll_stiffness.max(0.0),
+                overscroll_damping: manual.overscroll_damping.max(0.0),
+                rubber_band_limit: manual.rubber_band_limit.max(1.0),
+                rubber_band_coefficient: manual.rubber_band_coefficient.max(0.0001),
+                blur_restore_ms: manual.blur_restore_ms,
+                blur_fade_in_rate: manual.blur_fade_in_rate.max(0.0),
+                blur_fade_out_rate: manual.blur_fade_out_rate.max(0.0),
             },
         };
 
@@ -236,13 +169,32 @@ impl LyricsRenderer {
                         config.phonetic_line_height,
                         config.phonetic_gap,
                     );
+                    // An accompaniment line renders its translation at its own font
+                    // size/attrs and its own body-to-translation gap; a main line
+                    // uses the primary translation role and gap.
+                    let (translation_font_size, translation_line_height, translation_attrs, detail_gap) =
+                        if line.is_accompaniment {
+                            (
+                                config.accompaniment_translation_font_size,
+                                config.accompaniment_translation_line_height,
+                                config.accompaniment_translation_attrs,
+                                config.accompaniment_translation_gap,
+                            )
+                        } else {
+                            (
+                                config.translation_font_size,
+                                config.translation_line_height,
+                                config.translation_attrs,
+                                config.translation_gap,
+                            )
+                        };
                     let translation = if config.show_translation {
-                        self.text_attrs = config.translation_attrs;
+                        self.text_attrs = translation_attrs;
                         line.translation.as_deref().and_then(|translation| {
                             self.prepare_detail_text(
                                 translation,
-                                config.translation_font_size,
-                                config.translation_line_height,
+                                translation_font_size,
+                                translation_line_height,
                                 layout_width,
                                 right_aligned,
                             )
@@ -266,10 +218,10 @@ impl LyricsRenderer {
                     };
                     let mut height = prepared_text.height + config.padding_y * 2.0;
                     if let Some(translation) = &translation {
-                        height += translation.height + ROW_GAP;
+                        height += translation.height + detail_gap;
                     }
                     if let Some(phonetic) = &phonetic {
-                        height += phonetic.height + ROW_GAP;
+                        height += phonetic.height + detail_gap;
                     }
                     PreparedLine {
                         source_index,
@@ -325,7 +277,7 @@ impl LyricsRenderer {
                     };
                     let mut height = text.height + config.padding_y * 2.0;
                     if let Some(translation) = &translation {
-                        height += translation.height + ROW_GAP;
+                        height += translation.height + config.translation_gap;
                     }
                     PreparedLine {
                         source_index,
