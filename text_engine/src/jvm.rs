@@ -1,5 +1,5 @@
 use jni::objects::{JByteBuffer, JObject, JString};
-use jni::sys::{jboolean, jbyteArray, jfloat, jint, jlong};
+use jni::sys::{jboolean, jbyteArray, jfloat, jint, jintArray, jlong};
 use jni::JNIEnv;
 use std::sync::Mutex;
 
@@ -693,4 +693,103 @@ pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeTextE
     with_engine_mut(handle, -1, |engine| {
         engine.hit_test_lyrics_line(x, y, current_time_ms)
     })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeTextEngine_nativeSetBackgroundArt(
+    env: JNIEnv,
+    _this: JObject,
+    handle: jlong,
+    pixels: jintArray,
+    width: jint,
+    height: jint,
+    seed: jint,
+) {
+    if width <= 0 || height <= 0 {
+        return;
+    }
+    let expected = (width as usize) * (height as usize);
+    let len = env.get_array_length(pixels).unwrap_or(0) as usize;
+    if len < expected {
+        return;
+    }
+    let mut buf = vec![0i32; expected];
+    if env.get_int_array_region(pixels, 0, &mut buf).is_err() {
+        return;
+    }
+    // ARGB_8888 ints → u32 (0xAARRGGBB).
+    let argb: Vec<u32> = buf.iter().map(|&v| v as u32).collect();
+    with_engine_mut(handle, (), |engine| {
+        engine.set_background_art(&argb, width as usize, height as usize, seed as u32);
+    });
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeTextEngine_nativeClearBackground(
+    _env: JNIEnv,
+    _this: JObject,
+    handle: jlong,
+) {
+    with_engine_mut(handle, (), |engine| {
+        engine.clear_background();
+    });
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeTextEngine_nativeSetPlaybackState(
+    _env: JNIEnv,
+    _this: JObject,
+    handle: jlong,
+    playing: jboolean,
+    reactive: jboolean,
+) {
+    with_engine_mut(handle, (), |engine| {
+        engine.set_playback_state(playing != 0, reactive != 0);
+    });
+}
+
+// --- Process-global audio analysis (no engine handle) -----------------------
+// Fed from an ExoPlayer TeeAudioProcessor (same process) and read in-process by
+// the mesh-gradient renderer each frame.
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeAudioAnalysis_nativePushAudioData(
+    env: JNIEnv,
+    _class: JObject,
+    buffer: JByteBuffer,
+    float_count: jint,
+) {
+    if float_count <= 0 {
+        return;
+    }
+    let bytes: &[u8] = match env.get_direct_buffer_address(buffer) {
+        Ok(slice) => slice,
+        Err(_) => return,
+    };
+    let available = bytes.len() / 4;
+    let count = (float_count as usize).min(available);
+    if count == 0 {
+        return;
+    }
+    // Direct ByteBuffers are allocated 8-byte aligned, so reading them as f32 is
+    // sound; clamp to the byte length so a short buffer can't over-read.
+    let samples = unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const f32, count) };
+    crate::audio::push_pcm(samples);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeAudioAnalysis_nativeSetSampleRate(
+    _env: JNIEnv,
+    _class: JObject,
+    sample_rate: jfloat,
+) {
+    crate::audio::set_sample_rate(sample_rate);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeAudioAnalysis_nativeReset(
+    _env: JNIEnv,
+    _class: JObject,
+) {
+    crate::audio::reset();
 }

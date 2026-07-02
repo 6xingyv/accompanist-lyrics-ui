@@ -415,25 +415,29 @@ fn skia_color(color: (u8, u8, u8, u8), alpha: f32) -> Color4f {
 }
 
 /// Multiply the canvas's alpha by a vertical gradient so the top and bottom edges
-/// fade to transparent — the GPU-path equivalent of [`apply_vertical_fade`]. Draws
-/// one full-bounds rect with `BlendMode::DstIn` (result = dst × src.alpha), which
-/// operates directly on the transparent-cleared framebuffer, no save_layer needed.
-pub(super) fn apply_vertical_fade_skia(
+/// of the band `[y_top, y_bottom]` fade to transparent — the GPU-path equivalent of
+/// [`apply_vertical_fade`]. Draws one band-bounds rect with `BlendMode::DstIn`
+/// (result = dst × src.alpha). In the transparent-overlay mode `[y_top, y_bottom]`
+/// is the whole surface; in full-bleed mode the caller isolates the lyrics in a
+/// layer first so this only dissolves the lyrics, not the opaque background.
+pub(super) fn apply_vertical_fade_skia_band(
     canvas: &skia_safe::Canvas,
     width: f32,
-    height: f32,
+    y_top: f32,
+    y_bottom: f32,
     top_px: f32,
     bottom_px: f32,
 ) {
-    if width <= 0.0 || height <= 0.0 || (top_px <= 0.0 && bottom_px <= 0.0) {
+    let band_height = y_bottom - y_top;
+    if width <= 0.0 || band_height <= 0.0 || (top_px <= 0.0 && bottom_px <= 0.0) {
         return;
     }
-    let top_stop = (top_px / height).clamp(0.0, 1.0);
-    let bottom_stop = (1.0 - bottom_px / height).clamp(0.0, 1.0);
+    let top_stop = (top_px / band_height).clamp(0.0, 1.0);
+    let bottom_stop = (1.0 - bottom_px / band_height).clamp(0.0, 1.0);
     // Only the alpha channel matters for DstIn; keep RGB at 1.
     let clear = Color4f::new(1.0, 1.0, 1.0, 0.0);
     let solid = Color4f::new(1.0, 1.0, 1.0, 1.0);
-    // On a very short surface the two fades could overlap (bottom_stop <= top_stop);
+    // On a very short band the two fades could overlap (bottom_stop <= top_stop);
     // fall back to a single centre-peaked fade so it degrades gracefully.
     let (colors, positions): (Vec<Color4f>, Vec<f32>) = if bottom_stop <= top_stop {
         (vec![clear, solid, clear], vec![0.0, 0.5, 1.0])
@@ -446,7 +450,7 @@ pub(super) fn apply_vertical_fade_skia(
     let gradient_colors = gradient::Colors::new(&colors, Some(&positions), TileMode::Clamp, None);
     let gradient = gradient::Gradient::new(gradient_colors, gradient::Interpolation::default());
     let Some(shader) = gradient::shaders::linear_gradient(
-        (Point::new(0.0, 0.0), Point::new(0.0, height)),
+        (Point::new(0.0, y_top), Point::new(0.0, y_bottom)),
         &gradient,
         None,
     ) else {
@@ -456,7 +460,7 @@ pub(super) fn apply_vertical_fade_skia(
     paint.set_anti_alias(false);
     paint.set_shader(shader);
     paint.set_blend_mode(BlendMode::DstIn);
-    canvas.draw_rect(Rect::new(0.0, 0.0, width, height), &paint);
+    canvas.draw_rect(Rect::new(0.0, y_top, width, y_bottom), &paint);
 }
 
 fn make_karaoke_shader(brush: KaraokeBrush, base_color: (u8, u8, u8, u8)) -> Option<Shader> {

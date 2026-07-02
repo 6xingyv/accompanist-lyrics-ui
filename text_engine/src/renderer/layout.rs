@@ -18,6 +18,8 @@ impl LyricsRenderer {
         let dots = &style.breathing_dots;
         let spring = &style.auto_scroll_spring;
         let manual = &style.manual_scroll;
+        let content_top = scene.content_top.unwrap_or(0.0).max(0.0);
+        let content_bottom = scene.content_bottom.unwrap_or(0.0).max(0.0);
         let config = SceneConfig {
             width: scene.width.unwrap_or(DEFAULT_WIDTH).max(DEFAULT_WIDTH),
             height: scene.height.unwrap_or(DEFAULT_HEIGHT).max(DEFAULT_HEIGHT),
@@ -56,7 +58,11 @@ impl LyricsRenderer {
             accompaniment_translation_gap: spacing.accompaniment_translation_gap.max(0.0),
             padding_x: spacing.horizontal_padding,
             padding_y: spacing.line_padding,
-            keep_alive: spacing.focus_top_offset,
+            content_top,
+            content_bottom,
+            // The focus line sits `focus_top_offset` below the content-band top, so
+            // fold the top inset into the keep-alive anchor that scroll/layout use.
+            keep_alive: spacing.focus_top_offset + content_top,
             text_color: style.text_color,
             show_translation: style.show_translation,
             show_phonetic: style.show_phonetic,

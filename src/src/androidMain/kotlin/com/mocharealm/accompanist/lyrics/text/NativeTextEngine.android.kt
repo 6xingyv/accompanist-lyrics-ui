@@ -144,6 +144,26 @@ actual class NativeTextEngine actual constructor(
         return if (handle != 0L) nativeHitTestLyricsLine(handle, x, y, currentTimeMs) else -1
     }
 
+    /**
+     * Install album artwork (ARGB_8888 pixels, `width`×`height`) for the GPU
+     * mesh-gradient background and enable the full-bleed background mode. `seed`
+     * keeps a song's control-point layout stable across binds.
+     */
+    fun setBackgroundArt(pixels: IntArray, width: Int, height: Int, seed: Int) {
+        ensureHandle()
+        nativeSetBackgroundArt(handle, pixels, width, height, seed)
+    }
+
+    /** Disable the mesh-gradient background (revert to a transparent overlay). */
+    fun clearBackground() {
+        if (handle != 0L) nativeClearBackground(handle)
+    }
+
+    /** Drive the background: `playing` gates its time flow, `reactive` its audio reactivity. */
+    fun setPlaybackState(playing: Boolean, reactive: Boolean) {
+        if (handle != 0L) nativeSetPlaybackState(handle, playing, reactive)
+    }
+
     actual fun close() {
         val currentHandle = handle
         if (currentHandle != 0L) {
@@ -361,4 +381,15 @@ actual class NativeTextEngine actual constructor(
         y: Float,
         currentTimeMs: Int
     ): Int
+
+    private external fun nativeSetBackgroundArt(
+        handle: Long,
+        pixels: IntArray,
+        width: Int,
+        height: Int,
+        seed: Int
+    )
+
+    private external fun nativeClearBackground(handle: Long)
+    private external fun nativeSetPlaybackState(handle: Long, playing: Boolean, reactive: Boolean)
 }

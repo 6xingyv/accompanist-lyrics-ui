@@ -132,12 +132,16 @@ internal data class BreathingDotsStyle(
     val color: Long,
 )
 
-/** A full scene: viewport, locale, resolved style, and the flattened line list. */
+/** A full scene: viewport, locale, resolved style, and the flattened line list.
+ * `contentTop`/`contentBottom` are the vertical content insets (px) for the lyrics
+ * band when the engine owns the whole full-bleed surface (0 = fill, legacy). */
 @Serializable
 internal data class LyricsSceneWire(
     val width: Int,
     val height: Int,
     val locale: String,
+    val contentTop: Float = 0f,
+    val contentBottom: Float = 0f,
     val style: SceneStyle,
     val lines: List<LyricsLineWire>,
 )
@@ -322,13 +326,22 @@ internal fun SceneStyle.scaled(scale: Float): SceneStyle {
     )
 }
 
-/** Serialize a scene (viewport + resolved [style] + lines) to the engine JSON. */
-internal fun SyncedLyrics.toSceneJson(width: Int, height: Int, style: SceneStyle): String =
+/** Serialize a scene (viewport + resolved [style] + lines) to the engine JSON.
+ * `contentTop`/`contentBottom` are already in render px (downscale applied). */
+internal fun SyncedLyrics.toSceneJson(
+    width: Int,
+    height: Int,
+    style: SceneStyle,
+    contentTop: Float = 0f,
+    contentBottom: Float = 0f,
+): String =
     lyricsSceneJson.encodeToString(
         LyricsSceneWire(
             width = width,
             height = height,
             locale = detectNativeLyricsLocale(),
+            contentTop = contentTop,
+            contentBottom = contentBottom,
             style = style,
             lines = toSceneLines(),
         )

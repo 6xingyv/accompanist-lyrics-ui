@@ -410,6 +410,21 @@ impl TextEngine {
         render_result
     }
 
+    /// Install album artwork for the GPU mesh-gradient background (ARGB_8888).
+    pub fn set_background_art(&mut self, pixels: &[u32], width: usize, height: usize, seed: u32) {
+        self.renderer.set_background_art(pixels, width, height, seed);
+    }
+
+    /// Turn the mesh-gradient background off (revert to transparent overlay).
+    pub fn clear_background(&mut self) {
+        self.renderer.clear_background();
+    }
+
+    /// Update playback state driving the background (time flow + audio reactivity).
+    pub fn set_playback_state(&mut self, playing: bool, reactive: bool) {
+        self.renderer.set_playback_state(playing, reactive);
+    }
+
     pub fn hit_test_lyrics_line(&mut self, x: f32, y: f32, current_time_ms: i32) -> i32 {
         self.renderer.hit_test_line(x, y, current_time_ms)
     }

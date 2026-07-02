@@ -17,7 +17,7 @@ mod scroll;
 mod text_utils;
 
 use draw::{
-    accompaniment_visibility, apply_vertical_fade_skia, draw_breathing_dots_skia,
+    accompaniment_visibility, apply_vertical_fade_skia_band, draw_breathing_dots_skia,
     draw_prepared_text_skia, interlude_visibility, make_interlude_slot, rgba_from_argb,
 };
 use font_fallback::{cjk_family_priority, new_font_system};
@@ -152,6 +152,11 @@ pub struct LyricsScene {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub locale: Option<String>,
+    /// Vertical content insets (px) for the lyrics band on a full-bleed surface.
+    #[serde(default, rename = "contentTop")]
+    pub content_top: Option<f32>,
+    #[serde(default, rename = "contentBottom")]
+    pub content_bottom: Option<f32>,
     #[serde(default)]
     pub style: SceneStyleInput,
     #[serde(default)]
@@ -511,6 +516,24 @@ pub struct LyricsRenderer {
     manual_scroll_blur_release: f32,
     locale: String,
     scene: Option<PreparedScene>,
+    /// GPU mesh-gradient background, built from the current album art. `None` until
+    /// art is supplied via [`set_background_art`]; drawn behind the lyrics.
+    mesh_gradient: Option<crate::mesh::MeshGradient>,
+    /// When true the engine owns the whole (full-bleed) surface: it clears to black
+    /// and paints the mesh background before the lyrics. When false it behaves as a
+    /// transparent overlay (legacy).
+    background_enabled: bool,
+    /// Whether the background reacts to audio loudness (paces time + amplitude).
+    background_reactive: bool,
+    /// Gates the background's time flow — frozen while playback is paused.
+    playback_active: bool,
+    /// Animation clock for the background (advanced by real frame dt, paced by
+    /// loudness while playing) and the smoothed loudness driving the reactivity.
+    mesh_time: f32,
+    mesh_smoothed_loudness: f32,
+    last_mesh_frame_at: Option<Instant>,
+    /// Global fade-in for the background as new art becomes ready.
+    background_alpha: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -610,6 +633,13 @@ struct SceneConfig {
     accompaniment_translation_gap: f32,
     padding_x: f32,
     padding_y: f32,
+    // Vertical content insets (px) for the lyrics band when the engine owns the
+    // whole (full-bleed) surface: `content_top` is the status-bar + top-bar height,
+    // `content_bottom` the navigation-bar height. Lyrics are clipped and edge-faded
+    // to `[content_top, height - content_bottom]`. Both default 0 (legacy behavior:
+    // the lyrics fill the surface, as when Compose sized the view to the band).
+    content_top: f32,
+    content_bottom: f32,
     keep_alive: f32,
     text_color: u32,
     show_translation: bool,
@@ -894,7 +924,81 @@ impl LyricsRenderer {
             manual_scroll_blur_release: 0.0,
             locale: "en-US".to_string(),
             scene: None,
+            mesh_gradient: None,
+            background_enabled: false,
+            background_reactive: false,
+            playback_active: false,
+            mesh_time: 0.0,
+            mesh_smoothed_loudness: 0.0,
+            last_mesh_frame_at: None,
+            background_alpha: 0.0,
         }
+    }
+
+    /// Install the album artwork for the GPU mesh-gradient background. `pixels` is
+    /// ARGB_8888 (`0xAARRGGBB`), row-major `width`×`height`. Enables the full-bleed
+    /// background mode. `seed` keeps a song's control-point layout stable.
+    pub fn set_background_art(&mut self, pixels: &[u32], width: usize, height: usize, seed: u32) {
+        self.mesh_gradient = crate::mesh::MeshGradient::new(pixels, width, height, seed);
+        self.background_enabled = true;
+        // Fade the new artwork in.
+        self.background_alpha = 0.0;
+    }
+
+    /// Turn the background off (revert to transparent-overlay behavior).
+    pub fn clear_background(&mut self) {
+        self.mesh_gradient = None;
+        self.background_enabled = false;
+    }
+
+    /// Update playback state driving the background: `playing` gates the time flow,
+    /// `reactive` enables loudness-driven pacing/amplitude.
+    pub fn set_playback_state(&mut self, playing: bool, reactive: bool) {
+        self.playback_active = playing;
+        self.background_reactive = reactive;
+    }
+
+    /// Draw the opaque mesh-gradient background across the whole surface and advance
+    /// its (loudness-paced) animation clock. Returns whether the background is still
+    /// animating (so the render loop keeps ticking). No-op unless `background_enabled`.
+    fn draw_background(&mut self, canvas: &skia_safe::Canvas, width: f32, height: f32) -> bool {
+        if !self.background_enabled {
+            return false;
+        }
+        canvas.clear(skia_safe::Color::BLACK);
+
+        let now = Instant::now();
+        let dt = self
+            .last_mesh_frame_at
+            .map(|last| (now - last).as_secs_f32())
+            .unwrap_or(0.0)
+            .clamp(0.0, 0.1);
+        self.last_mesh_frame_at = Some(now);
+
+        // Reference pacing (MeshGradientSurface): smooth the loudness, then map to a
+        // time speed multiplier + amplitude. Louder audio speeds the flow and pulls
+        // the amplitude down (zooming the texture out).
+        let raw_loudness = (crate::audio::current_metrics().loudness / 6.0).clamp(0.0, 1.0);
+        self.mesh_smoothed_loudness += (raw_loudness - self.mesh_smoothed_loudness) * 0.1;
+        let (amp, speed) = if self.background_reactive {
+            (
+                0.2 - self.mesh_smoothed_loudness / 2.0,
+                0.2 + self.mesh_smoothed_loudness,
+            )
+        } else {
+            (0.0, 0.2)
+        };
+        if self.playback_active {
+            self.mesh_time += dt * speed;
+        }
+        // Ease the artwork in.
+        self.background_alpha = (self.background_alpha + dt * 2.0).min(1.0);
+
+        if let Some(mesh) = &self.mesh_gradient {
+            mesh.draw(canvas, width, height, self.mesh_time, amp, self.background_alpha);
+        }
+        // Keep animating while playing (frozen — and parkable — when paused).
+        self.playback_active
     }
 
     fn should_log_render_debug(&mut self, current_time_ms: i32) -> bool {
@@ -980,7 +1084,10 @@ impl LyricsRenderer {
             target_layouts,
             auto_scroll_y,
             max_scroll_y,
+            width,
             height,
+            content_top,
+            content_bottom,
             keep_alive,
             base_color,
             focus_end,
@@ -998,12 +1105,20 @@ impl LyricsRenderer {
                 target_layouts,
                 auto_scroll_y,
                 max_scroll_y,
+                scene.config.width.max(DEFAULT_WIDTH) as f32,
                 scene.config.height.max(DEFAULT_HEIGHT),
+                scene.config.content_top,
+                scene.config.content_bottom,
                 scene.config.keep_alive,
                 rgba_from_argb(scene.config.text_color),
                 focus_end,
             )
         };
+
+        // Bottom layer: the opaque GPU mesh-gradient background (no-op unless the
+        // engine owns the full surface). Draws before any lyrics and advances its
+        // own loudness-paced animation clock.
+        let background_animating = self.draw_background(canvas, width, height as f32);
 
         // A seek (the user tapped a lyric, or scrubbed) is a discontinuous jump
         // in playback time. If it lands while a manual/plain-list view is still
@@ -1082,6 +1197,27 @@ impl LyricsRenderer {
             .filter(|(_, line)| line.cluster_role == ClusterRole::Main)
             .map(|(index, line)| (line.cluster_index, index))
             .collect();
+
+        // Confine the lyrics to the content band on a full-bleed surface so they
+        // never draw under the top bar or navigation bar. When the engine owns an
+        // opaque background, the lyrics are ALSO isolated into a layer so the edge
+        // fade (`DstIn`, which scales framebuffer alpha) dissolves only the lyrics
+        // and never darkens the background beneath them. Both a no-op in the legacy
+        // transparent-overlay mode (insets 0, background disabled).
+        let band_bottom = height as f32 - content_bottom;
+        let inset_lyrics = content_top > 0.0 || content_bottom > 0.0;
+        let isolate_lyrics = self.background_enabled;
+        if isolate_lyrics {
+            let bounds = skia_safe::Rect::new(0.0, content_top, width, band_bottom);
+            canvas.save_layer(&skia_safe::canvas::SaveLayerRec::default().bounds(&bounds));
+        } else if inset_lyrics {
+            canvas.save();
+            canvas.clip_rect(
+                skia_safe::Rect::new(0.0, content_top, width, band_bottom),
+                skia_safe::ClipOp::Intersect,
+                true,
+            );
+        }
 
         for (line_index, line) in scene.lines.iter().enumerate() {
             let Some(dynamic_layout) = dynamic_layouts.get(line_index) else {
@@ -1295,16 +1431,24 @@ impl LyricsRenderer {
             }
         }
 
-        // Fade the top and bottom edges so lines dissolve as they scroll off. The
-        // top fade stays inside the keep-alive gap so the active line (anchored at
-        // keep_alive from the top) is never touched.
-        apply_vertical_fade_skia(
+        // Fade the top and bottom edges of the content band so lines dissolve as
+        // they scroll off. The top fade stays inside the keep-alive gap so the
+        // active line (anchored at keep_alive from the top) is never touched. The
+        // band collapses to the whole surface when no insets are set.
+        let band_height = (band_bottom - content_top).max(1.0);
+        let inner_keep_alive = (keep_alive - content_top).max(0.0);
+        apply_vertical_fade_skia_band(
             canvas,
-            scene.config.width as f32,
-            height as f32,
-            keep_alive * 0.7,
-            height as f32 * 0.12,
+            width,
+            content_top,
+            band_bottom,
+            inner_keep_alive * 0.7,
+            band_height * 0.12,
         );
+
+        if isolate_lyrics || inset_lyrics {
+            canvas.restore();
+        }
 
         if should_log_debug {
             frame_stats.visible_font_ids = visible_font_ids.len();
@@ -1339,7 +1483,7 @@ impl LyricsRenderer {
             }
         }
 
-        if self.layout_animation_active || self.manual_scroll_active {
+        if self.layout_animation_active || self.manual_scroll_active || background_animating {
             1
         } else {
             0
@@ -1734,6 +1878,8 @@ mod tests {
             accompaniment_translation_gap: ROW_GAP,
             padding_x: 16.0,
             padding_y: 8.0,
+            content_top: 0.0,
+            content_bottom: 0.0,
             keep_alive: 32.0,
             text_color: 0xffff_ffff,
             show_translation: true,

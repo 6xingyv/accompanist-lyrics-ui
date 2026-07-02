@@ -65,6 +65,21 @@ class RustSkiaLyricsView @JvmOverloads constructor(
     @Volatile
     private var engineClosed = false
 
+    // --- Full-bleed mesh-gradient background state ----------------------------
+    // Held here (not just in the engine) because configureFonts recreates the
+    // native engine (nativeInit), dropping the renderer's background — so it must
+    // be re-applied after every font (re)configuration and rebind.
+    private var backgroundPixels: IntArray? = null
+    private var backgroundWidth = 0
+    private var backgroundHeight = 0
+    private var backgroundSeed = 0
+    private var backgroundReactive = false
+    private var isPlaying = false
+    // Vertical content insets (view px) for the lyrics band on the full-bleed
+    // surface: `contentTopPx` = status bar + top bar, `contentBottomPx` = nav bar.
+    private var contentTopPx = 0f
+    private var contentBottomPx = 0f
+
     // --- Dedicated render thread ---------------------------------------------
     // The EGL context is created, used (draw + blocking eglSwapBuffers), and
     // destroyed exclusively on this thread, so the main/UI thread never blocks on
@@ -178,6 +193,64 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         resetManualScroll()
         sceneDirty = true
         rebuildSceneAndRender()
+    }
+
+    /**
+     * Install album artwork for the GPU mesh-gradient background (enabling the
+     * full-bleed background). Pass `null` to disable it. Deduped by a content hash
+     * so repeated calls with the same artwork don't rebuild the mesh.
+     */
+    fun setBackgroundArt(pixels: IntArray?, width: Int, height: Int) {
+        if (pixels == null || width <= 0 || height <= 0) {
+            if (backgroundPixels != null) {
+                backgroundPixels = null
+                if (!engineClosed) engine.clearBackground()
+                requestRender()
+            }
+            return
+        }
+        val seed = pixels.contentHashCode()
+        if (backgroundPixels != null && seed == backgroundSeed &&
+            width == backgroundWidth && height == backgroundHeight
+        ) {
+            return
+        }
+        backgroundPixels = pixels
+        backgroundWidth = width
+        backgroundHeight = height
+        backgroundSeed = seed
+        applyBackgroundArt()
+        requestRender()
+    }
+
+    /**
+     * Vertical content insets (view px) for the lyrics band: `topPx` = status bar +
+     * top bar, `bottomPx` = navigation bar. Lyrics are clipped and edge-faded to the
+     * band; the background still fills the whole surface.
+     */
+    fun setContentInsets(topPx: Float, bottomPx: Float) {
+        if (contentTopPx == topPx && contentBottomPx == bottomPx) return
+        contentTopPx = topPx
+        contentBottomPx = bottomPx
+        sceneDirty = true
+        rebuildSceneAndRender()
+    }
+
+    /** Drive the background: `playing` gates the time flow, `reactive` the audio reactivity. */
+    fun setPlaybackState(playing: Boolean, reactive: Boolean) {
+        if (isPlaying == playing && backgroundReactive == reactive) return
+        isPlaying = playing
+        backgroundReactive = reactive
+        if (!engineClosed) engine.setPlaybackState(playing, reactive)
+        requestRender()
+    }
+
+    /** (Re)apply the held background art + playback state to the native engine. */
+    private fun applyBackgroundArt() {
+        val pixels = backgroundPixels ?: return
+        if (engineClosed) return
+        engine.setBackgroundArt(pixels, backgroundWidth, backgroundHeight, backgroundSeed)
+        engine.setPlaybackState(isPlaying, backgroundReactive)
     }
 
     /**
@@ -522,7 +595,9 @@ class RustSkiaLyricsView @JvmOverloads constructor(
                 sceneLyrics.toSceneJson(
                     sceneWidth,
                     sceneHeight,
-                    sceneStyle.scaled(renderScale)
+                    sceneStyle.scaled(renderScale),
+                    contentTopPx * renderScale,
+                    contentBottomPx * renderScale,
                 )
             )
             sceneDirty = false
@@ -552,6 +627,9 @@ class RustSkiaLyricsView @JvmOverloads constructor(
             )
         )
         engineClosed = false
+        // configureFonts recreates the native engine (nativeInit), which drops the
+        // renderer's mesh-gradient background and playback state — re-apply them.
+        applyBackgroundArt()
         resetManualScroll()
         // Mark dirty BEFORE (re)binding so bindRenderSurface's ensureScene rebuilds
         // with the new font. configureFonts may have recreated the engine handle,

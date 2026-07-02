@@ -22,15 +22,19 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.captionBarPadding
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -46,6 +50,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -54,14 +59,17 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextMotion
 import androidx.compose.ui.unit.dp
@@ -140,13 +148,11 @@ fun PlayerScreen(
                 ShareScreen(it, shareViewModel = shareViewModel)
             }
         ) {
-            FlowingLightBackground(
-                state = uiState.backgroundState,
-                modifier = Modifier.fillMaxSize()
-            )
-
             when (LocalWindowLayoutType.current) {
                 WindowLayoutType.Phone -> {
+                    // Phone: a single full-bleed GPU surface renders the mesh-gradient
+                    // background AND the lyrics (audio-reactive); the top bar overlays
+                    // it. No separate Compose background layer.
                     MobilePlayerScreen(
                         currentPositionProvider, // 3. 传入 Provider
                         playerViewModel,
@@ -156,6 +162,10 @@ fun PlayerScreen(
                 }
 
                 else -> {
+                    FlowingLightBackground(
+                        state = uiState.backgroundState,
+                        modifier = Modifier.fillMaxSize()
+                    )
                     PadPlayerScreen(
                         currentPositionProvider, // 3. 传入 Provider
                         playerViewModel,
@@ -184,75 +194,89 @@ fun PlayerScreen(
 }
 
 @Composable
-fun MobilePlayerScreen(
+fun BoxScope.MobilePlayerScreen(
     animatedPosition: () -> Int,
     playerViewModel: PlayerViewModel,
     shareViewModel: ShareViewModel,
     uiState: PlayerUiState
 ) {
-    Column {
+    val density = LocalDensity.current
+    // Measured top-bar height → the lyrics band's top inset; the nav-bar inset is
+    // its bottom. Both are handed to the full-bleed surface so the lyrics stay clear
+    // of the top bar and navigation bar while the mesh background fills everything.
+    var topBarHeightPx by remember { mutableIntStateOf(0) }
+    val navBottomPx = WindowInsets.navigationBars.getBottom(density)
+
+    val cover =
+        (uiState.backgroundState.bitmap ?: imageResource(Res.drawable.empty)).asAndroidBitmap()
+    PlayerLyrics(
+        lyrics = uiState.lyrics,
+        currentPosition = animatedPosition,
+        onSeekTo = { playerViewModel.seekTo(it) },
+        onShare = { line ->
+            uiState.lyrics?.let { lyrics ->
+                playerViewModel.onShareRequested()
+                val context = ShareContext(
+                    lyrics = lyrics.copy(lines = lyrics.lines.map { line ->
+                        when (line) {
+                            is KaraokeLine -> line
+                            is SyncedLine -> line.toKaraokeLine()
+                            else -> null
+                        }
+                    }.filterNotNull()),
+                    initialLine = line,
+                    backgroundState = uiState.backgroundState,
+                    title = uiState.currentMusicItem?.label ?: "Unknown Title",
+                    artist = uiState.currentMusicItem?.artist ?: "Unknown",
+                    cover = cover
+                )
+                shareViewModel.prepareForSharing(context)
+                playerViewModel.onShareRequested()
+            }
+        },
+        backgroundArtwork = uiState.backgroundState.bitmap,
+        contentPadding = PaddingValues(
+            top = with(density) { topBarHeightPx.toDp() },
+            bottom = with(density) { navBottomPx.toDp() }
+        ),
+        isPlaying = uiState.playbackState.isPlaying,
+        backgroundReactive = true,
+        modifier = Modifier.fillMaxSize()
+    )
+
+    Row(
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .align(Alignment.TopStart)
+            .onGloballyPositioned { topBarHeightPx = it.size.height }
+            .captionBarPadding()
+            .statusBarsPadding()
+            .padding(horizontal = 28.dp)
+            .padding(top = 28.dp)
+            .fillMaxWidth()
+    ) {
         Row(
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier
-                .captionBarPadding()
-                .statusBarsPadding()
-                .padding(horizontal = 28.dp)
-                .padding(top = 28.dp)
-                .fillMaxWidth()
+            Modifier.weight(1f),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Row(
-                Modifier.weight(1f),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                uiState.backgroundState.bitmap?.let { bitmap ->
-                    Image(
-                        bitmap,
-                        null,
-                        Modifier
-                            .clip(ContinuousRoundedRectangle(14.dp))
-                            .size(68.dp)
-                    )
-                }
-                PlayerMetadata(
-                    uiState.currentMusicItem?.label ?: "Unknown Title",
-                    uiState.currentMusicItem?.artist ?: "Unknown"
+            uiState.backgroundState.bitmap?.let { bitmap ->
+                Image(
+                    bitmap,
+                    null,
+                    Modifier
+                        .clip(ContinuousRoundedRectangle(14.dp))
+                        .size(68.dp)
                 )
             }
-            Spacer(Modifier.width(8.dp))
-            PlayerControls(onOpenSongSelection = { playerViewModel.onOpenSongSelection() })
+            PlayerMetadata(
+                uiState.currentMusicItem?.label ?: "Unknown Title",
+                uiState.currentMusicItem?.artist ?: "Unknown"
+            )
         }
-
-        val cover =
-            (uiState.backgroundState.bitmap ?: imageResource(Res.drawable.empty)).asAndroidBitmap()
-        PlayerLyrics(
-            lyrics = uiState.lyrics,
-            currentPosition = animatedPosition,
-            onSeekTo = { playerViewModel.seekTo(it) },
-            onShare = { line ->
-                uiState.lyrics?.let { lyrics ->
-                    playerViewModel.onShareRequested()
-                    val context = ShareContext(
-                        lyrics = lyrics.copy(lines = lyrics.lines.map { line ->
-                            when (line) {
-                                is KaraokeLine -> line
-                                is SyncedLine -> line.toKaraokeLine()
-                                else -> null
-                            }
-                        }.filterNotNull()),
-                        initialLine = line,
-                        backgroundState = uiState.backgroundState,
-                        title = uiState.currentMusicItem?.label ?: "Unknown Title",
-                        artist = uiState.currentMusicItem?.artist ?: "Unknown",
-                        cover = cover
-                    )
-                    shareViewModel.prepareForSharing(context)
-                    playerViewModel.onShareRequested()
-                }
-            },
-            modifier = Modifier.padding(horizontal = 12.dp)
-        )
+        Spacer(Modifier.width(8.dp))
+        PlayerControls(onOpenSongSelection = { playerViewModel.onOpenSongSelection() })
     }
 }
 
@@ -608,9 +632,25 @@ fun PlayerLyrics(
     currentPosition: () -> Int,
     onSeekTo: (Int) -> Unit,
     onShare: (KaraokeLine) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    backgroundArtwork: ImageBitmap? = null,
+    contentPadding: PaddingValues = PaddingValues(0.dp),
+    isPlaying: Boolean = true,
+    backgroundReactive: Boolean = false,
 ) {
     if (lyrics == null) return
+
+    // In full-bleed mode the surface renders (and composites) its own background, so
+    // it must NOT sit in an additive Compose layer. The overlay case (pad, over the
+    // blurred background) keeps the additive-plus glow.
+    val lyricsModifier = if (backgroundArtwork != null) {
+        modifier
+    } else {
+        modifier.graphicsLayer {
+            compositingStrategy = CompositingStrategy.Offscreen
+            blendMode = BlendMode.Plus
+        }
+    }
 
     KaraokeLyricsView(
         lyrics = lyrics,
@@ -628,10 +668,11 @@ fun PlayerLyrics(
                 onShare(it)
             }
         },
-        modifier = modifier.graphicsLayer {
-            compositingStrategy = CompositingStrategy.Offscreen
-            blendMode = BlendMode.Plus
-        },
-        fontResource = Res.font.sf_pro
+        modifier = lyricsModifier,
+        fontResource = Res.font.sf_pro,
+        backgroundArtwork = backgroundArtwork,
+        contentPadding = contentPadding,
+        isPlaying = isPlaying,
+        backgroundReactive = backgroundReactive,
     )
 }
