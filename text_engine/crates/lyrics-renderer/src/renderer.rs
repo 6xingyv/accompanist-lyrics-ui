@@ -3,7 +3,7 @@ use cosmic_text::{
     Weight, Wrap,
 };
 use serde::{Deserialize, Serialize};
-use skia_safe::{font_style, Data, FontMgr, FontStyle, Typeface};
+use skia_safe::{font_style, Data, FontMgr, FontStyle, Path, Typeface};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -142,6 +142,9 @@ const MAX_SCROLL_GROUP_ROWS: usize = 3;
 // both sides), so the two singers' lines occupy opposite 80% bands that overlap
 // in the middle. Solo songs use the full width.
 const DUET_LINE_WIDTH_RATIO: f32 = 0.85;
+/// The top-bar overflow glyph is drawn in a 28dp circle, but its interactive
+/// target follows the conventional 48dp square touch/click area.
+const TOP_BAR_BUTTON_HIT_SCALE: f32 = 24.0 / 14.0;
 
 // Wire contract with the Kotlin data layer. The grouped shape and camelCase field
 // names are kept identical to `SceneStyle`/`LyricsSceneWire` in
@@ -643,7 +646,8 @@ struct PreparedTopBar {
     thumb_left: f32,
     thumb_top: f32,
     thumb_size: f32,
-    thumb_radius: f32,
+    /// Capsule G2 clip, resolved once with the scene instead of rebuilt per frame.
+    thumb_clip: Path,
     text_left: f32,
     text_max_width: f32,
     title_top: f32,
@@ -1644,7 +1648,7 @@ impl LyricsRenderer {
         }
     }
 
-    /// Whether `(x, y)` (render px) falls on the top bar's ⋯ button.
+    /// Whether `(x, y)` (render px) falls on the top bar's 48dp ⋯ target.
     pub fn hit_test_top_bar_button(&self, x: f32, y: f32) -> bool {
         let Some(scene) = &self.scene else {
             return false;
@@ -1652,9 +1656,20 @@ impl LyricsRenderer {
         let Some(bar) = &scene.top_bar else {
             return false;
         };
-        let dx = x - bar.button_cx;
-        let dy = y - bar.button_cy;
-        dx * dx + dy * dy <= bar.button_radius * bar.button_radius
+        let half_extent = bar.button_radius * TOP_BAR_BUTTON_HIT_SCALE;
+        (x - bar.button_cx).abs() <= half_extent && (y - bar.button_cy).abs() <= half_extent
+    }
+
+    /// Whether a point belongs to the reserved player chrome above the lyrics.
+    pub fn hit_test_top_bar_region(&self, x: f32, y: f32) -> bool {
+        let Some(scene) = &self.scene else {
+            return false;
+        };
+        scene.top_bar.is_some()
+            && x >= 0.0
+            && x <= scene.config.width as f32
+            && y >= 0.0
+            && y < scene.config.content_top
     }
 
     pub fn hit_test_line(&mut self, x: f32, y: f32, current_time_ms: i32) -> i32 {
@@ -1664,6 +1679,16 @@ impl LyricsRenderer {
         };
 
         if x < 0.0 || y < 0.0 || x > scene.config.width as f32 || y > scene.config.height as f32 {
+            self.pending_lyric_click_seek = None;
+            return -1;
+        }
+        // `content_top` reserves the full player top bar (including its margins),
+        // while `content_bottom` reserves the bottom system/chrome inset. Lines
+        // may animate underneath those clipped bands, but they must never remain
+        // clickable there.
+        if y < scene.config.content_top
+            || y > scene.config.height as f32 - scene.config.content_bottom
+        {
             self.pending_lyric_click_seek = None;
             return -1;
         }
@@ -2129,6 +2154,28 @@ mod tests {
         }
     }
 
+    fn test_top_bar() -> PreparedTopBar {
+        PreparedTopBar {
+            thumb_left: 20.0,
+            thumb_top: 20.0,
+            thumb_size: 68.0,
+            thumb_clip: crate::capsule::continuous_rounded_rect(
+                skia_safe::Rect::new(20.0, 20.0, 88.0, 88.0),
+                14.0,
+            ),
+            text_left: 96.0,
+            text_max_width: 160.0,
+            title_top: 30.0,
+            artist_top: 52.0,
+            artist_alpha: 0.4,
+            button_cx: 300.0,
+            button_cy: 54.0,
+            button_radius: 14.0,
+            title: test_text(20.0),
+            artist: test_text(18.0),
+        }
+    }
+
     fn indexed_line(index: usize, start: i32, end: i32, height: f32) -> PreparedLine {
         let mut line = test_line(ClusterRole::Standalone, start, end, height);
         line.source_index = index;
@@ -2394,6 +2441,46 @@ mod tests {
     }
 
     #[test]
+    fn hit_test_excludes_player_top_bar_even_if_a_line_animates_below_it() {
+        let mut renderer = LyricsRenderer::new();
+        let mut config = test_config();
+        config.content_top = 100.0;
+        renderer.scene = Some(PreparedScene {
+            config,
+            lines: vec![test_line(ClusterRole::Standalone, 1_000, 2_000, 50.0)],
+            content_height: 0.0,
+            top_bar: Some(test_top_bar()),
+        });
+        renderer.frame_layouts = vec![DynamicLineLayout {
+            top: 40.0,
+            height: 50.0,
+            text_visibility: 1.0,
+            interlude_visibility: 0.0,
+        }];
+
+        assert!(renderer.hit_test_top_bar_region(20.0, 60.0));
+        assert_eq!(renderer.hit_test_line(20.0, 60.0, 1_000), -1);
+        assert!(renderer.pending_lyric_click_seek.is_none());
+    }
+
+    #[test]
+    fn top_bar_button_uses_a_48px_square_click_target() {
+        let mut config = test_config();
+        config.width = 400;
+        config.content_top = 100.0;
+        let mut renderer = LyricsRenderer::new();
+        renderer.scene = Some(PreparedScene {
+            config,
+            lines: vec![],
+            content_height: 0.0,
+            top_bar: Some(test_top_bar()),
+        });
+
+        assert!(renderer.hit_test_top_bar_button(323.0, 77.0));
+        assert!(!renderer.hit_test_top_bar_button(325.0, 79.0));
+    }
+
+    #[test]
     fn karaoke_right_alignment_allows_negative_start_for_long_rows() {
         let renderer = LyricsRenderer::new();
         let mut syllables = vec![PreparedSyllable {
@@ -2500,6 +2587,57 @@ mod tests {
         for (index, row) in text.rows.iter().enumerate() {
             assert!(row.width <= 150.5, "row overflowed: {row:?}");
             assert!((row.y - index as f32 * 28.0).abs() < 0.01);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn desktop_cjk_scene_uses_a_ui_sans_fallback() {
+        let mut renderer = LyricsRenderer::new();
+        renderer.load_system_fonts();
+        let json = r#"{
+            "width": 420,
+            "height": 220,
+            "style": {
+                "blur": { "enabled": false },
+                "showTranslation": false,
+                "showPhonetic": false
+            },
+            "lines": [{
+                "kind": "synced",
+                "sourceIndex": 0,
+                "clusterIndex": 0,
+                "clusterRole": "standalone",
+                "start": 0,
+                "end": 4000,
+                "content": "中文歌词测试",
+                "translation": null
+            }]
+        }"#;
+        let scene: LyricsScene = serde_json::from_str(json).unwrap();
+        let prepared = renderer.prepare_scene(scene).unwrap();
+        let PreparedLineKind::Synced { text } = &prepared.lines[0].kind else {
+            panic!("expected synced line");
+        };
+        let font_ids = text
+            .rows
+            .iter()
+            .flat_map(|row| row.glyphs.iter())
+            .map(|glyph| glyph.physical.cache_key.font_id)
+            .collect::<Vec<_>>();
+        assert!(!font_ids.is_empty(), "CJK text produced no glyphs");
+        for id in font_ids {
+            let face = renderer.font_system.db().face(id).expect("font face");
+            let family = face
+                .families
+                .first()
+                .map(|(name, _)| name.as_str())
+                .unwrap_or(face.post_script_name.as_str())
+                .to_ascii_lowercase();
+            assert!(
+                !family.contains("serif") && !family.contains("song"),
+                "desktop CJK unexpectedly resolved to {family}"
+            );
         }
     }
 

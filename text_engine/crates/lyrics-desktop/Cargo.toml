@@ -25,6 +25,7 @@ raw-window-handle = "0.6"
 serde_json = "1.0"
 skia-safe = { version = "0.99.0", features = ["gl"] }
 tao = "0.35.3"
+unicode-segmentation = "1.12"
 
 [target.'cfg(windows)'.dependencies]
 sysinfo = "0.33"

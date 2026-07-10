@@ -19,7 +19,7 @@
         android:name=".AccompanistApp"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:enableOnBackInvokedCallback="true"
-        android:supportsRtl="false"
+        android:supportsRtl="true"
         android:theme="@style/Theme.Accompanist">
         <service
             android:name=".service.PlaybackService"

@@ -447,11 +447,17 @@ impl LyricsRenderer {
         );
         self.text_attrs = saved;
 
+        let thumb_rect = skia_safe::Rect::new(
+            input.thumb_left,
+            input.thumb_top,
+            input.thumb_left + input.thumb_size,
+            input.thumb_top + input.thumb_size,
+        );
         Some(PreparedTopBar {
             thumb_left: input.thumb_left,
             thumb_top: input.thumb_top,
             thumb_size: input.thumb_size,
-            thumb_radius: input.thumb_radius,
+            thumb_clip: crate::capsule::continuous_rounded_rect(thumb_rect, input.thumb_radius),
             text_left: input.text_left,
             text_max_width: input.text_max_width,
             title_top: input.title_top,

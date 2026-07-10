@@ -3,6 +3,7 @@ extern crate log;
 
 mod atlas;
 pub mod audio;
+mod capsule;
 mod core;
 mod font;
 mod mesh;

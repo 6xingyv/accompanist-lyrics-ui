@@ -2,41 +2,42 @@ use cosmic_text::{fontdb, Fallback, FontSystem};
 use unicode_script::Script;
 
 const CJK_FALLBACK_SC: &[&str] = &[
+    // Keep the desktop/default tower sans-serif.  Windows ships the UI faces
+    // below, but cosmic-text does not know that "sans-serif" should resolve to
+    // them and used to skip straight to an installed Source Han *Serif* face.
+    "Microsoft YaHei UI",
+    "Microsoft YaHei",
+    "DengXian",
+    "SimHei",
     "Noto Sans CJK SC",
-    "Noto Serif CJK SC",
     "Noto Sans SC",
-    "Noto Serif SC",
     "Source Han Sans SC",
-    "Source Han Serif SC",
     "Droid Sans Fallback",
 ];
 const CJK_FALLBACK_TC: &[&str] = &[
+    "Microsoft JhengHei UI",
+    "Microsoft JhengHei",
     "Noto Sans CJK TC",
-    "Noto Serif CJK TC",
     "Noto Sans CJK HK",
-    "Noto Serif CJK HK",
     "Noto Sans TC",
-    "Noto Serif TC",
     "Source Han Sans TC",
-    "Source Han Serif TC",
     "Droid Sans Fallback",
 ];
 const CJK_FALLBACK_JP: &[&str] = &[
+    "Yu Gothic UI",
+    "Yu Gothic",
+    "Meiryo UI",
+    "Meiryo",
     "Noto Sans CJK JP",
-    "Noto Serif CJK JP",
     "Noto Sans JP",
-    "Noto Serif JP",
     "Source Han Sans JP",
-    "Source Han Serif JP",
     "Droid Sans Fallback",
 ];
 const CJK_FALLBACK_KR: &[&str] = &[
+    "Malgun Gothic",
     "Noto Sans CJK KR",
-    "Noto Serif CJK KR",
     "Noto Sans KR",
-    "Noto Serif KR",
     "Source Han Sans KR",
-    "Source Han Serif KR",
     "Droid Sans Fallback",
 ];
 
@@ -93,49 +94,80 @@ pub(super) fn cjk_family_priority(family_name: &str, locale: &str) -> usize {
     let is_jp = family_contains_any(&family, &["cjk jp", "sans jp", "serif jp", "japanese"]);
     let is_kr = family_contains_any(&family, &["cjk kr", "sans kr", "serif kr", "korean"]);
 
-    if locale.starts_with("ja") {
-        return match (is_jp, is_sc, is_tc || is_hk, is_kr) {
+    let regional_priority = if locale.starts_with("ja") {
+        match (is_jp, is_sc, is_tc || is_hk, is_kr) {
             (true, _, _, _) => 0,
             (_, true, _, _) => 1,
             (_, _, true, _) => 2,
             (_, _, _, true) => 3,
             _ => 4,
-        };
-    }
-
-    if locale.starts_with("ko") {
-        return match (is_kr, is_sc, is_tc || is_hk, is_jp) {
+        }
+    } else if locale.starts_with("ko") {
+        match (is_kr, is_sc, is_tc || is_hk, is_jp) {
             (true, _, _, _) => 0,
             (_, true, _, _) => 1,
             (_, _, true, _) => 2,
             (_, _, _, true) => 3,
             _ => 4,
-        };
-    }
-
-    if locale.starts_with("zh-hant")
+        }
+    } else if locale.starts_with("zh-hant")
         || locale.starts_with("zh-tw")
         || locale.starts_with("zh-hk")
         || locale.starts_with("zh-mo")
     {
-        return match (is_tc || is_hk, is_sc, is_jp, is_kr) {
+        match (is_tc || is_hk, is_sc, is_jp, is_kr) {
             (true, _, _, _) => 0,
             (_, true, _, _) => 1,
             (_, _, true, _) => 2,
             (_, _, _, true) => 3,
             _ => 4,
-        };
-    }
+        }
+    } else {
+        match (is_sc, is_tc || is_hk, is_jp, is_kr) {
+            (true, _, _, _) => 0,
+            (_, true, _, _) => 1,
+            (_, _, true, _) => 2,
+            (_, _, _, true) => 3,
+            _ => 4,
+        }
+    };
 
-    match (is_sc, is_tc || is_hk, is_jp, is_kr) {
-        (true, _, _, _) => 0,
-        (_, true, _, _) => 1,
-        (_, _, true, _) => 2,
-        (_, _, _, true) => 3,
-        _ => 4,
-    }
+    // Within the right regional variant, a UI/sans face must outrank a serif
+    // face. The previous score treated "Source Han Sans SC" and
+    // "Source Han Serif SC" as identical and let insertion order decide.
+    let serif_penalty = usize::from(family.contains("serif") || family.contains("song"));
+    regional_priority * 2 + serif_penalty
 }
 
 fn family_contains_any(family: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| family.contains(needle))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn desktop_cjk_fallbacks_prefer_windows_ui_sans_faces() {
+        assert_eq!(cjk_fallback_for_locale("zh-CN")[0], "Microsoft YaHei UI");
+        assert_eq!(cjk_fallback_for_locale("zh-TW")[0], "Microsoft JhengHei UI");
+        assert_eq!(cjk_fallback_for_locale("ja-JP")[0], "Yu Gothic UI");
+        assert_eq!(cjk_fallback_for_locale("ko-KR")[0], "Malgun Gothic");
+        for family in CJK_FALLBACK_SC
+            .iter()
+            .chain(CJK_FALLBACK_TC)
+            .chain(CJK_FALLBACK_JP)
+            .chain(CJK_FALLBACK_KR)
+        {
+            assert!(!family.to_ascii_lowercase().contains("serif"));
+        }
+    }
+
+    #[test]
+    fn cjk_priority_prefers_sans_over_serif_in_the_same_region() {
+        assert!(
+            cjk_family_priority("Source Han Sans SC", "zh-CN")
+                < cjk_family_priority("Source Han Serif SC", "zh-CN")
+        );
+    }
 }

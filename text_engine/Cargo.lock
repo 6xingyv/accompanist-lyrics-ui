@@ -1463,6 +1463,7 @@ dependencies = [
  "skia-safe",
  "sysinfo",
  "tao",
+ "unicode-segmentation",
  "wasapi",
  "windows 0.62.2",
 ]

@@ -6,7 +6,7 @@ use skia_safe::{
     gradient,
     image_filters::{self, CropRect},
     BlendMode, BlurStyle, Color4f, Font, FontArguments, FontHinting, FourByteTag, GlyphId, Image,
-    MaskFilter, Paint, Point, RRect, Rect, SamplingOptions, Shader, TileMode, Typeface,
+    MaskFilter, Paint, Point, Rect, SamplingOptions, Shader, TileMode, Typeface,
 };
 use std::collections::HashMap;
 use std::f32::consts::PI;
@@ -14,7 +14,7 @@ use std::f32::consts::PI;
 use super::*;
 
 /// Draw the player top bar (album thumbnail + title/artist + ⋯ button) inside the
-/// surface. The thumbnail is a normal rounded-rect image; the title/artist and
+/// surface. The thumbnail uses Capsule's G2-continuous clip; the title/artist and
 /// button are composited additively (`Plus`) — the GPU equivalent of the old
 /// Compose `graphicsLayer { blendMode = Plus }` metadata/controls.
 pub(super) fn draw_top_bar_skia(
@@ -24,7 +24,7 @@ pub(super) fn draw_top_bar_skia(
     bar: &PreparedTopBar,
     current_time_ms: i32,
 ) -> bool {
-    // Thumbnail (normal blend), clipped to a rounded rectangle.
+    // Thumbnail (normal blend), clipped to Capsule's G2-continuous rectangle.
     if let Some(image) = thumbnail {
         let dst = Rect::new(
             bar.thumb_left,
@@ -32,11 +32,10 @@ pub(super) fn draw_top_bar_skia(
             bar.thumb_left + bar.thumb_size,
             bar.thumb_top + bar.thumb_size,
         );
-        let rrect = RRect::new_rect_xy(dst, bar.thumb_radius, bar.thumb_radius);
         let mut paint = Paint::default();
         paint.set_anti_alias(true);
         canvas.save();
-        canvas.clip_rrect(rrect, None, true);
+        canvas.clip_path(&bar.thumb_clip, None, true);
         canvas.draw_image_rect_with_sampling_options(
             image,
             None,

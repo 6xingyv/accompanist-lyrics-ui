@@ -13,17 +13,18 @@ use lyrics_parser::parser::{auto_parser::AutoParser, lyrics_parser::LyricsParser
 use lyrics_parser::SceneBuildParams;
 use lyrics_renderer::TextEngine;
 use skia_safe::{
-    paint, Color, Color4f, Font, FontMgr, FontStyle, Paint, Point, Rect, TextBlob,
+    paint, Color, Color4f, Font, FontMgr, FontStyle, Paint, Point, Rect, TextBlob, Typeface,
 };
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tao::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
-use tao::event::{ElementState, Event, MouseButton, WindowEvent};
+use tao::event::{ElementState, Event, MouseButton, MouseScrollDelta, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoop};
 use tao::window::{CursorIcon, Window, WindowBuilder};
+use unicode_segmentation::UnicodeSegmentation;
 
 const DEFAULT_WIDTH: u32 = 420;
 const DEFAULT_HEIGHT: u32 = 520;
@@ -34,10 +35,21 @@ const CLOCK_SEEK_SNAP_MS: f64 = 1000.0;
 const CLOCK_RECONCILE_MS: f64 = 350.0;
 const CLOCK_MAX_RATE: f64 = 2.5;
 const CLOCK_MAX_FRAME_MS: f64 = 64.0;
+const SEEK_ACK_TOLERANCE_MS: u32 = 1_000;
+const SEEK_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+/// Manual SMTC publishers are commonly updated on a ~5 s cadence. Once the
+/// seek API accepts a request, allow three publication intervals for its
+/// timeline snapshot to catch up without overwriting the optimistic clock.
+const SEEK_ACCEPTED_ACK_TIMEOUT: Duration = Duration::from_secs(15);
+/// Difference between the Windows (1601) and Unix (1970) epochs in 100 ns ticks.
+const WINDOWS_TO_UNIX_EPOCH_TICKS: i64 = 116_444_736_000_000_000;
 
 /// Logical (density-independent) caption bar height — matches a compact Win11 title bar.
 const CAPTION_HEIGHT_DP: f32 = 32.0;
 const CAPTION_BUTTON_WIDTH_DP: f32 = 46.0;
+/// Physical travel per OS-configured wheel "line". Tao already multiplies a
+/// wheel notch by the user's Windows scroll-lines setting (normally three).
+const WHEEL_LINE_STEP_DP: f32 = 18.0;
 /// Max edge when feeding album art into the renderer (mesh only needs 32²; thumb ≤512).
 const ARTWORK_MAX_EDGE: u32 = 1024;
 
@@ -96,6 +108,7 @@ pub fn run() -> Result<(), String> {
     let config = AppConfig::from_env_args()?;
     let (playback_tx, playback_rx) = mpsc::channel();
     spawn_smtc_listener(playback_tx);
+    let (seek_tx, seek_result_rx) = spawn_smtc_seek_worker();
 
     #[cfg(windows)]
     let audio_capture = {
@@ -147,6 +160,8 @@ pub fn run() -> Result<(), String> {
     let mut app = DesktopLyricsApp::new(
         config,
         playback_rx,
+        seek_tx,
+        seek_result_rx,
         window.scale_factor() as f32,
         FrameTimingLogger::new(timing_enabled),
         always_on_top,
@@ -228,6 +243,11 @@ pub fn run() -> Result<(), String> {
                 }
                 WindowEvent::CursorLeft { .. } => {
                     app.on_cursor_left(&window_for_loop);
+                }
+                WindowEvent::MouseWheel { delta, .. } => {
+                    if app.on_mouse_wheel(delta) {
+                        window_for_loop.request_redraw();
+                    }
                 }
                 WindowEvent::MouseInput { state, button, .. } => {
                     if button == MouseButton::Left {
@@ -409,8 +429,12 @@ fn detect_display_timing(window: &Window) -> DisplayTiming {
 struct DesktopLyricsApp {
     config: AppConfig,
     playback_rx: Receiver<PlaybackSnapshot>,
+    seek_tx: Sender<SeekRequest>,
+    seek_result_rx: Receiver<SeekResult>,
     engine: TextEngine,
     clock: PlaybackClock,
+    pending_seek: Option<PendingSeek>,
+    next_seek_id: u64,
     current_track_key: Option<String>,
     current_artwork: Option<Arc<Artwork>>,
     current_lyrics: Option<lyrics_parser::SyncedLyrics>,
@@ -428,7 +452,9 @@ struct DesktopLyricsApp {
     always_on_top: bool,
     /// Last render return value — whether the engine asked for another frame.
     last_animating: bool,
-    caption_font: Option<Font>,
+    caption_font_tower: Option<CaptionFontTower>,
+    caption_text: Option<CaptionTextLayout>,
+    caption_text_key: Option<CaptionTextKey>,
     frame_timing: FrameTimingLogger,
     #[cfg(windows)]
     audio_capture: Arc<audio_capture::CaptureControl>,
@@ -441,6 +467,8 @@ impl DesktopLyricsApp {
     fn new(
         config: AppConfig,
         playback_rx: Receiver<PlaybackSnapshot>,
+        seek_tx: Sender<SeekRequest>,
+        seek_result_rx: Receiver<SeekResult>,
         density: f32,
         frame_timing: FrameTimingLogger,
         always_on_top: bool,
@@ -452,8 +480,12 @@ impl DesktopLyricsApp {
         Self {
             config,
             playback_rx,
+            seek_tx,
+            seek_result_rx,
             engine,
             clock: PlaybackClock::default(),
+            pending_seek: None,
+            next_seek_id: 0,
             current_track_key: None,
             current_artwork: None,
             current_lyrics: None,
@@ -467,7 +499,9 @@ impl DesktopLyricsApp {
             pointer_down: None,
             always_on_top,
             last_animating: true,
-            caption_font: make_caption_font(density.max(0.5)),
+            caption_font_tower: make_caption_font_tower(density.max(0.5)),
+            caption_text: None,
+            caption_text_key: None,
             frame_timing,
             #[cfg(windows)]
             audio_capture,
@@ -512,7 +546,9 @@ impl DesktopLyricsApp {
         self.last_size = size;
         self.density = density;
         if density_changed {
-            self.caption_font = make_caption_font(density);
+            self.caption_font_tower = make_caption_font_tower(density);
+            self.caption_text = None;
+            self.caption_text_key = None;
         }
         if let Some(lyrics) = self.current_lyrics.clone() {
             self.set_lyrics_scene(&lyrics);
@@ -521,21 +557,61 @@ impl DesktopLyricsApp {
 
     /// Drain SMTC snapshots. Returns true when something visual changed.
     fn drain_playback_updates(&mut self) -> bool {
+        let mut dirty = false;
+        while let Ok(result) = self.seek_result_rx.try_recv() {
+            if self
+                .pending_seek
+                .is_some_and(|pending| pending.request_id == result.request_id)
+            {
+                if result.accepted {
+                    if let Some(pending) = self.pending_seek.as_mut() {
+                        pending.api_accepted = true;
+                    }
+                } else {
+                    // The provider rejected the request. Release the optimistic
+                    // anchor immediately; the next periodic snapshot restores
+                    // the authoritative player position.
+                    self.pending_seek = None;
+                }
+                dirty = true;
+            }
+        }
+
         let mut latest = None;
         while let Ok(snapshot) = self.playback_rx.try_recv() {
             latest = Some(snapshot);
         }
 
         let Some(snapshot) = latest else {
-            return false;
+            return dirty;
         };
 
         let track_key = track_key(&snapshot);
         let track_changed = self.current_track_key.as_deref() != Some(track_key.as_str());
         let top_bar_changed = self.top_bar_title != snapshot.title
             || self.top_bar_artist != snapshot.artist;
-        self.clock
-            .publish_sample(snapshot.position_ms, snapshot.is_playing);
+        let accept_clock_sample = if track_changed {
+            self.pending_seek = None;
+            true
+        } else if let Some(pending) = self.pending_seek {
+            if pending.accepts(snapshot.position_ms, snapshot.is_playing, Instant::now()) {
+                self.pending_seek = None;
+                true
+            } else {
+                false
+            }
+        } else {
+            true
+        };
+        if accept_clock_sample {
+            self.clock
+                .publish_sample(snapshot.position_ms, snapshot.is_playing);
+        } else {
+            // A poll that was already in flight when the click happened may still
+            // contain the old position. Preserve the optimistic seek anchor, but
+            // do not let the playback state itself become stale.
+            self.clock.set_playing(snapshot.is_playing);
+        }
 
         // Reactive mesh when playing (loudness from per-app process loopback)
         // or when we at least have artwork for a static mesh.
@@ -572,7 +648,7 @@ impl DesktopLyricsApp {
             return true;
         }
 
-        art_changed
+        dirty || art_changed
     }
 
     fn update_background_art(&mut self, snapshot: &PlaybackSnapshot, track_key: &str) -> bool {
@@ -636,6 +712,20 @@ impl DesktopLyricsApp {
         self.cursor_inside = false;
         window.set_cursor_icon(CursorIcon::Default);
         window.request_redraw();
+    }
+
+    fn on_mouse_wheel(&mut self, delta: MouseScrollDelta) -> bool {
+        let delta_y = mouse_wheel_delta_px(delta, self.density);
+        if !delta_y.is_finite() || delta_y.abs() < 0.01 {
+            return false;
+        }
+        self.engine.begin_lyrics_scroll();
+        self.engine.scroll_lyrics_by(delta_y);
+        // A wheel has discrete impulses rather than a reliable pointer velocity.
+        // Release immediately so the existing hold + return-to-auto physics owns
+        // the rest of the interaction.
+        self.engine.end_lyrics_scroll(0.0);
+        true
     }
 
     /// Handle caption chrome on mouse down. Returns the hit target.
@@ -710,6 +800,9 @@ impl DesktopLyricsApp {
         let time_ms = self.clock.compute_display_time_ms();
         let x = self.cursor.x as f32;
         let y = self.cursor.y as f32;
+        if self.engine.hit_test_top_bar_region(x, y) {
+            return false;
+        }
         let source_index = self.engine.hit_test_lyrics_line(x, y, time_ms);
         if source_index < 0 {
             return false;
@@ -720,9 +813,22 @@ impl DesktopLyricsApp {
 
         // Optimistic local clock so the karaoke sweep jumps immediately; SMTC will
         // reconcile on the next poll once the player acknowledges the seek.
+        self.next_seek_id = self.next_seek_id.wrapping_add(1);
+        let request = SeekRequest {
+            request_id: self.next_seek_id,
+            position_ms: start_ms,
+        };
+        if self.seek_tx.send(request).is_err() {
+            return false;
+        }
+        self.pending_seek = Some(PendingSeek {
+            request_id: request.request_id,
+            target_position_ms: start_ms,
+            issued_at: Instant::now(),
+            api_accepted: false,
+        });
         self.clock.publish_sample(start_ms, self.clock.is_playing);
         self.clock.snap_display_to_anchor();
-        seek_smtc_position_ms(start_ms);
         true
     }
 
@@ -775,7 +881,21 @@ impl DesktopLyricsApp {
         } else {
             format!("{} — {}", self.top_bar_title, self.top_bar_artist)
         };
-        let font = self.caption_font.clone();
+        let caption_inset = 12.0 * density;
+        let caption_max_text_width =
+            (size.width as f32 - button_w * 3.0 - caption_inset * 2.0).max(0.0);
+        let caption_text_key = CaptionTextKey {
+            text: title.clone(),
+            max_width_bits: caption_max_text_width.to_bits(),
+        };
+        if self.caption_text_key.as_ref() != Some(&caption_text_key) {
+            self.caption_text = self
+                .caption_font_tower
+                .as_ref()
+                .map(|tower| tower.layout_ellipsized(&title, caption_max_text_width));
+            self.caption_text_key = Some(caption_text_key);
+        }
+        let caption_text = self.caption_text.clone();
         let collect_timing = self.frame_timing.enabled();
         let mut caption_ms = 0.0;
 
@@ -791,8 +911,7 @@ impl DesktopLyricsApp {
                 caption_h,
                 button_w,
                 density,
-                &title,
-                font.as_ref(),
+                caption_text.as_ref(),
                 hover,
                 always_on_top,
             );
@@ -821,8 +940,7 @@ fn draw_caption_bar(
     height: f32,
     button_w: f32,
     density: f32,
-    title: &str,
-    font: Option<&Font>,
+    title: Option<&CaptionTextLayout>,
     hover: CaptionHit,
     always_on_top: bool,
 ) {
@@ -845,21 +963,21 @@ fn draw_caption_bar(
     );
 
     // Title — left-aligned with a small inset matching the player top bar padding.
-    if let Some(font) = font {
+    if let Some(title) = title {
         let mut text_paint = Paint::default();
         text_paint.set_anti_alias(true);
         text_paint.set_color4f(Color4f::new(1.0, 1.0, 1.0, 0.72), None);
         let inset = 12.0 * density;
-        // Three chrome buttons on the right (pin / min / close).
-        let max_text_w = (width - button_w * 3.0 - inset * 2.0).max(0.0);
-        let display = ellipsize(title, font, max_text_w);
-        if let Some(blob) = TextBlob::from_str(&display, font) {
-            // Skia FontMetrics: ascent is typically negative (above baseline),
-            // descent positive (below). Center the em-box in the caption strip:
-            //   mid = baseline + (ascent + descent) / 2  ==  height / 2
-            let (_, metrics) = font.metrics();
-            let baseline_y = height * 0.5 - (metrics.ascent + metrics.descent) * 0.5;
-            canvas.draw_text_blob(blob, (inset, baseline_y), &text_paint);
+        // All fallback runs share one baseline. Use the tower-wide extrema so CJK
+        // and Latin stay vertically aligned even when their typefaces have
+        // different ascent/descent metrics.
+        let baseline_y = height * 0.5 - (title.ascent + title.descent) * 0.5;
+        let mut x = inset;
+        for run in &title.runs {
+            if let Some(blob) = TextBlob::from_str(&run.text, &run.font) {
+                canvas.draw_text_blob(blob, (x, baseline_y), &text_paint);
+            }
+            x += run.width;
         }
     }
 
@@ -984,38 +1102,196 @@ fn draw_caption_button(
     }
 }
 
-fn ellipsize(text: &str, font: &Font, max_width: f32) -> String {
-    if max_width <= 0.0 {
-        return String::new();
-    }
-    let full_width = font.measure_str(text, None).0;
-    if full_width <= max_width {
-        return text.to_string();
-    }
-    let ellipsis = "…";
-    let ellipsis_w = font.measure_str(ellipsis, None).0;
-    if ellipsis_w >= max_width {
-        return ellipsis.to_string();
-    }
-    let mut end = text.chars().count();
-    while end > 0 {
-        end -= 1;
-        let candidate: String = text.chars().take(end).collect::<String>() + ellipsis;
-        if font.measure_str(&candidate, None).0 <= max_width {
-            return candidate;
-        }
-    }
-    ellipsis.to_string()
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CaptionTextKey {
+    text: String,
+    max_width_bits: u32,
 }
 
-fn make_caption_font(density: f32) -> Option<Font> {
+#[derive(Clone)]
+struct CaptionTextRun {
+    text: String,
+    font: Font,
+    width: f32,
+}
+
+#[derive(Clone, Default)]
+struct CaptionTextLayout {
+    runs: Vec<CaptionTextRun>,
+    width: f32,
+    ascent: f32,
+    descent: f32,
+}
+
+struct CaptionFontTower {
+    manager: FontMgr,
+    primary: Typeface,
+    style: FontStyle,
+    size: f32,
+}
+
+impl CaptionFontTower {
+    fn layout_ellipsized(&self, text: &str, max_width: f32) -> CaptionTextLayout {
+        if max_width <= 0.0 {
+            return CaptionTextLayout::default();
+        }
+
+        let full = self.layout(text);
+        if full.width <= max_width {
+            return full;
+        }
+
+        let ellipsis = self.layout("…");
+        if ellipsis.width >= max_width {
+            return ellipsis;
+        }
+
+        let graphemes = UnicodeSegmentation::graphemes(text, true).collect::<Vec<_>>();
+        let mut low = 0usize;
+        let mut high = graphemes.len();
+        let mut best = ellipsis;
+        while low <= high {
+            let middle = low + (high - low) / 2;
+            let candidate = graphemes[..middle].concat() + "…";
+            let layout = self.layout(&candidate);
+            if layout.width <= max_width {
+                best = layout;
+                low = middle + 1;
+            } else if middle == 0 {
+                break;
+            } else {
+                high = middle - 1;
+            }
+        }
+        best
+    }
+
+    fn layout(&self, text: &str) -> CaptionTextLayout {
+        let mut grouped = Vec::<(Typeface, String)>::new();
+        for cluster in UnicodeSegmentation::graphemes(text, true) {
+            let typeface = self.typeface_for_cluster(cluster);
+            if let Some((last_typeface, last_text)) = grouped.last_mut() {
+                if last_typeface.unique_id() == typeface.unique_id() {
+                    last_text.push_str(cluster);
+                    continue;
+                }
+            }
+            grouped.push((typeface, cluster.to_string()));
+        }
+
+        let mut result = CaptionTextLayout {
+            ascent: 0.0,
+            descent: 0.0,
+            ..CaptionTextLayout::default()
+        };
+        for (typeface, text) in grouped {
+            let font = Font::from_typeface(typeface, self.size);
+            let width = font.measure_str(&text, None).0;
+            let (_, metrics) = font.metrics();
+            result.ascent = result.ascent.min(metrics.ascent);
+            result.descent = result.descent.max(metrics.descent);
+            result.width += width;
+            result.runs.push(CaptionTextRun { text, font, width });
+        }
+        result
+    }
+
+    fn typeface_for_cluster(&self, cluster: &str) -> Typeface {
+        if typeface_supports_cluster(&self.primary, cluster) {
+            return self.primary.clone();
+        }
+
+        let mut first_fallback = None;
+        for ch in cluster.chars().filter(|ch| is_visible_font_character(*ch)) {
+            let Some(typeface) = self.manager.match_family_style_character(
+                self.primary.family_name(),
+                self.style,
+                &[],
+                ch as i32,
+            ) else {
+                continue;
+            };
+            if typeface_supports_cluster(&typeface, cluster) {
+                return typeface;
+            }
+            first_fallback.get_or_insert(typeface);
+        }
+
+        first_fallback.unwrap_or_else(|| self.primary.clone())
+    }
+}
+
+fn is_visible_font_character(ch: char) -> bool {
+    !ch.is_control()
+        && ch != '\u{200d}'
+        && !(('\u{fe00}'..='\u{fe0f}').contains(&ch))
+        && !(('\u{e0100}'..='\u{e01ef}').contains(&ch))
+}
+
+fn typeface_supports_cluster(typeface: &Typeface, cluster: &str) -> bool {
+    cluster
+        .chars()
+        .filter(|ch| is_visible_font_character(*ch))
+        .all(|ch| typeface.unichar_to_glyph(ch as i32) != 0)
+}
+
+fn make_caption_font_tower(density: f32) -> Option<CaptionFontTower> {
     let mgr = FontMgr::new();
+    let style = FontStyle::normal();
     let typeface = mgr
-        .match_family_style("Segoe UI", FontStyle::normal())
-        .or_else(|| mgr.match_family_style("Microsoft YaHei UI", FontStyle::normal()))
-        .or_else(|| mgr.match_family_style("sans-serif", FontStyle::normal()))?;
-    let size = 12.0 * density;
-    Some(Font::from_typeface(typeface, size))
+        .match_family_style("Segoe UI", style)
+        .or_else(|| mgr.match_family_style("sans-serif", style))?;
+    Some(CaptionFontTower {
+        manager: mgr,
+        primary: typeface,
+        style,
+        size: 12.0 * density,
+    })
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SeekRequest {
+    request_id: u64,
+    position_ms: i32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SeekResult {
+    request_id: u64,
+    accepted: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PendingSeek {
+    request_id: u64,
+    target_position_ms: i32,
+    issued_at: Instant,
+    api_accepted: bool,
+}
+
+impl PendingSeek {
+    fn accepts(self, sample_position_ms: i32, is_playing: bool, now: Instant) -> bool {
+        let elapsed = now.saturating_duration_since(self.issued_at);
+        let timeout = if self.api_accepted {
+            SEEK_ACCEPTED_ACK_TIMEOUT
+        } else {
+            SEEK_REQUEST_TIMEOUT
+        };
+        if elapsed >= timeout {
+            // The request worker or provider never produced a matching timeline.
+            // Give the real session clock authority again instead of remaining
+            // forever on the optimistic target (especially important while paused).
+            return true;
+        }
+
+        let expected = if is_playing {
+            self.target_position_ms
+                .saturating_add(elapsed.as_millis().min(i32::MAX as u128) as i32)
+        } else {
+            self.target_position_ms
+        };
+        sample_position_ms.abs_diff(expected) <= SEEK_ACK_TOLERANCE_MS
+    }
 }
 
 #[derive(Debug)]
@@ -1044,17 +1320,26 @@ impl Default for PlaybackClock {
 impl PlaybackClock {
     fn publish_sample(&mut self, position_ms: i32, is_playing: bool) {
         let now = Instant::now();
-        if self.is_playing != is_playing {
-            if self.is_playing {
-                self.anchor_position_ms = self.projected_anchor_at(now);
-            }
-            self.anchor_clock = now;
-            self.is_playing = is_playing;
-        }
+        self.set_playing_at(is_playing, now);
         if self.anchor_position_ms != position_ms {
             self.anchor_position_ms = position_ms;
             self.anchor_clock = now;
         }
+    }
+
+    fn set_playing(&mut self, is_playing: bool) {
+        self.set_playing_at(is_playing, Instant::now());
+    }
+
+    fn set_playing_at(&mut self, is_playing: bool, now: Instant) {
+        if self.is_playing == is_playing {
+            return;
+        }
+        if self.is_playing {
+            self.anchor_position_ms = self.projected_anchor_at(now);
+        }
+        self.anchor_clock = now;
+        self.is_playing = is_playing;
     }
 
     fn compute_display_time_ms(&mut self) -> i32 {
@@ -1153,6 +1438,19 @@ fn help_text() -> String {
 
 fn normalized_size(size: PhysicalSize<u32>) -> PhysicalSize<u32> {
     PhysicalSize::new(size.width.max(1), size.height.max(1))
+}
+
+fn mouse_wheel_delta_px(delta: MouseScrollDelta, density: f32) -> f32 {
+    let value = match delta {
+        // Positive wheel values mean moving the wheel away from the user (up).
+        // The renderer's positive offset moves toward later lyrics, so invert it.
+        MouseScrollDelta::LineDelta(_, y) => -y * WHEEL_LINE_STEP_DP * density.max(0.5),
+        // Pixel deltas are already in the physical coordinate system used by the
+        // renderer and must not be density-scaled a second time.
+        MouseScrollDelta::PixelDelta(position) => -(position.y as f32),
+        _ => 0.0,
+    };
+    value.clamp(-480.0 * density.max(0.5), 480.0 * density.max(0.5))
 }
 
 fn track_key(snapshot: &PlaybackSnapshot) -> String {
@@ -1347,7 +1645,6 @@ fn longest_common_subsequence_len(left: &str, right: &str) -> usize {
 
 fn spawn_smtc_listener(sender: mpsc::Sender<PlaybackSnapshot>) {
     thread::spawn(move || {
-        let mut last = PlaybackSnapshot::default();
         let mut cached_media_key = String::new();
         let mut cached_artwork = None::<Arc<Artwork>>;
         loop {
@@ -1356,31 +1653,50 @@ fn spawn_smtc_listener(sender: mpsc::Sender<PlaybackSnapshot>) {
             {
                 cached_media_key = media_identity_key(&snapshot);
                 cached_artwork = snapshot.artwork.clone();
-                if snapshot != last {
-                    last = snapshot.clone();
-                    let _ = sender.send(snapshot);
-                }
+                // Publish every poll. A paused seek can be rejected without any
+                // SMTC property changing; periodic samples let the UI's pending
+                // seek guard time out and return to the authoritative position.
+                let _ = sender.send(snapshot);
             }
             thread::sleep(SMTC_POLL_INTERVAL);
         }
     });
 }
 
-/// Ask the active SMTC session to seek to `position_ms` (background thread).
-fn seek_smtc_position_ms(position_ms: i32) {
-    #[cfg(windows)]
-    {
-        thread::spawn(move || {
-            if let Err(error) = seek_smtc_position_ms_windows(position_ms) {
-                eprintln!("SMTC seek to {position_ms}ms failed: {error}");
+/// Serialize SMTC seeks so an older click can never finish after a newer one.
+/// Pending clicks are coalesced before each API call; the final requested target
+/// always remains last in the FIFO worker.
+fn spawn_smtc_seek_worker() -> (Sender<SeekRequest>, Receiver<SeekResult>) {
+    let (sender, receiver) = mpsc::channel::<SeekRequest>();
+    let (result_sender, result_receiver) = mpsc::channel();
+    thread::spawn(move || {
+        while let Ok(mut request) = receiver.recv() {
+            while let Ok(newer_request) = receiver.try_recv() {
+                request = newer_request;
             }
-        });
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = position_ms;
-        eprintln!("SMTC seek is only available on Windows");
-    }
+            #[cfg(windows)]
+            let accepted = match seek_smtc_position_ms_windows(request.position_ms) {
+                Ok(()) => true,
+                Err(error) => {
+                    eprintln!("SMTC seek to {}ms failed: {error}", request.position_ms);
+                    false
+                }
+            };
+            #[cfg(not(windows))]
+            let accepted = {
+                eprintln!(
+                    "SMTC seek to {}ms ignored: only available on Windows",
+                    request.position_ms
+                );
+                false
+            };
+            let _ = result_sender.send(SeekResult {
+                request_id: request.request_id,
+                accepted,
+            });
+        }
+    });
+    (sender, result_receiver)
 }
 
 #[cfg(windows)]
@@ -1395,8 +1711,17 @@ fn seek_smtc_position_ms_windows(position_ms: i32) -> Result<(), String> {
         .GetCurrentSession()
         .map_err(|error| error.to_string())?;
 
+    let timeline = session
+        .GetTimelineProperties()
+        .map_err(|error| error.to_string())?;
+    let timeline_start = timeline
+        .StartTime()
+        .map_err(|error| error.to_string())?
+        .Duration;
+    // Lyrics are relative to the media start, while SMTC positions live in the
+    // session's timeline coordinates. Preserve a non-zero StartTime when seeking.
     // TimeSpan ticks are 100 ns; 1 ms = 10_000 ticks.
-    let ticks = (position_ms as i64).saturating_mul(10_000);
+    let ticks = timeline_start.saturating_add((position_ms as i64).saturating_mul(10_000));
     let ok = session
         .TryChangePlaybackPositionAsync(ticks)
         .map_err(|error| error.to_string())?
@@ -1449,7 +1774,15 @@ fn current_playback_snapshot(
         .SourceAppUserModelId()
         .map(|id| id.to_string_lossy())
         .unwrap_or_default();
-    let duration_ms = timespan_ms(timeline.EndTime().map_err(|error| error.to_string())?);
+    let timeline_start_ticks = timeline
+        .StartTime()
+        .map_err(|error| error.to_string())?
+        .Duration;
+    let timeline_end_ticks = timeline
+        .EndTime()
+        .map_err(|error| error.to_string())?
+        .Duration;
+    let duration_ms = tick_delta_ms(timeline_end_ticks, timeline_start_ticks);
     let media_key = media_identity_key_from_parts(&artist, &title, duration_ms);
     // Always re-fetch when the track identity changes. For the same track, reuse a
     // successful cache, but retry when the previous attempt failed (late-arriving
@@ -1464,23 +1797,90 @@ fn current_playback_snapshot(
         media_properties_artwork(&properties).map(Arc::new)
     };
 
+    let is_playing = playback
+        .PlaybackStatus()
+        .map_err(|error| error.to_string())?
+        == GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing;
+    let playback_rate = playback
+        .PlaybackRate()
+        .ok()
+        .and_then(|rate| rate.Value().ok())
+        .filter(|rate| rate.is_finite() && *rate > 0.0)
+        .unwrap_or(1.0);
+    let raw_position_ms = tick_delta_ms(
+        timeline
+            .Position()
+            .map_err(|error| error.to_string())?
+            .Duration,
+        timeline_start_ticks,
+    );
+    let sample_age_ms = timeline
+        .LastUpdatedTime()
+        .ok()
+        .and_then(|updated| windows_datetime_age_ms(updated.UniversalTime))
+        .unwrap_or(0);
+    let position_ms = project_smtc_position_ms(
+        raw_position_ms,
+        sample_age_ms,
+        is_playing,
+        playback_rate,
+        duration_ms,
+    );
+
     Ok(PlaybackSnapshot {
         title,
         artist,
-        position_ms: timespan_ms(timeline.Position().map_err(|error| error.to_string())?),
+        position_ms,
         duration_ms,
-        is_playing: playback
-            .PlaybackStatus()
-            .map_err(|error| error.to_string())?
-            == GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing,
+        is_playing,
         source_app_id,
         artwork,
     })
 }
 
+fn tick_delta_ms(value_ticks: i64, origin_ticks: i64) -> i32 {
+    (value_ticks.saturating_sub(origin_ticks) / 10_000).clamp(0, i32::MAX as i64) as i32
+}
+
+fn project_smtc_position_ms(
+    position_ms: i32,
+    sample_age_ms: i32,
+    is_playing: bool,
+    playback_rate: f64,
+    duration_ms: i32,
+) -> i32 {
+    let projected = if is_playing {
+        let advance = (sample_age_ms.max(0) as f64 * playback_rate.max(0.0))
+            .round()
+            .clamp(0.0, i32::MAX as f64) as i32;
+        position_ms.saturating_add(advance)
+    } else {
+        position_ms
+    };
+    if duration_ms > 0 {
+        projected.clamp(0, duration_ms)
+    } else {
+        projected.max(0)
+    }
+}
+
 #[cfg(windows)]
-fn timespan_ms(value: windows::Foundation::TimeSpan) -> i32 {
-    (value.Duration / 10_000).clamp(0, i32::MAX as i64) as i32
+fn windows_datetime_age_ms(last_updated_ticks: i64) -> Option<i32> {
+    if last_updated_ticks <= 0 {
+        return None;
+    }
+    let unix_ticks = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_nanos()
+        .checked_div(100)?
+        .min(i64::MAX as u128) as i64;
+    let now_ticks = WINDOWS_TO_UNIX_EPOCH_TICKS.saturating_add(unix_ticks);
+    let age_ticks = now_ticks.checked_sub(last_updated_ticks)?;
+    if age_ticks < 0 {
+        return None;
+    }
+    Some((age_ticks / 10_000).min(i32::MAX as i64) as i32)
 }
 
 #[cfg(windows)]
@@ -1612,5 +2012,110 @@ mod tests {
     fn stable_seed_is_repeatable() {
         assert_eq!(stable_seed("artistsong"), stable_seed("artistsong"));
         assert_ne!(stable_seed("artistsong"), stable_seed("othersong"));
+    }
+
+    #[test]
+    fn caption_font_tower_resolves_cjk_to_real_glyphs() {
+        let Some(tower) = make_caption_font_tower(1.0) else {
+            return;
+        };
+
+        for cluster in ["中", "日", "한"] {
+            let typeface = tower.typeface_for_cluster(cluster);
+            let ch = cluster.chars().next().unwrap();
+            assert_ne!(
+                typeface.unichar_to_glyph(ch as i32),
+                0,
+                "caption fallback returned a missing glyph for {cluster}"
+            );
+        }
+
+        let layout = tower.layout("Caption 中文 日本語 한국어");
+        assert!(layout.width > 0.0);
+        assert!(layout.ascent < 0.0);
+        assert!(layout.runs.iter().all(|run| run
+            .font
+            .text_to_glyphs_vec(&run.text)
+            .into_iter()
+            .all(|glyph| glyph != 0)));
+    }
+
+    #[test]
+    fn caption_ellipsize_measures_the_resolved_font_runs() {
+        let Some(tower) = make_caption_font_tower(1.0) else {
+            return;
+        };
+        let max_width = tower.layout("中文标题…").width;
+        let layout = tower.layout_ellipsized("中文标题与很长的艺术家名称", max_width);
+
+        assert!(layout.width <= max_width + 0.01);
+        assert!(layout.runs.iter().any(|run| run.text.contains('…')));
+        assert!(layout.runs.iter().all(|run| run
+            .font
+            .text_to_glyphs_vec(&run.text)
+            .into_iter()
+            .all(|glyph| glyph != 0)));
+    }
+
+    #[test]
+    fn pending_seek_rejects_old_poll_then_accepts_acknowledgement() {
+        let issued_at = Instant::now();
+        let pending = PendingSeek {
+            request_id: 1,
+            target_position_ms: 30_000,
+            issued_at,
+            api_accepted: false,
+        };
+
+        assert!(!pending.accepts(10_000, true, issued_at + Duration::from_millis(500)));
+        assert!(pending.accepts(30_500, true, issued_at + Duration::from_millis(500)));
+        assert!(pending.accepts(10_000, false, issued_at + SEEK_REQUEST_TIMEOUT));
+
+        let accepted = PendingSeek {
+            api_accepted: true,
+            ..pending
+        };
+        assert!(!accepted.accepts(
+            10_000,
+            false,
+            issued_at + SEEK_ACCEPTED_ACK_TIMEOUT - Duration::from_millis(1)
+        ));
+        assert!(accepted.accepts(
+            10_000,
+            false,
+            issued_at + SEEK_ACCEPTED_ACK_TIMEOUT
+        ));
+    }
+
+    #[test]
+    fn smtc_timeline_is_normalized_and_projected_from_last_update() {
+        assert_eq!(tick_delta_ms(125_000_000, 25_000_000), 10_000);
+        assert_eq!(
+            project_smtc_position_ms(10_000, 750, true, 1.0, 60_000),
+            10_750
+        );
+        assert_eq!(
+            project_smtc_position_ms(59_800, 750, true, 1.0, 60_000),
+            60_000
+        );
+        assert_eq!(
+            project_smtc_position_ms(10_000, 750, false, 1.0, 60_000),
+            10_000
+        );
+    }
+
+    #[test]
+    fn mouse_wheel_delta_matches_renderer_scroll_direction_and_units() {
+        assert_eq!(
+            mouse_wheel_delta_px(MouseScrollDelta::LineDelta(0.0, 3.0), 2.0),
+            -108.0
+        );
+        assert_eq!(
+            mouse_wheel_delta_px(
+                MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, -24.0)),
+                2.0,
+            ),
+            24.0
+        );
     }
 }

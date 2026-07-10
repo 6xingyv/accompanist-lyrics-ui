@@ -366,6 +366,11 @@ impl TextEngine {
         self.renderer.hit_test_top_bar_button(x, y)
     }
 
+    /// Whether `(x, y)` is inside the reserved player top-bar region.
+    pub fn hit_test_top_bar_region(&self, x: f32, y: f32) -> bool {
+        self.renderer.hit_test_top_bar_region(x, y)
+    }
+
     pub fn begin_lyrics_scroll(&mut self) {
         self.renderer.begin_manual_scroll();
     }
