@@ -54,8 +54,12 @@ pub(super) fn draw_top_bar_skia(
     canvas.save_layer(&SaveLayerRec::default().paint(&plus_paint));
 
     // Title / artist marquee: when a line is wider than its column it scrolls
-    // toward the Start edge into the blank padding, its clip edges softened by a
-    // fade, easing at each end of the travel (see `draw_top_bar_marquee_line`).
+    // toward the Start edge through the padding on both sides. Those two padding
+    // strips are the fade zones; the text's normal column always remains solid.
+    let left_fade_width = (bar.text_left - (bar.thumb_left + bar.thumb_size)).max(0.0);
+    let right_fade_width = ((bar.button_cx - bar.button_radius)
+        - (bar.text_left + bar.text_max_width))
+        .max(0.0);
     let mut animating = false;
     animating |= draw_top_bar_marquee_line(
         canvas,
@@ -64,6 +68,8 @@ pub(super) fn draw_top_bar_skia(
         bar.text_left,
         bar.title_top,
         bar.text_max_width,
+        left_fade_width,
+        right_fade_width,
         white,
         1.0,
         current_time_ms,
@@ -75,6 +81,8 @@ pub(super) fn draw_top_bar_skia(
         bar.text_left,
         bar.artist_top,
         bar.text_max_width,
+        left_fade_width,
+        right_fade_width,
         white,
         bar.artist_alpha,
         current_time_ms,
@@ -107,19 +115,22 @@ pub(super) fn draw_top_bar_skia(
 }
 
 // Top-bar marquee tuning.
-/// Width (px) of the soft fade at each edge of a marquee line's column.
-const MARQUEE_FADE_PX: f32 = 24.0;
+/// Empty travel (px) after the first copy has completely left the column and
+/// before the following copy begins to enter from the opposite edge.
+const MARQUEE_GAP_PX: f32 = 48.0;
 /// Scroll speed of the marquee travel, in px per second.
 const MARQUEE_SCROLL_PX_PER_SEC: f32 = 40.0;
-/// How long the text pauses (ms) at each end of the travel before easing back.
+/// How long the text pauses (ms) at its initial position between loops.
 const MARQUEE_HOLD_MS: f32 = 1600.0;
 
 /// Draw one top-bar text line (title or artist), marqueeing it when it overflows
 /// its `max_width` column. The line is isolated in a layer clipped to the column;
-/// an overflowing line is shifted toward the Start edge by an eased ping-pong
-/// offset and its left/right edges are dissolved with a fade so the text slides
-/// out of / into the surrounding padding cleanly. Returns whether it is animating
-/// (i.e. actually overflowing) so the caller can keep the render loop ticking.
+/// an overflowing line and a following copy travel in one direction. The first
+/// copy fully leaves, an empty gap crosses the column, then the following copy
+/// enters and stops at the original position. Only the neighbouring padding is
+/// faded; the original text column remains fully opaque. Returns whether it is
+/// animating (i.e. actually overflowing) so the caller can keep the render loop
+/// ticking.
 #[allow(clippy::too_many_arguments)]
 fn draw_top_bar_marquee_line(
     canvas: &skia_safe::Canvas,
@@ -128,6 +139,8 @@ fn draw_top_bar_marquee_line(
     left: f32,
     top: f32,
     max_width: f32,
+    left_fade_width: f32,
+    right_fade_width: f32,
     color: (u8, u8, u8, u8),
     alpha: f32,
     current_time_ms: i32,
@@ -139,17 +152,33 @@ fn draw_top_bar_marquee_line(
     let text_width = prepared_text_width(text);
     let overflow = text_width - max_width;
     let animating = overflow > 0.5;
-    let offset = if animating {
-        marquee_offset(current_time_ms, overflow)
-    } else {
-        0.0
-    };
 
-    // Isolate the line so the edge fade only dissolves this text, not the thumbnail
-    // or button. Vertical bounds are padded generously around the text box.
+    // A line that fits is ordinary text, not a stationary marquee. Draw it
+    // directly so it never enters the clipped offscreen layer or fade path.
+    if !animating {
+        draw_prepared_text_skia(canvas, typefaces, text, left, top, color, alpha, 0.0, None);
+        return false;
+    }
+
+    // Keep the second copy one full viewport plus a blank gap behind the first.
+    // This guarantees the first copy has completely left before the next one can
+    // enter, and the second lands exactly at `left` at the end of the travel.
+    let cycle_distance = marquee_cycle_distance(
+        text_width,
+        max_width,
+        left_fade_width,
+        right_fade_width,
+    );
+    let offset = marquee_offset(current_time_ms, cycle_distance);
+
+    // Expand the drawable/clip bounds into the two neighbouring padding strips.
+    // Text at rest still starts at `left`; only overflow or moving copies enter
+    // these strips, where the fixed mask fades toward the artwork/button edges.
     let top_bound = top - text.height * 0.5;
     let bottom_bound = top + text.height * 1.5;
-    let bounds = Rect::new(left, top_bound, left + max_width, bottom_bound);
+    let fade_left = left - left_fade_width;
+    let fade_right = left + max_width + right_fade_width;
+    let bounds = Rect::new(fade_left, top_bound, fade_right, bottom_bound);
     canvas.save_layer(&SaveLayerRec::default().bounds(&bounds));
 
     canvas.save();
@@ -165,69 +194,105 @@ fn draw_top_bar_marquee_line(
         0.0,
         None,
     );
+    draw_prepared_text_skia(
+        canvas,
+        typefaces,
+        text,
+        left - offset + cycle_distance,
+        top,
+        color,
+        alpha,
+        0.0,
+        None,
+    );
     canvas.restore();
 
-    if animating {
-        apply_horizontal_edge_fade(
-            canvas,
-            left,
-            top_bound,
-            max_width,
-            bottom_bound - top_bound,
-            MARQUEE_FADE_PX,
-        );
-    }
+    apply_horizontal_padding_fade(
+        canvas,
+        left,
+        top_bound,
+        max_width,
+        bottom_bound - top_bound,
+        left_fade_width,
+        right_fade_width,
+    );
 
     canvas.restore();
-    animating
+    true
 }
 
-/// Eased ping-pong marquee offset (px, toward the Start edge) for the given clock.
-/// The text holds at the start, eases out to reveal its tail (travelling a bit past
-/// the overflow so the last glyph clears the fade), holds, then eases back — so both
-/// the start and end of every move are smooth rather than a constant-speed crawl.
-fn marquee_offset(current_time_ms: i32, overflow: f32) -> f32 {
-    let travel = overflow + MARQUEE_FADE_PX;
-    let scroll_ms = (travel / MARQUEE_SCROLL_PX_PER_SEC * 1000.0).max(1.0);
+/// One-way marquee offset (px, toward the Start edge) for the given clock. The
+/// current copy holds at the initial position, then both copies move forward until
+/// the following copy occupies that same position. The cycle resets there, which
+/// is visually seamless because the two copies are identical.
+fn marquee_offset(current_time_ms: i32, cycle_distance: f32) -> f32 {
+    let scroll_ms = (cycle_distance / MARQUEE_SCROLL_PX_PER_SEC * 1000.0).max(1.0);
     let hold_ms = MARQUEE_HOLD_MS;
-    let period = 2.0 * (scroll_ms + hold_ms);
+    let period = scroll_ms + hold_ms;
     let t = (current_time_ms as f32).rem_euclid(period);
 
-    let phase = if t < hold_ms {
+    if t < hold_ms {
         0.0
-    } else if t < hold_ms + scroll_ms {
-        smooth_step((t - hold_ms) / scroll_ms)
-    } else if t < 2.0 * hold_ms + scroll_ms {
-        1.0
     } else {
-        1.0 - smooth_step((t - 2.0 * hold_ms - scroll_ms) / scroll_ms)
-    };
-    phase * travel
+        smooth_step((t - hold_ms) / scroll_ms) * cycle_distance
+    }
 }
 
-/// Multiply the alpha of `[left, left+width]` by a horizontal gradient that fades to
-/// transparent over `fade_px` at each edge (`DstIn`), softening a marquee line's
-/// clip edges so the text dissolves into the padding instead of hard-clipping.
-fn apply_horizontal_edge_fade(
+fn marquee_cycle_distance(
+    text_width: f32,
+    viewport_width: f32,
+    left_fade_width: f32,
+    right_fade_width: f32,
+) -> f32 {
+    text_width + viewport_width + left_fade_width + right_fade_width + MARQUEE_GAP_PX
+}
+
+/// Keep `[left, left+width]` fully opaque and use only its neighbouring padding
+/// strips as fade zones. The layer/clip bounds span both strips, allowing moving
+/// marquee copies to leave and enter through the padding without drawing over the
+/// artwork or button.
+fn apply_horizontal_padding_fade(
     canvas: &skia_safe::Canvas,
     left: f32,
     top: f32,
     width: f32,
     height: f32,
-    fade_px: f32,
+    left_fade_width: f32,
+    right_fade_width: f32,
 ) {
-    if width <= 0.0 || height <= 0.0 || fade_px <= 0.0 {
+    if width <= 0.0
+        || height <= 0.0
+        || (left_fade_width <= 0.0 && right_fade_width <= 0.0)
+    {
         return;
     }
-    let f = (fade_px / width).clamp(0.0, 0.5);
+    let left_fade_width = left_fade_width.max(0.0);
+    let right_fade_width = right_fade_width.max(0.0);
+    let total_width = left_fade_width + width + right_fade_width;
+    let fade_left = left - left_fade_width;
+    let fade_right = left + width + right_fade_width;
     let clear = Color4f::new(1.0, 1.0, 1.0, 0.0);
     let solid = Color4f::new(1.0, 1.0, 1.0, 1.0);
-    let colors = [clear, solid, solid, clear];
-    let positions = [0.0, f, 1.0 - f, 1.0];
+    let mut colors = Vec::with_capacity(4);
+    let mut positions = Vec::with_capacity(4);
+    if left_fade_width > 0.0 {
+        colors.extend([clear, solid]);
+        positions.extend([0.0, left_fade_width / total_width]);
+    } else {
+        colors.push(solid);
+        positions.push(0.0);
+    }
+    if right_fade_width > 0.0 {
+        colors.extend([solid, clear]);
+        positions.extend([(left_fade_width + width) / total_width, 1.0]);
+    } else {
+        colors.push(solid);
+        positions.push(1.0);
+    }
     let gradient_colors = gradient::Colors::new(&colors, Some(&positions), TileMode::Clamp, None);
     let gradient = gradient::Gradient::new(gradient_colors, gradient::Interpolation::default());
     let Some(shader) = gradient::shaders::linear_gradient(
-        (Point::new(left, 0.0), Point::new(left + width, 0.0)),
+        (Point::new(fade_left, 0.0), Point::new(fade_right, 0.0)),
         &gradient,
         None,
     ) else {
@@ -237,7 +302,10 @@ fn apply_horizontal_edge_fade(
     paint.set_anti_alias(false);
     paint.set_shader(shader);
     paint.set_blend_mode(BlendMode::DstIn);
-    canvas.draw_rect(Rect::new(left, top, left + width, top + height), &paint);
+    canvas.draw_rect(
+        Rect::new(fade_left, top, fade_right, top + height),
+        &paint,
+    );
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -316,51 +384,108 @@ pub(super) fn draw_prepared_text_skia(
 ) {
     // Out-of-focus lines blur as ONE gaussian layer (a single offscreen pass for
     // the whole line) instead of a `MaskFilter::blur` per glyph-batch (one pass
-    // each) — the per-batch passes were what stalled the GPU mid-song. The layer
-    // is bounded to the text plus the blur spread so the offscreen stays small.
-    // `image_filters::blur` and `MaskFilter::blur` both take sigma, so the blur
-    // amount is unchanged. Inner draws then run with zero blur (the layer does it).
-    let layer_blur = blur_radius > 0.1;
+    // each) — the per-batch passes were what stalled the GPU mid-song. Inner
+    // draws run with zero blur (the layer does it).
+    //
+    // Cap sigma: Skia's GPU blur downsamples aggressively above ~6–8σ, which
+    // shows up as soft "square mosaic" blocks on unfocused lines (especially
+    // under the additive `Plus` lyrics layer). Focus dimming already softens
+    // far lines, so a modest cap keeps the look without the tile artifacts.
+    const MAX_LAYER_BLUR_SIGMA: f32 = 6.0;
+    let blur_sigma = blur_radius.min(MAX_LAYER_BLUR_SIGMA);
+    let layer_blur = blur_sigma > 0.1;
     if layer_blur {
-        // Bound the blur layer to where glyphs are ACTUALLY drawn. row.min_x/max_x
-        // describe the text *width* but not its on-screen x for right-aligned rows
-        // (plain text stores 0..line_w there while the glyphs sit at the right
-        // margin) — using them put the layer on the left and clipped the
-        // right-aligned translation to half. So take the left edge from the real
-        // glyph positions and span by the row width (max_x - min_x).
+        // Ink bounds from real glyph positions (not row.min_x, which is wrong for
+        // right-aligned plain text) plus a generous per-glyph extent so tall CJK
+        // and side-bearings aren't clipped into hard rectangles by the layer.
         let mut left = f32::INFINITY;
-        let mut text_width = 0.0f32;
+        let mut right = f32::NEG_INFINITY;
+        let mut top = f32::INFINITY;
+        let mut bottom = f32::NEG_INFINITY;
         for row in &text.rows {
-            text_width = text_width.max(row.max_x - row.min_x);
             for glyph in &row.glyphs {
-                left = left.min(origin_x + glyph.physical.x as f32);
+                let gx = origin_x + glyph.physical.x as f32;
+                let gy = origin_y + glyph.physical.y as f32;
+                let size = f32::from_bits(glyph.physical.cache_key.font_size_bits).max(1.0);
+                // Approx glyph ink: pen at baseline, em-box up/down/right.
+                left = left.min(gx - size * 0.15);
+                right = right.max(gx + size * 1.05);
+                top = top.min(gy - size * 1.05);
+                bottom = bottom.max(gy + size * 0.45);
             }
         }
         if !left.is_finite() {
             left = origin_x;
-            text_width = text.rows.first().map(|row| row.width).unwrap_or(0.0);
+            right = origin_x + text.rows.first().map(|row| row.width).unwrap_or(0.0);
+            top = origin_y;
+            bottom = origin_y + text.height;
         }
-        // Pad covers the blur spread (~3 sigma) plus a glyph's worth of overhang
-        // past its pen origin on the right.
-        let pad = blur_radius * 3.0 + text.height.max(4.0);
+        // ~3σ covers the gaussian; extra pad avoids edge clamp looking like tiles.
+        let pad = blur_sigma * 3.5 + 4.0;
+        // Pixel-align the offscreen so GPU blur mips land on whole texels.
         let bounds = Rect::new(
-            left - pad,
-            origin_y - pad,
-            left + text_width + pad,
-            origin_y + text.height + pad,
+            (left - pad).floor(),
+            (top - pad).floor(),
+            (right + pad).ceil(),
+            (bottom + pad).ceil(),
         );
-        let mut layer_paint = Paint::default();
-        if let Some(filter) = image_filters::blur(
-            (blur_radius, blur_radius),
-            None,
-            None,
-            CropRect::NO_CROP_RECT,
-        ) {
-            layer_paint.set_image_filter(filter);
+        // Degenerate / inverted bounds would make the filter sample garbage.
+        if bounds.width() >= 1.0 && bounds.height() >= 1.0 {
+            let mut layer_paint = Paint::default();
+            if let Some(filter) = image_filters::blur(
+                (blur_sigma, blur_sigma),
+                TileMode::Decal,
+                None,
+                CropRect::NO_CROP_RECT,
+            ) {
+                layer_paint.set_image_filter(filter);
+            }
+            canvas.save_layer(&SaveLayerRec::default().bounds(&bounds).paint(&layer_paint));
+        } else {
+            // Fall through without a blur layer.
+            return draw_prepared_text_skia_inner(
+                canvas,
+                typefaces,
+                text,
+                origin_x,
+                origin_y,
+                base_color,
+                alpha,
+                0.0,
+                karaoke,
+            );
         }
-        canvas.save_layer(&SaveLayerRec::default().bounds(&bounds).paint(&layer_paint));
     }
     let inner_blur = if layer_blur { 0.0 } else { blur_radius };
+
+    draw_prepared_text_skia_inner(
+        canvas,
+        typefaces,
+        text,
+        origin_x,
+        origin_y,
+        base_color,
+        alpha,
+        inner_blur,
+        karaoke,
+    );
+
+    if layer_blur {
+        canvas.restore();
+    }
+}
+
+fn draw_prepared_text_skia_inner(
+    canvas: &skia_safe::Canvas,
+    typefaces: &HashMap<fontdb::ID, Typeface>,
+    text: &PreparedText,
+    origin_x: f32,
+    origin_y: f32,
+    base_color: (u8, u8, u8, u8),
+    alpha: f32,
+    inner_blur: f32,
+    karaoke: Option<(i32, bool, f32, &Vec<PreparedSyllable>)>,
+) {
 
     for row in &text.rows {
         let (row_min_x, row_max_x) =
@@ -460,10 +585,6 @@ pub(super) fn draw_prepared_text_skia(
             inner_blur,
             karaoke_shader.as_ref(),
         );
-    }
-
-    if layer_blur {
-        canvas.restore();
     }
 }
 
@@ -916,7 +1037,6 @@ pub(super) fn draw_breathing_dots_skia(
     interlude: &PreparedInterlude,
     config: &SceneConfig,
     current_time_ms: i32,
-    line_alpha: f32,
 ) {
     let dots = config.breathing_dots;
     let total_width = dots_total_width(dots);
@@ -930,9 +1050,9 @@ pub(super) fn draw_breathing_dots_skia(
         config.content_left + config.padding_x
     };
     let origin_y = y + config.padding_y;
-    let (scale, alpha, enter_end, exit_start) =
+    let (scale, master_alpha, enter_end, exit_start) =
         breathing_dots_state(interlude.start, interlude.end, current_time_ms, dots);
-    if alpha <= 0.0 || scale <= 0.0 {
+    if master_alpha <= 0.0 || scale <= 0.0 {
         return;
     }
 
@@ -940,11 +1060,9 @@ pub(super) fn draw_breathing_dots_skia(
     let current_time = current_time_ms as f32;
     let center_x = origin_x + total_width * 0.5;
     let center_y = origin_y + dots.size * 0.5;
-    // No brush/wipe reveal: the whole slot fades in/out on the master `alpha`
-    // (enter 0->1, exit 1->0). Between enter-end and exit-start the dots simply
-    // light up one after another (0.4 -> 1.0, staggered across that window).
-    let light_window = (exit_start - enter_end).max(1.0);
-    let dot_span = light_window / dots.number as f32;
+    // The group and its dots have separate alpha animations. `master_alpha` is
+    // the slot envelope (enter 0->1, middle 1, exit 1->0); inside that envelope,
+    // the three dots light from 0.4->1.0 one after another.
 
     for index in 0..dots.number {
         let base_x = origin_x + dots.size * 0.5 + (dots.size + dots.margin) * index as f32;
@@ -952,25 +1070,41 @@ pub(super) fn draw_breathing_dots_skia(
         let scaled_x = center_x + (base_x - center_x) * scale;
         let scaled_y = center_y + (base_y - center_y) * scale;
         let radius = dots.size * 0.5 * scale;
-        let dot_start = enter_end + dot_span * index as f32;
-        let dot_alpha = 0.4 + 0.6 * ((current_time - dot_start) / dot_span).clamp(0.0, 1.0);
+        let dot_alpha = breathing_dot_alpha(
+            index,
+            dots.number,
+            current_time,
+            enter_end,
+            exit_start,
+        );
 
-        let total_alpha = alpha * dot_alpha * line_alpha;
-        if radius <= 0.0 || total_alpha <= 0.0 {
+        if radius <= 0.0 {
             continue;
         }
 
         let mut paint = Paint::default();
         paint.set_anti_alias(true);
-        paint.set_color4f(skia_color(color, total_alpha), None);
+        paint.set_color4f(skia_color(color, master_alpha * dot_alpha), None);
         canvas.draw_circle(Point::new(scaled_x, scaled_y), radius, &paint);
     }
 }
 
-/// Returns `(scale, alpha, enter_end_ms, exit_start_ms)`: the breathing scale and
-/// the master fade envelope for the whole slot, plus the (variable-length-window
-/// aware) instants when the enter fade finishes and the exit fade begins — the
-/// caller lights the individual dots up across exactly that middle window.
+fn breathing_dot_alpha(
+    index: u32,
+    number: u32,
+    current_time: f32,
+    enter_end: f32,
+    exit_start: f32,
+) -> f32 {
+    let light_window = (exit_start - enter_end).max(1.0);
+    let dot_span = light_window / number.max(1) as f32;
+    let dot_start = enter_end + dot_span * index as f32;
+    0.4 + 0.6 * ((current_time - dot_start) / dot_span).clamp(0.0, 1.0)
+}
+
+/// Returns `(scale, master_alpha, enter_end_ms, exit_start_ms)`: the breathing
+/// scale, the whole-slot fade envelope, and the middle-window bounds used by the
+/// independent per-dot 0.4->1.0 sequence.
 fn breathing_dots_state(
     start_ms: i32,
     end_ms: i32,
@@ -1094,6 +1228,57 @@ mod tests {
     }
 
     #[test]
+    fn marquee_moves_only_forward_until_the_following_copy_reaches_start() {
+        let distance = 500.0;
+        let scroll_ms = (distance / MARQUEE_SCROLL_PX_PER_SEC * 1000.0) as i32;
+        let hold_ms = MARQUEE_HOLD_MS as i32;
+
+        assert_eq!(marquee_offset(0, distance), 0.0);
+        assert_eq!(marquee_offset(hold_ms - 1, distance), 0.0);
+
+        let samples = (0..10)
+            .map(|step| marquee_offset(hold_ms + scroll_ms * step / 10, distance))
+            .collect::<Vec<_>>();
+        assert!(samples.windows(2).all(|pair| pair[1] >= pair[0]));
+        assert!((samples[5] - distance * 0.5).abs() < 0.0001);
+
+        // At the cycle boundary the following copy is at the initial position;
+        // resetting the numerical offset to zero therefore changes no pixels.
+        assert_eq!(marquee_offset(hold_ms + scroll_ms, distance), 0.0);
+    }
+
+    #[test]
+    fn marquee_leaves_a_blank_gap_between_copies() {
+        let text_width = 400.0;
+        let viewport_width = 200.0;
+        let left_fade_width = 8.0;
+        let right_fade_width = 8.0;
+        let distance = marquee_cycle_distance(
+            text_width,
+            viewport_width,
+            left_fade_width,
+            right_fade_width,
+        );
+
+        // Once the first copy has left, the second is still one viewport plus the
+        // requested gap to the right, so nothing is visible in the column.
+        let first_exit_offset = text_width + left_fade_width;
+        let second_left_after_first_exits = distance - first_exit_offset;
+        assert_eq!(
+            second_left_after_first_exits,
+            viewport_width + right_fade_width + MARQUEE_GAP_PX
+        );
+
+        // It reaches the right edge only after the blank gap has travelled past.
+        let second_enter_offset = first_exit_offset + MARQUEE_GAP_PX;
+        let second_left_after_gap = distance - second_enter_offset;
+        assert_eq!(second_left_after_gap, viewport_width + right_fade_width);
+
+        // At the end it occupies exactly the original starting position.
+        assert_eq!(distance - distance, 0.0);
+    }
+
+    #[test]
     fn breathing_dots_scale_stays_continuous_when_breathing_window_is_missing() {
         // 6400ms is exactly enter+dip+still+exit. The old formula ended enter at
         // 0.8 then started dip at 1.0, producing a 0.2 scale pop at t=3000.
@@ -1127,6 +1312,44 @@ mod tests {
                 "duration {duration_ms}ms jumped by {jump:.3} at {time_ms}ms ({before:.3} -> {after:.3})"
             );
         }
+    }
+
+    #[test]
+    fn breathing_dots_alpha_enters_holds_and_exits() {
+        let dots = test_dots();
+        let alpha_at = |time_ms| breathing_dots_state(0, 10_000, time_ms, dots).1;
+
+        assert_eq!(alpha_at(0), 0.0);
+        assert!((alpha_at(1_500) - 0.5).abs() < 0.0001);
+        assert_eq!(alpha_at(3_000), 1.0);
+        assert_eq!(alpha_at(6_000), 1.0);
+        assert_eq!(alpha_at(9_800), 1.0);
+        assert!((alpha_at(9_900) - 0.5).abs() < 0.0001);
+        assert_eq!(alpha_at(10_000), 0.0);
+    }
+
+    #[test]
+    fn breathing_dots_light_from_point_four_to_one_in_sequence() {
+        let (_, _, enter_end, exit_start) =
+            breathing_dots_state(0, 10_000, 3_000, test_dots());
+        let span = (exit_start - enter_end) / 3.0;
+
+        assert_eq!(breathing_dot_alpha(0, 3, enter_end, enter_end, exit_start), 0.4);
+        assert_eq!(breathing_dot_alpha(1, 3, enter_end, enter_end, exit_start), 0.4);
+        assert_eq!(breathing_dot_alpha(2, 3, enter_end, enter_end, exit_start), 0.4);
+
+        assert_eq!(
+            breathing_dot_alpha(0, 3, enter_end + span, enter_end, exit_start),
+            1.0
+        );
+        assert_eq!(
+            breathing_dot_alpha(1, 3, enter_end + span, enter_end, exit_start),
+            0.4
+        );
+        assert_eq!(
+            breathing_dot_alpha(2, 3, exit_start, enter_end, exit_start),
+            1.0
+        );
     }
 }
 

@@ -23,6 +23,12 @@ pub fn parse_lrc_file(path: &std::path::Path) -> Result<model::SyncedLyrics, Str
     Ok(parse_auto(&content))
 }
 
+pub use renderer_wire::SceneBuildParams;
+
 pub fn scene_json(lyrics: &model::SyncedLyrics, width: u32, height: u32) -> String {
     renderer_wire::scene_json(lyrics, width, height)
+}
+
+pub fn scene_json_with(lyrics: &model::SyncedLyrics, params: &SceneBuildParams) -> String {
+    renderer_wire::scene_json_with(lyrics, params)
 }

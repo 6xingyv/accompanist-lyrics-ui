@@ -346,6 +346,18 @@ fn parse_agent_types(metadata: &XmlElement) -> HashMap<String, String> {
         .collect()
 }
 
+/// Decide each line's left/right side, matching lyrics-core `TTMLParser.computeLineAlignments`
+/// (Apple Music `assembleProcessedLines` with first-agent seed).
+///
+/// - **person** / **other**: keep the current side while the same agent keeps
+///   singing; flip when the agent id changes. (`other` is handled like `person`
+///   here — same as lyrics-core.)
+/// - **group**: always Start; transparent to the flip (does not update current agent).
+/// - missing agent (`none`): keep the current side without updating current agent.
+/// - undeclared agent type defaults to `person`.
+///
+/// Starting side is seeded from the first line's agent id digits:
+/// odd (v1/v3/…) → left/Start, even (v2/v4/…) → right/End.
 fn compute_line_alignments(
     sorted_lines: &[&XmlElement],
     agent_types: &HashMap<String, String>,
@@ -368,37 +380,40 @@ fn compute_line_alignments(
     let mut on_right = first_ordinal % 2 == 0;
     let mut current_person: Option<String> = None;
 
+    let side = |on_right: bool| {
+        if on_right {
+            KaraokeAlignment::End
+        } else {
+            KaraokeAlignment::Start
+        }
+    };
+
     sorted_lines
         .iter()
         .map(|p| {
             let agent_id = p.attr("ttm:agent");
-            let agent_type = agent_id
-                .and_then(|id| agent_types.get(id))
-                .map(|value| value.as_str())
-                .unwrap_or(if agent_id.is_some() { "person" } else { "none" });
+            // Match lyrics-core: no agent → "none"; unknown agent id → "person".
+            let agent_type = if agent_id.is_none() {
+                "none"
+            } else {
+                agent_id
+                    .and_then(|id| agent_types.get(id))
+                    .map(|value| value.as_str())
+                    .unwrap_or("person")
+            };
             match agent_type {
                 "group" => KaraokeAlignment::Start,
-                "other" => KaraokeAlignment::End,
-                "person" => {
+                // lyrics-core groups `other` with `person` (flip + side()).
+                "other" | "person" => {
                     if current_person.is_none() {
                         current_person = agent_id.map(ToString::to_string);
                     } else if agent_id != current_person.as_deref() {
                         on_right = !on_right;
                         current_person = agent_id.map(ToString::to_string);
                     }
-                    if on_right {
-                        KaraokeAlignment::End
-                    } else {
-                        KaraokeAlignment::Start
-                    }
+                    side(on_right)
                 }
-                _ => {
-                    if on_right {
-                        KaraokeAlignment::End
-                    } else {
-                        KaraokeAlignment::Start
-                    }
-                }
+                _ => side(on_right),
             }
         })
         .collect()

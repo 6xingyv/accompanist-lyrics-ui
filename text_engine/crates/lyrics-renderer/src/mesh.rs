@@ -288,23 +288,54 @@ fn mesh_to_pixel_matrix(width: f32, height: f32) -> Matrix {
     Matrix::new_all(sx, 0.0, tx, 0.0, sy, ty, 0.0, 0.0, 1.0)
 }
 
-/// Build a full-resolution image of the original artwork (ARGB_8888 → RGBA8888) for
-/// the top-bar thumbnail.
+/// Max edge for the top-bar thumbnail image. Very large SMTC / media-session art
+/// (3k–4k) can fail Skia's `Image::from_raster_data` / GPU upload; the thumb is
+/// only drawn at ~68dp so 512px is plenty.
+const THUMBNAIL_MAX_EDGE: usize = 512;
+
+/// Build an image of the original artwork (ARGB_8888 → RGBA8888) for the top-bar
+/// thumbnail. Large sources are box-downscaled so upload always succeeds.
 fn make_thumbnail_image(pixels: &[u32], width: usize, height: usize) -> Option<Image> {
-    let mut rgba = Vec::with_capacity(width * height * 4);
-    for &argb in &pixels[..width * height] {
-        rgba.push(((argb >> 16) & 0xff) as u8); // R
-        rgba.push(((argb >> 8) & 0xff) as u8); // G
-        rgba.push((argb & 0xff) as u8); // B
-        rgba.push(((argb >> 24) & 0xff) as u8); // A
+    if width == 0 || height == 0 || pixels.len() < width * height {
+        return None;
     }
+
+    let max_edge = width.max(height);
+    let (out_w, out_h, rgba) = if max_edge > THUMBNAIL_MAX_EDGE {
+        let scale = THUMBNAIL_MAX_EDGE as f32 / max_edge as f32;
+        let out_w = ((width as f32 * scale).round() as usize).max(1);
+        let out_h = ((height as f32 * scale).round() as usize).max(1);
+        let mut rgba = Vec::with_capacity(out_w * out_h * 4);
+        for y in 0..out_h {
+            let src_y = y * height / out_h;
+            for x in 0..out_w {
+                let src_x = x * width / out_w;
+                let argb = pixels[src_y * width + src_x];
+                rgba.push(((argb >> 16) & 0xff) as u8);
+                rgba.push(((argb >> 8) & 0xff) as u8);
+                rgba.push((argb & 0xff) as u8);
+                rgba.push(((argb >> 24) & 0xff) as u8);
+            }
+        }
+        (out_w, out_h, rgba)
+    } else {
+        let mut rgba = Vec::with_capacity(width * height * 4);
+        for &argb in &pixels[..width * height] {
+            rgba.push(((argb >> 16) & 0xff) as u8);
+            rgba.push(((argb >> 8) & 0xff) as u8);
+            rgba.push((argb & 0xff) as u8);
+            rgba.push(((argb >> 24) & 0xff) as u8);
+        }
+        (width, height, rgba)
+    };
+
     let info = ImageInfo::new(
-        ISize::new(width as i32, height as i32),
+        ISize::new(out_w as i32, out_h as i32),
         ColorType::RGBA8888,
         AlphaType::Unpremul,
         None,
     );
-    Image::from_raster_data(&info, Data::new_copy(&rgba), width * 4)
+    Image::from_raster_data(&info, Data::new_copy(&rgba), out_w * 4)
 }
 
 fn make_album_shader(processed_rgba: &[u8]) -> Option<Shader> {

@@ -495,6 +495,24 @@ pub struct RendererMetrics {
     pub content_height: f32,
 }
 
+/// Wall-clock cost of one `render_frame_to_canvas` call, split by phase.
+/// Times are milliseconds. Hosts (desktop) can log these alongside flush/swap.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct EngineFrameTiming {
+    /// Resolve Skia typefaces for the scene (usually near-zero after first frame).
+    pub typefaces_ms: f64,
+    /// Dynamic line layouts, scroll targets, spring/manual-scroll cascade.
+    pub layout_ms: f64,
+    /// Mesh-gradient background (CPU breathe + Skia record of vertices/blur).
+    pub background_ms: f64,
+    /// Lyric line draw pass (glyph batches, DoF blur layers, edge fade).
+    pub lyrics_ms: f64,
+    /// In-surface player top bar.
+    pub top_bar_ms: f64,
+    /// Sum of the phases above (excludes any work outside the engine).
+    pub total_ms: f64,
+}
+
 #[derive(Debug)]
 pub struct LyricsRenderer {
     font_system: FontSystem,
@@ -570,6 +588,8 @@ pub struct LyricsRenderer {
     last_mesh_frame_at: Option<Instant>,
     /// Global fade-in for the background as new art becomes ready.
     background_alpha: f32,
+    /// Timing of the most recent `render_frame_to_canvas` call.
+    last_frame_timing: EngineFrameTiming,
 }
 
 #[derive(Debug, Clone)]
@@ -995,7 +1015,13 @@ impl LyricsRenderer {
             mesh_smoothed_loudness: 0.0,
             last_mesh_frame_at: None,
             background_alpha: 0.0,
+            last_frame_timing: EngineFrameTiming::default(),
         }
+    }
+
+    /// Timing breakdown for the most recent frame render.
+    pub fn last_frame_timing(&self) -> EngineFrameTiming {
+        self.last_frame_timing
     }
 
     /// Install the album artwork for the GPU mesh-gradient background. `pixels` is
@@ -1146,9 +1172,15 @@ impl LyricsRenderer {
         current_time_ms: i32,
         canvas: &skia_safe::Canvas,
     ) -> i32 {
+        let frame_start = Instant::now();
+        let mut timing = EngineFrameTiming::default();
+
+        let phase = Instant::now();
         let typeface_stats = self.ensure_skia_typefaces_for_scene();
+        timing.typefaces_ms = phase_ms(phase);
         let should_log_debug = self.should_log_render_debug(current_time_ms);
 
+        let phase = Instant::now();
         let (
             target_layouts,
             auto_scroll_y,
@@ -1162,6 +1194,7 @@ impl LyricsRenderer {
             focus_end,
         ) = {
             let Some(scene) = &self.scene else {
+                self.last_frame_timing = timing;
                 return -3;
             };
 
@@ -1183,11 +1216,15 @@ impl LyricsRenderer {
                 focus_end,
             )
         };
+        // First half of layout (targets); spring half is timed after background.
+        let mut layout_ms = phase_ms(phase);
 
         // Bottom layer: the opaque GPU mesh-gradient background (no-op unless the
         // engine owns the full surface). Draws before any lyrics and advances its
         // own loudness-paced animation clock.
+        let phase = Instant::now();
         let background_animating = self.draw_background(canvas, width, height as f32);
+        timing.background_ms = phase_ms(phase);
 
         // A seek (the user tapped a lyric, or scrubbed) is a discontinuous jump
         // in playback time. If it lands while a manual/plain-list view is still
@@ -1195,6 +1232,7 @@ impl LyricsRenderer {
         // clearing the manual offset. This makes a manually revealed far lyric
         // behave like an ordinary on-screen lyric click instead of being judged
         // against the old auto-scroll target and snapping as an "ultra far" jump.
+        let phase = Instant::now();
         self.prepare_seek_transition(current_time_ms, target_layouts.len());
 
         // The combined scroll = auto position + the manual-scroll offset (rubber
@@ -1226,6 +1264,8 @@ impl LyricsRenderer {
                 }
             }
         }
+        layout_ms += phase_ms(phase);
+        timing.layout_ms = layout_ms;
         // While the user manually scrolls the depth-of-field blur is eased away
         // so the lyrics stay sharp for reading.
         let blur_scale = (1.0 - self.manual_scroll_blur_release).clamp(0.0, 1.0);
@@ -1278,6 +1318,7 @@ impl LyricsRenderer {
         // a faint bright 1px seam at the band top/bottom under that blend (the edge
         // pixel gets fractional coverage that the fade doesn't fully zero). Aligning
         // to the pixel grid removes the seam.
+        let phase = Instant::now();
         let band_top = content_top.round();
         let band_bottom = (height as f32 - content_bottom).round();
         let inset_lyrics = content_top > 0.0 || content_bottom > 0.0;
@@ -1372,8 +1413,6 @@ impl LyricsRenderer {
                         interlude,
                         &scene.config,
                         current_time_ms,
-                        scene.focus_alpha(line, current_time_ms)
-                            * dynamic_layout.interlude_visibility,
                     );
                 }
             }
@@ -1535,10 +1574,12 @@ impl LyricsRenderer {
         if isolate_lyrics || inset_lyrics {
             canvas.restore();
         }
+        timing.lyrics_ms = phase_ms(phase);
 
         // Player top bar (thumbnail + title/artist + ⋯ button) over the background,
         // in the top-inset region above the lyrics band. Returns whether an
         // overflowing title/artist is marqueeing so the loop keeps ticking.
+        let phase = Instant::now();
         let mut top_bar_animating = false;
         if let Some(top_bar) = &scene.top_bar {
             top_bar_animating = draw_top_bar_skia(
@@ -1549,6 +1590,9 @@ impl LyricsRenderer {
                 current_time_ms,
             );
         }
+        timing.top_bar_ms = phase_ms(phase);
+        timing.total_ms = phase_ms(frame_start);
+        self.last_frame_timing = timing;
 
         if should_log_debug {
             frame_stats.visible_font_ids = visible_font_ids.len();
@@ -1630,14 +1674,26 @@ impl LyricsRenderer {
             auto_scroll_y,
             scene.max_scroll_for_layouts(&dynamic_layouts),
         );
-        let content_y = y + scroll_y;
-        let hit = scene.lines.iter().enumerate().find(|(index, _)| {
-            dynamic_layouts.get(*index).is_some_and(|layout| {
-                layout.text_visibility > 0.001
-                    && content_y >= layout.top
-                    && content_y <= layout.top + layout.height
+        // Prefer the on-screen spring layouts when available (match what the user
+        // sees). Fall back to content-space targets + scroll for the first frame.
+        let hit = if self.frame_layouts.len() == scene.lines.len() {
+            scene.lines.iter().enumerate().find(|(index, _)| {
+                self.frame_layouts.get(*index).is_some_and(|layout| {
+                    layout.text_visibility > 0.001
+                        && y >= layout.top
+                        && y <= layout.top + layout.height
+                })
             })
-        });
+        } else {
+            let content_y = y + scroll_y;
+            scene.lines.iter().enumerate().find(|(index, _)| {
+                dynamic_layouts.get(*index).is_some_and(|layout| {
+                    layout.text_visibility > 0.001
+                        && content_y >= layout.top
+                        && content_y <= layout.top + layout.height
+                })
+            })
+        };
         if let Some((_, line)) = hit {
             let source_index = line.source_index;
             self.pending_lyric_click_seek = Some(PendingLyricClickSeek {
@@ -1650,6 +1706,16 @@ impl LyricsRenderer {
             self.pending_lyric_click_seek = None;
             -1
         }
+    }
+
+    /// Start time (ms) of the scene line with the given `source_index`, if present.
+    pub fn line_start_ms(&self, source_index: usize) -> Option<i32> {
+        self.scene
+            .as_ref()?
+            .lines
+            .iter()
+            .find(|line| line.source_index == source_index)
+            .map(|line| line.start)
     }
 }
 
@@ -1949,6 +2015,11 @@ fn focus_alpha_from_progress(progress: f32, min_alpha: f32) -> f32 {
 
 /// Smoothstep ease-in-out for a `[0, 1]` progress. Used to smooth otherwise-linear
 /// fades (e.g. the background artwork bloom) so they accelerate and settle.
+#[inline]
+fn phase_ms(start: Instant) -> f64 {
+    start.elapsed().as_secs_f64() * 1000.0
+}
+
 fn ease_in_out(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
@@ -2215,6 +2286,35 @@ mod tests {
         assert_eq!(sp.rubber_band_coefficient, 0.3);
         assert_eq!(sp.blur_restore_ms, 1500);
         assert_eq!(sp.blur_fade_out_rate, 9.0);
+    }
+
+    #[test]
+    fn interlude_alignment_follows_next_main_past_before_accompaniment() {
+        let json = r#"{
+            "lines": [
+                {
+                    "kind": "karaoke", "start": 0, "end": 1000,
+                    "isAccompaniment": false, "alignment": "start",
+                    "translation": null, "phonetic": null, "syllables": []
+                },
+                {
+                    "kind": "karaoke", "start": 8000, "end": 9000,
+                    "isAccompaniment": true, "alignment": "start",
+                    "translation": null, "phonetic": null, "syllables": []
+                },
+                {
+                    "kind": "karaoke", "start": 9000, "end": 10000,
+                    "isAccompaniment": false, "alignment": "end",
+                    "translation": null, "phonetic": null, "syllables": []
+                }
+            ]
+        }"#;
+        let scene: LyricsScene = serde_json::from_str(json).unwrap();
+
+        assert_eq!(
+            layout::interlude_right_alignments(&scene.lines),
+            vec![false, true, true]
+        );
     }
 
     // The blur sharp-band knob must actually change the blur: a row 5 line-heights

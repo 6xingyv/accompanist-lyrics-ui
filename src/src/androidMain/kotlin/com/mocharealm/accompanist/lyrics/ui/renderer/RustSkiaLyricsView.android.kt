@@ -13,6 +13,7 @@ import android.view.GestureDetector
 import android.view.MotionEvent
 import android.view.TextureView
 import android.view.VelocityTracker
+import android.view.View
 import android.view.ViewConfiguration
 import com.mocharealm.accompanist.lyrics.core.model.SyncedLyrics
 import com.mocharealm.accompanist.lyrics.text.NativeFontConfig
@@ -457,6 +458,21 @@ class RustSkiaLyricsView @JvmOverloads constructor(
     }
 
     override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {
+    }
+
+    override fun onWindowVisibilityChanged(visibility: Int) {
+        super.onWindowVisibilityChanged(visibility)
+        if (visibility != View.VISIBLE) {
+            // TextureView may retain its SurfaceTexture while the app is in the
+            // background, so no destroyed/available callback is guaranteed. Drop
+            // EGL explicitly and rebuild it on return to refresh buffer geometry.
+            releaseRenderSurface()
+            return
+        }
+
+        if (renderSurface == null && isAvailable && width > 0 && height > 0 && !engineClosed) {
+            surfaceTexture?.let { bindRenderSurface(it, width, height) }
+        }
     }
 
     /**

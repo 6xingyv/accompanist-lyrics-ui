@@ -11,3 +11,4 @@ mod renderer;
 mod system_fonts;
 
 pub use core::{LayoutResult, PendingUpload, TextEngine};
+pub use renderer::EngineFrameTiming;

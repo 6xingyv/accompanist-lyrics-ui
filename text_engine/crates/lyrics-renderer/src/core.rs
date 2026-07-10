@@ -331,6 +331,11 @@ impl TextEngine {
             .render_frame_to_canvas(current_time_ms, canvas)
     }
 
+    /// Wall-clock phase breakdown for the most recent lyrics frame.
+    pub fn last_engine_frame_timing(&self) -> crate::renderer::EngineFrameTiming {
+        self.renderer.last_frame_timing()
+    }
+
     /// Install album artwork for the GPU mesh-gradient background (ARGB_8888).
     pub fn set_background_art(&mut self, pixels: &[u32], width: usize, height: usize, seed: u32) {
         self.renderer
@@ -349,6 +354,11 @@ impl TextEngine {
 
     pub fn hit_test_lyrics_line(&mut self, x: f32, y: f32, current_time_ms: i32) -> i32 {
         self.renderer.hit_test_line(x, y, current_time_ms)
+    }
+
+    /// Start time of the scene line identified by `source_index` (from hit-test).
+    pub fn lyrics_line_start_ms(&self, source_index: usize) -> Option<i32> {
+        self.renderer.line_start_ms(source_index)
     }
 
     /// Whether `(x, y)` (render px) hits the top bar's ⋯ button.

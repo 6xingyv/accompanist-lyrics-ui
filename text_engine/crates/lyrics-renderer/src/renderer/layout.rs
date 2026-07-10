@@ -133,10 +133,15 @@ impl LyricsRenderer {
             content_width
         };
         let right_align_offset = content_width - layout_width;
+        // An interlude belongs visually to the lyrics that follow it. Flattened
+        // karaoke clusters may put a "before" accompaniment ahead of their main
+        // line, so using either the immediately previous or current flattened row
+        // can pick the wrong singer side. Resolve the next non-accompaniment line
+        // up front and let every intervening row inherit that main line's side.
+        let interlude_right_alignments = interlude_right_alignments(&scene.lines);
         let mut lines = Vec::with_capacity(scene.lines.len());
         let mut cursor_y = config.keep_alive;
         let mut previous_end: Option<i32> = None;
-        let mut previous_right_aligned = false;
 
         for (line_index, input) in scene.lines.into_iter().enumerate() {
             let mut prepared = match input {
@@ -324,11 +329,7 @@ impl LyricsRenderer {
                 line_index,
                 prepared.start,
                 previous_end,
-                if line_index == 0 {
-                    prepared.right_aligned
-                } else {
-                    previous_right_aligned
-                },
+                interlude_right_alignments[line_index],
                 &config,
             ) {
                 prepared.height += interlude.height;
@@ -337,7 +338,6 @@ impl LyricsRenderer {
 
             cursor_y += prepared.height;
             previous_end = Some(prepared.end);
-            previous_right_aligned = prepared.right_aligned;
             lines.push(prepared);
         }
 
@@ -1241,6 +1241,27 @@ fn input_line_right_aligned(input: &LyricsLineInput) -> bool {
         }
         LyricsLineInput::Synced(line) => contains_rtl(&line.content),
     }
+}
+
+/// Resolve the side of the next main (non-accompaniment) line for every flattened
+/// input row. A trailing accompaniment with no following main falls back to its
+/// own side, which keeps malformed/incomplete input deterministic.
+pub(super) fn interlude_right_alignments(inputs: &[LyricsLineInput]) -> Vec<bool> {
+    let mut result = vec![false; inputs.len()];
+    let mut next_main_alignment = None;
+
+    for (index, input) in inputs.iter().enumerate().rev() {
+        let is_main = match input {
+            LyricsLineInput::Karaoke(line) => !line.is_accompaniment,
+            LyricsLineInput::Synced(_) => true,
+        };
+        if is_main {
+            next_main_alignment = Some(input_line_right_aligned(input));
+        }
+        result[index] = next_main_alignment.unwrap_or_else(|| input_line_right_aligned(input));
+    }
+
+    result
 }
 
 pub(super) fn prepare_karaoke_syllables(

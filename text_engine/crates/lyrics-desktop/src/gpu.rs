@@ -10,8 +10,11 @@ use skia_safe::{
 };
 use std::num::NonZeroU32;
 use std::sync::Arc;
+use std::time::Instant;
 use tao::dpi::PhysicalSize;
 use tao::window::Window;
+
+use crate::frame_timing::GpuFrameTiming;
 
 type GlWindowSurface = Surface<WindowSurface>;
 
@@ -21,6 +24,12 @@ pub(crate) struct DesktopGpuRenderer {
     direct_context: gpu::DirectContext,
     skia_surface: Option<skia_safe::Surface>,
     size: PhysicalSize<u32>,
+    vsync: bool,
+}
+
+pub(crate) struct DrawFrameResult {
+    pub engine_result: i32,
+    pub timing: GpuFrameTiming,
 }
 
 impl DesktopGpuRenderer {
@@ -40,6 +49,8 @@ impl DesktopGpuRenderer {
                 .map_err(|error| format!("failed to create GL display: {error}"))?
         };
 
+        // Prefer double-buffered configs with a depth/stencil for Skia and a solid
+        // colour buffer. Transparency is nice-to-have but not required.
         let template = ConfigTemplateBuilder::new()
             .with_alpha_size(8)
             .with_stencil_size(8)
@@ -76,7 +87,14 @@ impl DesktopGpuRenderer {
         let gl_context = not_current
             .make_current(&gl_surface)
             .map_err(|error| format!("failed to make GL context current: {error}"))?;
-        let _ = gl_surface.set_swap_interval(&gl_context, SwapInterval::Wait(non_zero(1)));
+
+        // VSync is required to avoid tearing: Wait(1) blocks swap_buffers on the
+        // display refresh. Retry once after make_current — some WGL drivers only
+        // accept the interval after the context is current.
+        let vsync = enable_vsync(&gl_surface, &gl_context);
+        if !vsync {
+            eprintln!("warning: failed to enable GL swap interval (vsync); frames may tear");
+        }
 
         let interface =
             gpu::gl::Interface::new_load_with_cstr(|name| display.get_proc_address(name))
@@ -92,7 +110,12 @@ impl DesktopGpuRenderer {
             direct_context,
             skia_surface: Some(skia_surface),
             size,
+            vsync,
         })
+    }
+
+    pub(crate) fn vsync_enabled(&self) -> bool {
+        self.vsync
     }
 
     pub(crate) fn resize(&mut self, size: PhysicalSize<u32>) -> Result<(), String> {
@@ -111,27 +134,71 @@ impl DesktopGpuRenderer {
         if self.skia_surface.is_none() {
             return Err("failed to recreate Skia GL surface after resize".to_string());
         }
+        // Re-assert vsync after resize — some drivers reset the interval.
+        if !self.vsync {
+            self.vsync = enable_vsync(&self.gl_surface, &self.gl_context);
+        } else {
+            let _ = self
+                .gl_surface
+                .set_swap_interval(&self.gl_context, SwapInterval::Wait(non_zero(1)));
+        }
         Ok(())
     }
 
-    pub(crate) fn draw_frame<F>(&mut self, draw: F) -> Result<i32, String>
+    pub(crate) fn draw_frame<F>(&mut self, draw: F) -> Result<DrawFrameResult, String>
     where
         F: FnOnce(&skia_safe::Canvas) -> i32,
     {
+        let frame_start = Instant::now();
         let surface = self
             .skia_surface
             .as_mut()
             .ok_or("missing Skia GL surface")?;
-        let result = {
+
+        let record_start = Instant::now();
+        let engine_result = {
             let canvas = surface.canvas();
-            canvas.clear(Color4f::new(0.0, 0.0, 0.0, 0.0));
+            canvas.clear(Color4f::new(0.0, 0.0, 0.0, 1.0));
             draw(canvas)
         };
+        let record_ms = elapsed_ms(record_start);
+
+        // Flush GPU work before presenting so the swap shows a complete frame.
+        let flush_start = Instant::now();
         self.direct_context.flush_and_submit_surface(surface, None);
+        let flush_ms = elapsed_ms(flush_start);
+
+        // When vsync is on this call blocks until the next vertical blank, which
+        // is the primary frame clock for the desktop host.
+        let swap_start = Instant::now();
         self.gl_surface
             .swap_buffers(&self.gl_context)
             .map_err(|error| format!("failed to swap GL buffers: {error}"))?;
-        Ok(result)
+        let swap_ms = elapsed_ms(swap_start);
+
+        Ok(DrawFrameResult {
+            engine_result,
+            timing: GpuFrameTiming {
+                record_ms,
+                flush_ms,
+                swap_ms,
+                total_ms: elapsed_ms(frame_start),
+            },
+        })
+    }
+}
+
+fn elapsed_ms(start: Instant) -> f64 {
+    start.elapsed().as_secs_f64() * 1000.0
+}
+
+fn enable_vsync(surface: &GlWindowSurface, context: &PossiblyCurrentContext) -> bool {
+    match surface.set_swap_interval(context, SwapInterval::Wait(non_zero(1))) {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!("set_swap_interval(Wait(1)) failed: {error}");
+            false
+        }
     }
 }
 

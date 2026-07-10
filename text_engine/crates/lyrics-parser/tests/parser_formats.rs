@@ -67,6 +67,83 @@ fn ttml_parser_reads_span_syllables() {
     assert_eq!(line.syllables[0].content, "Hel");
 }
 
+/// Port of lyrics-core `TTMLParserTest.testAlignmentFlipsOnPersonChangeWithGroupTransparent`.
+#[test]
+fn ttml_alignment_flips_on_person_change_with_group_transparent() {
+    let ttml = r#"
+        <tt xmlns="http://www.w3.org/ns/ttml" xmlns:ttm="http://www.w3.org/ns/ttml#metadata">
+            <head><metadata>
+                <ttm:agent type="person" xml:id="v1"/>
+                <ttm:agent type="person" xml:id="v2"/>
+                <ttm:agent type="person" xml:id="v3"/>
+                <ttm:agent type="group" xml:id="v4"/>
+            </metadata></head>
+            <body><div>
+                <p begin="00:00.000" end="00:01.000" ttm:agent="v1"><span begin="00:00.000" end="00:01.000">One</span></p>
+                <p begin="00:01.000" end="00:02.000" ttm:agent="v4"><span begin="00:01.000" end="00:02.000">Everyone</span></p>
+                <p begin="00:02.000" end="00:03.000" ttm:agent="v2"><span begin="00:02.000" end="00:03.000">Two</span></p>
+                <p begin="00:03.000" end="00:04.000" ttm:agent="v3"><span begin="00:03.000" end="00:04.000">Three</span></p>
+            </div></body>
+        </tt>
+    "#;
+    let lines = TtmlParser::default().parse(ttml).lines;
+    assert_eq!(lines.len(), 4);
+    assert_eq!(karaoke_alignment(&lines[0]), KaraokeAlignment::Start); // v1
+    assert_eq!(karaoke_alignment(&lines[1]), KaraokeAlignment::Start); // group
+    assert_eq!(karaoke_alignment(&lines[2]), KaraokeAlignment::End); // v2 flips
+    assert_eq!(karaoke_alignment(&lines[3]), KaraokeAlignment::Start); // v3 flips
+}
+
+/// Port of lyrics-core `TTMLParserTest.testOtherAgentAlwaysRightAndTransparent`.
+#[test]
+fn ttml_other_agent_matches_lyrics_core() {
+    let ttml = r#"
+        <tt xmlns="http://www.w3.org/ns/ttml" xmlns:ttm="http://www.w3.org/ns/ttml#metadata">
+            <head><metadata>
+                <ttm:agent type="person" xml:id="v1"/>
+                <ttm:agent type="other" xml:id="v2"/>
+            </metadata></head>
+            <body><div>
+                <p begin="00:00.000" end="00:01.000" ttm:agent="v1"><span begin="00:00.000" end="00:01.000">One</span></p>
+                <p begin="00:01.000" end="00:02.000" ttm:agent="v2"><span begin="00:01.000" end="00:02.000">Other</span></p>
+                <p begin="00:02.000" end="00:03.000" ttm:agent="v1"><span begin="00:02.000" end="00:03.000">One again</span></p>
+            </div></body>
+        </tt>
+    "#;
+    let lines = TtmlParser::default().parse(ttml).lines;
+    assert_eq!(lines.len(), 3);
+    assert_eq!(karaoke_alignment(&lines[0]), KaraokeAlignment::Start);
+    assert_eq!(karaoke_alignment(&lines[1]), KaraokeAlignment::End);
+    assert_eq!(karaoke_alignment(&lines[2]), KaraokeAlignment::Start);
+}
+
+/// Port of lyrics-core `TTMLParserTest.testAlignmentSeedsFromFirstLineAgent`.
+#[test]
+fn ttml_alignment_seeds_from_first_line_agent() {
+    let ttml = r#"
+        <tt xmlns="http://www.w3.org/ns/ttml" xmlns:ttm="http://www.w3.org/ns/ttml#metadata">
+            <body><div>
+                <p begin="00:00.000" end="00:01.000" ttm:agent="v2"><span begin="00:00.000" end="00:01.000">First</span></p>
+                <p begin="00:01.000" end="00:02.000" ttm:agent="v1"><span begin="00:01.000" end="00:02.000">Second</span></p>
+                <p begin="00:02.000" end="00:03.000" ttm:agent="v2"><span begin="00:02.000" end="00:03.000">Third</span></p>
+            </div></body>
+        </tt>
+    "#;
+    let lines = TtmlParser::default().parse(ttml).lines;
+    assert_eq!(lines.len(), 3);
+    assert_eq!(karaoke_alignment(&lines[0]), KaraokeAlignment::End); // v2 even → right
+    assert_eq!(karaoke_alignment(&lines[1]), KaraokeAlignment::Start);
+    assert_eq!(karaoke_alignment(&lines[2]), KaraokeAlignment::End);
+}
+
+fn karaoke_alignment(line: &SyncedLineKind) -> KaraokeAlignment {
+    match line {
+        SyncedLineKind::MainKaraoke(line) => line.alignment,
+        SyncedLineKind::AccompanimentKaraoke(line) => line.alignment,
+        SyncedLineKind::Synced(_) => KaraokeAlignment::Unspecified,
+    }
+}
+
 #[test]
 fn auto_parser_keeps_lyrics_core_order() {
     let auto = AutoParser::default();

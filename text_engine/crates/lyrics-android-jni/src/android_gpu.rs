@@ -18,6 +18,12 @@ extern "C" {
         surface: jobject,
     ) -> *mut ANativeWindow;
     pub(super) fn ANativeWindow_release(window: *mut ANativeWindow);
+    pub(super) fn ANativeWindow_setBuffersGeometry(
+        window: *mut ANativeWindow,
+        width: i32,
+        height: i32,
+        format: i32,
+    ) -> i32;
 }
 
 pub struct AndroidGpuRenderer {
@@ -79,6 +85,17 @@ impl AndroidGpuRenderer {
                 ANativeWindow_release(window);
             }
             return Err("invalid native window");
+        }
+
+        // SurfaceTexture.setDefaultBufferSize is only a default and some Android
+        // window/surface restore paths replace it while the TextureView survives.
+        // Pin the producer geometry immediately before EGL creates its window
+        // surface; otherwise Skia can keep a downscaled target inside a restored
+        // full-size buffer, producing a small image in a black window.
+        if ANativeWindow_setBuffersGeometry(window, frame_width as i32, frame_height as i32, 0) != 0
+        {
+            ANativeWindow_release(window);
+            return Err("ANativeWindow_setBuffersGeometry failed");
         }
 
         // match vulkan::AndroidVulkanRenderer::from_native_window(window, frame_width, frame_height) {

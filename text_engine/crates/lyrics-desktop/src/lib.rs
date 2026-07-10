@@ -1,29 +1,45 @@
 #![cfg(not(target_os = "android"))]
 
+#[cfg(windows)]
+mod audio_capture;
+mod frame_timing;
 mod gpu;
+#[cfg(windows)]
+mod gpu_preference;
 
+use frame_timing::{frame_timing_enabled, FrameSample, FrameTimingLogger};
 use gpu::DesktopGpuRenderer;
 use lyrics_parser::parser::{auto_parser::AutoParser, lyrics_parser::LyricsParser};
+use lyrics_parser::SceneBuildParams;
 use lyrics_renderer::TextEngine;
-use skia_safe::Color;
+use skia_safe::{
+    paint, Color, Color4f, Font, FontMgr, FontStyle, Paint, Point, Rect, TextBlob,
+};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
-use tao::dpi::{LogicalSize, PhysicalSize};
-use tao::event::{Event, WindowEvent};
+use tao::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
+use tao::event::{ElementState, Event, MouseButton, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoop};
-use tao::window::WindowBuilder;
+use tao::window::{CursorIcon, Window, WindowBuilder};
 
-const DEFAULT_WIDTH: u32 = 900;
-const DEFAULT_HEIGHT: u32 = 260;
+const DEFAULT_WIDTH: u32 = 420;
+const DEFAULT_HEIGHT: u32 = 520;
 const SMTC_POLL_INTERVAL: Duration = Duration::from_millis(500);
-const FRAME_INTERVAL: Duration = Duration::from_millis(16);
+/// Used only when refresh-rate detection fails entirely.
+const DEFAULT_REFRESH_HZ: f64 = 60.0;
 const CLOCK_SEEK_SNAP_MS: f64 = 1000.0;
 const CLOCK_RECONCILE_MS: f64 = 350.0;
 const CLOCK_MAX_RATE: f64 = 2.5;
 const CLOCK_MAX_FRAME_MS: f64 = 64.0;
+
+/// Logical (density-independent) caption bar height — matches a compact Win11 title bar.
+const CAPTION_HEIGHT_DP: f32 = 32.0;
+const CAPTION_BUTTON_WIDTH_DP: f32 = 46.0;
+/// Max edge when feeding album art into the renderer (mesh only needs 32²; thumb ≤512).
+const ARTWORK_MAX_EDGE: u32 = 1024;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct PlaybackSnapshot {
@@ -32,6 +48,8 @@ struct PlaybackSnapshot {
     position_ms: i32,
     duration_ms: i32,
     is_playing: bool,
+    /// SMTC `SourceAppUserModelId` (e.g. `Spotify.exe`) for per-app audio capture.
+    source_app_id: String,
     artwork: Option<Arc<Artwork>>,
 }
 
@@ -57,12 +75,37 @@ struct AppConfig {
     recursive: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CaptionHit {
+    None,
+    Drag,
+    /// Toggle always-on-top (pin).
+    AlwaysOnTop,
+    Minimize,
+    Close,
+}
+
 pub fn run() -> Result<(), String> {
     env_logger::try_init().ok();
+
+    // Must run before any window / WGL context so hybrid GPU drivers see the
+    // OS-assigned adapter (Settings → Graphics) for this executable.
+    #[cfg(windows)]
+    gpu_preference::apply_windows_gpu_preference();
 
     let config = AppConfig::from_env_args()?;
     let (playback_tx, playback_rx) = mpsc::channel();
     spawn_smtc_listener(playback_tx);
+
+    #[cfg(windows)]
+    let audio_capture = {
+        let control = audio_capture::CaptureControl::new();
+        audio_capture::spawn(Arc::clone(&control));
+        eprintln!(
+            "[audio] per-app WASAPI process loopback armed (targets SMTC SourceAppUserModelId)"
+        );
+        control
+    };
 
     let event_loop = EventLoop::<()>::new();
     let window = Arc::new(
@@ -72,7 +115,7 @@ pub fn run() -> Result<(), String> {
                 DEFAULT_WIDTH as f64,
                 DEFAULT_HEIGHT as f64,
             ))
-            .with_min_inner_size(LogicalSize::new(360.0, 120.0))
+            .with_min_inner_size(LogicalSize::new(320.0, 240.0))
             .with_resizable(true)
             .with_decorations(false)
             .with_transparent(false)
@@ -80,48 +123,287 @@ pub fn run() -> Result<(), String> {
             .build(&event_loop)
             .map_err(|error| format!("failed to create tao window: {error}"))?,
     );
+    // Default pinned; caption pin button can toggle this off.
+    let mut always_on_top = true;
 
     let mut renderer = DesktopGpuRenderer::new(&window)?;
+    let vsync = renderer.vsync_enabled();
+    let mut display_timing = detect_display_timing(window.as_ref());
+    eprintln!(
+        "[frame] display refresh: prefer {:.0} Hz (monitor max {:.0} Hz, system max {:.0} Hz); vsync={}",
+        display_timing.prefer_hz,
+        display_timing.monitor_max_hz,
+        display_timing.system_max_hz,
+        if vsync { "on" } else { "off" }
+    );
 
-    let mut app = DesktopLyricsApp::new(config, playback_rx);
+    let timing_enabled = frame_timing_enabled();
+    if timing_enabled {
+        eprintln!(
+            "[frame] timing enabled (ACCOMPANIST_FRAME_TIMING); logging 1s averages to stderr"
+        );
+    }
+
+    let mut app = DesktopLyricsApp::new(
+        config,
+        playback_rx,
+        window.scale_factor() as f32,
+        FrameTimingLogger::new(timing_enabled),
+        always_on_top,
+        #[cfg(windows)]
+        audio_capture,
+    );
     app.install_placeholder_scene(window.inner_size());
 
+    let window_for_loop = Arc::clone(&window);
+    let mut next_frame_deadline = Instant::now();
+    // Once true, never go back to Poll/redraw — otherwise continuous frames
+    // overwrite ControlFlow::Exit and the Windows loop can hang in GetMessage.
+    let mut exiting = false;
     event_loop.run(move |event, _, control_flow| {
-        *control_flow = ControlFlow::WaitUntil(Instant::now() + FRAME_INTERVAL);
+        if exiting {
+            // begin_exit already calls process::exit; this is a safety net if
+            // we re-enter the handler with the flag set.
+            std::process::exit(0);
+        }
+
+        // Playing / animating: stay in Poll so redraw requests are not throttled by
+        // the SMTC 500ms idle wake. Idle: sleep until the next SMTC poll.
+        if app.wants_continuous_frames() {
+            *control_flow = ControlFlow::Poll;
+        } else {
+            *control_flow = ControlFlow::WaitUntil(Instant::now() + SMTC_POLL_INTERVAL);
+        }
 
         match event {
             Event::WindowEvent { event, .. } => match event {
                 WindowEvent::CloseRequested => {
-                    *control_flow = ControlFlow::Exit;
+                    begin_exit(
+                        &mut exiting,
+                        control_flow,
+                        &window_for_loop,
+                        #[cfg(windows)]
+                        &app.audio_capture,
+                    );
                 }
                 WindowEvent::Resized(size) => {
-                    app.resize(size);
+                    app.resize(size, window_for_loop.scale_factor() as f32);
                     if let Err(error) = renderer.resize(size) {
                         eprintln!("{error}");
                     }
-                    window.request_redraw();
+                    let next = detect_display_timing(window_for_loop.as_ref());
+                    if (next.prefer_hz - display_timing.prefer_hz).abs() >= 0.5 {
+                        eprintln!(
+                            "[frame] display refresh updated: prefer {:.0} Hz (monitor max {:.0})",
+                            next.prefer_hz, next.monitor_max_hz
+                        );
+                    }
+                    display_timing = next;
+                    window_for_loop.request_redraw();
                 }
-                WindowEvent::ScaleFactorChanged { new_inner_size, .. } => {
-                    app.resize(*new_inner_size);
+                WindowEvent::Moved(_) => {
+                    // Window may have crossed onto another monitor with a different max Hz.
+                    let next = detect_display_timing(window_for_loop.as_ref());
+                    if (next.prefer_hz - display_timing.prefer_hz).abs() >= 0.5 {
+                        eprintln!(
+                            "[frame] display refresh updated: prefer {:.0} Hz (monitor max {:.0})",
+                            next.prefer_hz, next.monitor_max_hz
+                        );
+                        display_timing = next;
+                    }
+                }
+                WindowEvent::ScaleFactorChanged {
+                    scale_factor,
+                    new_inner_size,
+                } => {
+                    app.resize(*new_inner_size, scale_factor as f32);
                     if let Err(error) = renderer.resize(*new_inner_size) {
                         eprintln!("{error}");
                     }
-                    window.request_redraw();
+                    display_timing = detect_display_timing(window_for_loop.as_ref());
+                    window_for_loop.request_redraw();
+                }
+                WindowEvent::CursorMoved { position, .. } => {
+                    app.on_cursor_moved(&window_for_loop, position);
+                }
+                WindowEvent::CursorLeft { .. } => {
+                    app.on_cursor_left(&window_for_loop);
+                }
+                WindowEvent::MouseInput { state, button, .. } => {
+                    if button == MouseButton::Left {
+                        match state {
+                            ElementState::Pressed => {
+                                // Drag / pin / minimize act on press; close + lyric seek
+                                // wait for release so a press-drag doesn't fire them.
+                                let hit = app.on_mouse_pressed(&window_for_loop);
+                                if hit == CaptionHit::AlwaysOnTop {
+                                    always_on_top = !always_on_top;
+                                    window_for_loop.set_always_on_top(always_on_top);
+                                    app.set_always_on_top(always_on_top);
+                                    window_for_loop.request_redraw();
+                                }
+                            }
+                            ElementState::Released => {
+                                if app.on_mouse_released_close() {
+                                    begin_exit(
+                                        &mut exiting,
+                                        control_flow,
+                                        &window_for_loop,
+                                        #[cfg(windows)]
+                                        &app.audio_capture,
+                                    );
+                                } else if app.try_lyric_tap_seek() {
+                                    window_for_loop.request_redraw();
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                WindowEvent::Focused(false) => {
+                    app.on_mouse_released();
+                }
+                WindowEvent::Destroyed => {
+                    std::process::exit(0);
                 }
                 _ => {}
             },
             Event::MainEventsCleared => {
-                app.drain_playback_updates();
-                window.request_redraw();
+                if exiting {
+                    std::process::exit(0);
+                }
+                let dirty = app.drain_playback_updates();
+                if dirty || app.wants_continuous_frames() {
+                    window_for_loop.request_redraw();
+                }
             }
             Event::RedrawRequested(_) => {
-                if let Err(error) = app.render(&mut renderer, window.inner_size()) {
-                    eprintln!("{error}");
+                if exiting {
+                    std::process::exit(0);
                 }
+                // Software frame pace when vsync is unavailable: aim for the
+                // preferred (max) refresh interval so we don't spin at hundreds of fps.
+                if !vsync {
+                    let now = Instant::now();
+                    if now < next_frame_deadline {
+                        // Short sleep keeps Poll from burning a core while still
+                        // waking in time for the target cadence.
+                        thread::sleep(next_frame_deadline.saturating_duration_since(now));
+                    }
+                }
+
+                let frame_started = Instant::now();
+                match app.render(&mut renderer, window_for_loop.inner_size()) {
+                    Ok(need_more) => {
+                        // Always re-request while we need continuous frames. With
+                        // vsync, swap_buffers blocks on vblank so this paces to the
+                        // *active* display mode; without vsync we pace to prefer_hz.
+                        if !exiting && (need_more || app.wants_continuous_frames()) {
+                            window_for_loop.request_redraw();
+                        }
+                    }
+                    Err(error) => eprintln!("{error}"),
+                }
+
+                if !vsync {
+                    let budget = display_timing.frame_interval;
+                    next_frame_deadline = frame_started + budget;
+                    // If we overran the budget, schedule from now so we don't
+                    // accumulate permanent debt after a hitch.
+                    let now = Instant::now();
+                    if next_frame_deadline < now {
+                        next_frame_deadline = now;
+                    }
+                }
+            }
+            Event::LoopDestroyed => {
+                std::process::exit(0);
             }
             _ => {}
         }
     });
+}
+
+fn begin_exit(
+    exiting: &mut bool,
+    control_flow: &mut ControlFlow,
+    window: &Window,
+    #[cfg(windows)] audio_capture: &audio_capture::CaptureControl,
+) {
+    if *exiting {
+        // Second attempt (e.g. stuck Exit path) — force kill.
+        std::process::exit(0);
+    }
+    *exiting = true;
+    *control_flow = ControlFlow::Exit;
+    // Hide first so the user sees the window go away immediately.
+    window.set_visible(false);
+    #[cfg(windows)]
+    audio_capture.request_stop();
+    lyrics_renderer::audio::reset();
+
+    // tao's Windows event loop can leave the process alive after ControlFlow::Exit
+    // when continuous Poll/redraw or background SMTC/WASAPI threads keep the
+    // message pump from draining cleanly. Hard-exit here; destructors are skipped
+    // on purpose so GL/COM teardown cannot hang the process.
+    std::process::exit(0);
+}
+
+/// Preferred present / pacing rate derived from the OS display mode list.
+#[derive(Clone, Copy, Debug)]
+struct DisplayTiming {
+    /// Hz we try to run at (current monitor's max mode, else system max, else 60).
+    prefer_hz: f64,
+    /// Max mode Hz on the window's current monitor.
+    monitor_max_hz: f64,
+    /// Max mode Hz across all connected monitors.
+    system_max_hz: f64,
+    /// `1 / prefer_hz` for software pacing when vsync is off.
+    frame_interval: Duration,
+}
+
+fn detect_display_timing(window: &Window) -> DisplayTiming {
+    let mut system_max_hz = 0.0_f64;
+    for monitor in window.available_monitors() {
+        for mode in monitor.video_modes() {
+            system_max_hz = system_max_hz.max(mode.refresh_rate() as f64);
+        }
+    }
+
+    let mut monitor_max_hz = 0.0_f64;
+    if let Some(monitor) = window
+        .current_monitor()
+        .or_else(|| window.primary_monitor())
+    {
+        for mode in monitor.video_modes() {
+            monitor_max_hz = monitor_max_hz.max(mode.refresh_rate() as f64);
+        }
+    }
+
+    // Prefer the monitor the window is on; fall back to any attached display.
+    let prefer_hz = if monitor_max_hz >= 30.0 {
+        monitor_max_hz
+    } else if system_max_hz >= 30.0 {
+        system_max_hz
+    } else {
+        DEFAULT_REFRESH_HZ
+    }
+    .clamp(30.0, 500.0);
+
+    DisplayTiming {
+        prefer_hz,
+        monitor_max_hz: if monitor_max_hz >= 30.0 {
+            monitor_max_hz
+        } else {
+            prefer_hz
+        },
+        system_max_hz: if system_max_hz >= 30.0 {
+            system_max_hz
+        } else {
+            prefer_hz
+        },
+        frame_interval: Duration::from_secs_f64(1.0 / prefer_hz),
+    }
 }
 
 struct DesktopLyricsApp {
@@ -132,11 +414,38 @@ struct DesktopLyricsApp {
     current_track_key: Option<String>,
     current_artwork: Option<Arc<Artwork>>,
     current_lyrics: Option<lyrics_parser::SyncedLyrics>,
+    /// Live SMTC title/artist for the player top bar (Android `setTopBar`).
+    top_bar_title: String,
+    top_bar_artist: String,
     last_size: PhysicalSize<u32>,
+    density: f32,
+    cursor: PhysicalPosition<f64>,
+    cursor_inside: bool,
+    caption_pressed: Option<CaptionHit>,
+    /// Press position for tap-to-seek (ignored if the pointer moves too far).
+    pointer_down: Option<PhysicalPosition<f64>>,
+    /// Window always-on-top (pin) state — mirrored for caption icon drawing.
+    always_on_top: bool,
+    /// Last render return value — whether the engine asked for another frame.
+    last_animating: bool,
+    caption_font: Option<Font>,
+    frame_timing: FrameTimingLogger,
+    #[cfg(windows)]
+    audio_capture: Arc<audio_capture::CaptureControl>,
 }
 
+/// Max pointer travel (physical px) to still count as a lyric tap, not a drag.
+const TAP_SLOP_PX: f64 = 8.0;
+
 impl DesktopLyricsApp {
-    fn new(config: AppConfig, playback_rx: Receiver<PlaybackSnapshot>) -> Self {
+    fn new(
+        config: AppConfig,
+        playback_rx: Receiver<PlaybackSnapshot>,
+        density: f32,
+        frame_timing: FrameTimingLogger,
+        always_on_top: bool,
+        #[cfg(windows)] audio_capture: Arc<audio_capture::CaptureControl>,
+    ) -> Self {
         let mut engine = TextEngine::new(2048, 2048);
         engine.load_system_fonts();
 
@@ -148,8 +457,33 @@ impl DesktopLyricsApp {
             current_track_key: None,
             current_artwork: None,
             current_lyrics: None,
+            top_bar_title: String::new(),
+            top_bar_artist: String::new(),
             last_size: PhysicalSize::new(DEFAULT_WIDTH, DEFAULT_HEIGHT),
+            density: density.max(0.5),
+            cursor: PhysicalPosition::new(0.0, 0.0),
+            cursor_inside: false,
+            caption_pressed: None,
+            pointer_down: None,
+            always_on_top,
+            last_animating: true,
+            caption_font: make_caption_font(density.max(0.5)),
+            frame_timing,
+            #[cfg(windows)]
+            audio_capture,
         }
+    }
+
+    fn set_always_on_top(&mut self, pinned: bool) {
+        self.always_on_top = pinned;
+    }
+
+    fn caption_height_px(&self) -> f32 {
+        CAPTION_HEIGHT_DP * self.density
+    }
+
+    fn caption_button_width_px(&self) -> f32 {
+        CAPTION_BUTTON_WIDTH_DP * self.density
     }
 
     fn install_placeholder_scene(&mut self, size: PhysicalSize<u32>) {
@@ -168,51 +502,82 @@ impl DesktopLyricsApp {
         self.current_lyrics = Some(lyrics);
     }
 
-    fn resize(&mut self, size: PhysicalSize<u32>) {
+    fn resize(&mut self, size: PhysicalSize<u32>, density: f32) {
         let size = normalized_size(size);
-        if self.last_size == size {
+        let density = density.max(0.5);
+        let density_changed = (self.density - density).abs() > 0.001;
+        if self.last_size == size && !density_changed {
             return;
         }
         self.last_size = size;
+        self.density = density;
+        if density_changed {
+            self.caption_font = make_caption_font(density);
+        }
         if let Some(lyrics) = self.current_lyrics.clone() {
             self.set_lyrics_scene(&lyrics);
         }
     }
 
-    fn drain_playback_updates(&mut self) {
+    /// Drain SMTC snapshots. Returns true when something visual changed.
+    fn drain_playback_updates(&mut self) -> bool {
         let mut latest = None;
         while let Ok(snapshot) = self.playback_rx.try_recv() {
             latest = Some(snapshot);
         }
 
         let Some(snapshot) = latest else {
-            return;
+            return false;
         };
 
         let track_key = track_key(&snapshot);
         let track_changed = self.current_track_key.as_deref() != Some(track_key.as_str());
+        let top_bar_changed = self.top_bar_title != snapshot.title
+            || self.top_bar_artist != snapshot.artist;
         self.clock
             .publish_sample(snapshot.position_ms, snapshot.is_playing);
 
+        // Reactive mesh when playing (loudness from per-app process loopback)
+        // or when we at least have artwork for a static mesh.
+        let reactive = snapshot.is_playing || snapshot.artwork.is_some();
         self.engine
-            .set_playback_state(snapshot.is_playing, snapshot.artwork.is_some());
-        self.update_background_art(&snapshot, &track_key);
+            .set_playback_state(snapshot.is_playing, reactive);
+        #[cfg(windows)]
+        self.audio_capture
+            .update_session(&snapshot.source_app_id, snapshot.is_playing);
+        if track_changed {
+            lyrics_renderer::audio::reset();
+        }
+        let art_changed = self.update_background_art(&snapshot, &track_key);
 
-        if !track_changed {
-            return;
+        self.top_bar_title = snapshot.title.clone();
+        self.top_bar_artist = snapshot.artist.clone();
+
+        if track_changed {
+            self.current_track_key = Some(track_key);
+            let lyrics = find_matching_lyrics(&self.config, &snapshot)
+                .and_then(|path| parse_lyrics_file_with_auto_parser(&path).ok())
+                .unwrap_or_else(|| missing_lyrics(&snapshot));
+            self.set_lyrics_scene(&lyrics);
+            self.current_lyrics = Some(lyrics);
+            return true;
         }
 
-        self.current_track_key = Some(track_key);
-        let lyrics = find_matching_lyrics(&self.config, &snapshot)
-            .and_then(|path| parse_lyrics_file_with_auto_parser(&path).ok())
-            .unwrap_or_else(|| missing_lyrics(&snapshot));
-        self.set_lyrics_scene(&lyrics);
-        self.current_lyrics = Some(lyrics);
+        // Same track, but title/artist (or density-driven top bar) may still need a
+        // scene rebuild so the in-surface top bar stays in sync with SMTC.
+        if top_bar_changed {
+            if let Some(lyrics) = self.current_lyrics.clone() {
+                self.set_lyrics_scene(&lyrics);
+            }
+            return true;
+        }
+
+        art_changed
     }
 
-    fn update_background_art(&mut self, snapshot: &PlaybackSnapshot, track_key: &str) {
+    fn update_background_art(&mut self, snapshot: &PlaybackSnapshot, track_key: &str) -> bool {
         if self.current_artwork == snapshot.artwork {
-            return;
+            return false;
         }
 
         if let Some(artwork) = &snapshot.artwork {
@@ -226,34 +591,431 @@ impl DesktopLyricsApp {
             self.engine.clear_background();
         }
         self.current_artwork = snapshot.artwork.clone();
+        true
     }
 
     fn set_lyrics_scene(&mut self, lyrics: &lyrics_parser::SyncedLyrics) {
-        let json = lyrics_parser::scene_json(lyrics, self.last_size.width, self.last_size.height);
+        let caption = self.caption_height_px();
+        let mut params = SceneBuildParams::new(self.last_size.width, self.last_size.height)
+            .with_density(self.density)
+            .with_insets(caption, 0.0, 0.0, 0.0);
+        if !self.top_bar_title.trim().is_empty() {
+            params = params.with_top_bar(&self.top_bar_title, &self.top_bar_artist);
+        }
+        let json = lyrics_parser::scene_json_with(lyrics, &params);
         let result = self.engine.set_lyrics_scene_json(&json);
         if result.contains("\"error\"") {
             eprintln!("failed to set lyrics scene: {result}");
         }
     }
 
+    fn wants_continuous_frames(&self) -> bool {
+        // Keep the present loop hot while media is playing or the engine still
+        // has in-flight animation (springs, marquee, mesh fade, etc.).
+        self.last_animating || self.clock.is_playing
+    }
+
+    fn on_cursor_moved(&mut self, window: &Window, position: PhysicalPosition<f64>) {
+        self.cursor = position;
+        self.cursor_inside = true;
+        let hit = self.hit_test_caption(position);
+        let icon = match hit {
+            CaptionHit::Minimize | CaptionHit::Close | CaptionHit::AlwaysOnTop => CursorIcon::Hand,
+            CaptionHit::Drag => CursorIcon::Arrow,
+            CaptionHit::None => CursorIcon::Default,
+        };
+        window.set_cursor_icon(icon);
+        // Hover state is drawn in the caption bar — refresh while the cursor is
+        // over chrome so button highlights stay live even when lyrics are idle.
+        if hit != CaptionHit::None {
+            window.request_redraw();
+        }
+    }
+
+    fn on_cursor_left(&mut self, window: &Window) {
+        self.cursor_inside = false;
+        window.set_cursor_icon(CursorIcon::Default);
+        window.request_redraw();
+    }
+
+    /// Handle caption chrome on mouse down. Returns the hit target.
+    fn on_mouse_pressed(&mut self, window: &Window) -> CaptionHit {
+        let hit = self.hit_test_caption(self.cursor);
+        self.caption_pressed = Some(hit);
+        self.pointer_down = Some(self.cursor);
+        match hit {
+            CaptionHit::Drag => {
+                // drag_window runs a nested modal loop until the button is released.
+                let _ = window.drag_window();
+                self.caption_pressed = None;
+                self.pointer_down = None;
+            }
+            CaptionHit::Minimize => {
+                window.set_minimized(true);
+                self.caption_pressed = None;
+                self.pointer_down = None;
+            }
+            CaptionHit::AlwaysOnTop => {
+                // Toggled by the event loop (needs `window.set_always_on_top`).
+                self.caption_pressed = None;
+                self.pointer_down = None;
+            }
+            CaptionHit::Close | CaptionHit::None => {}
+        }
+        hit
+    }
+
+    fn on_mouse_released(&mut self) {
+        self.caption_pressed = None;
+        self.pointer_down = None;
+    }
+
+    /// Complete a close click only if press and release both hit the close button.
+    fn on_mouse_released_close(&mut self) -> bool {
+        let pressed = self.caption_pressed;
+        let close = pressed == Some(CaptionHit::Close)
+            && self.hit_test_caption(self.cursor) == CaptionHit::Close;
+        if close {
+            self.caption_pressed = None;
+            self.pointer_down = None;
+        }
+        close
+    }
+
+    /// Tap a lyric line → seek SMTC timeline to that line's start.
+    /// Returns true when a seek was issued (optimistic local clock updated).
+    fn try_lyric_tap_seek(&mut self) -> bool {
+        // Don't steal clicks that started on the caption bar.
+        if self.caption_pressed.is_some_and(|hit| hit != CaptionHit::None) {
+            self.caption_pressed = None;
+            self.pointer_down = None;
+            return false;
+        }
+        let Some(down) = self.pointer_down.take() else {
+            self.caption_pressed = None;
+            return false;
+        };
+        self.caption_pressed = None;
+
+        let dx = self.cursor.x - down.x;
+        let dy = self.cursor.y - down.y;
+        if dx * dx + dy * dy > TAP_SLOP_PX * TAP_SLOP_PX {
+            return false;
+        }
+        // Caption strip is chrome, not lyrics.
+        if self.hit_test_caption(self.cursor) != CaptionHit::None {
+            return false;
+        }
+
+        let time_ms = self.clock.compute_display_time_ms();
+        let x = self.cursor.x as f32;
+        let y = self.cursor.y as f32;
+        let source_index = self.engine.hit_test_lyrics_line(x, y, time_ms);
+        if source_index < 0 {
+            return false;
+        }
+        let Some(start_ms) = self.engine.lyrics_line_start_ms(source_index as usize) else {
+            return false;
+        };
+
+        // Optimistic local clock so the karaoke sweep jumps immediately; SMTC will
+        // reconcile on the next poll once the player acknowledges the seek.
+        self.clock.publish_sample(start_ms, self.clock.is_playing);
+        self.clock.snap_display_to_anchor();
+        seek_smtc_position_ms(start_ms);
+        true
+    }
+
+    fn hit_test_caption(&self, position: PhysicalPosition<f64>) -> CaptionHit {
+        let x = position.x as f32;
+        let y = position.y as f32;
+        let height = self.caption_height_px();
+        if y < 0.0 || y > height {
+            return CaptionHit::None;
+        }
+        let width = self.last_size.width as f32;
+        let button_w = self.caption_button_width_px();
+        // Right → left: Close | Minimize | Pin (always-on-top)
+        if x >= width - button_w {
+            return CaptionHit::Close;
+        }
+        if x >= width - button_w * 2.0 {
+            return CaptionHit::Minimize;
+        }
+        if x >= width - button_w * 3.0 {
+            return CaptionHit::AlwaysOnTop;
+        }
+        CaptionHit::Drag
+    }
+
     fn render(
         &mut self,
         renderer: &mut DesktopGpuRenderer,
         size: PhysicalSize<u32>,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         let size = normalized_size(size);
         if self.last_size != size {
-            self.resize(size);
+            self.resize(size, self.density);
         }
         renderer.resize(size)?;
         let current_time_ms = self.clock.compute_display_time_ms();
-        renderer.draw_frame(|canvas| {
-            canvas.clear(Color::from_argb(255, 18, 18, 18));
-            self.engine
-                .render_lyrics_frame_to_canvas(current_time_ms, canvas)
+        let hover = if self.cursor_inside {
+            self.hit_test_caption(self.cursor)
+        } else {
+            CaptionHit::None
+        };
+        let density = self.density;
+        let caption_h = self.caption_height_px();
+        let button_w = self.caption_button_width_px();
+        let always_on_top = self.always_on_top;
+        let title = if self.top_bar_title.trim().is_empty() {
+            "Accompanist".to_string()
+        } else if self.top_bar_artist.trim().is_empty() {
+            self.top_bar_title.clone()
+        } else {
+            format!("{} — {}", self.top_bar_title, self.top_bar_artist)
+        };
+        let font = self.caption_font.clone();
+        let collect_timing = self.frame_timing.enabled();
+        let mut caption_ms = 0.0;
+
+        let drawn = renderer.draw_frame(|canvas| {
+            canvas.clear(Color::from_argb(255, 12, 12, 14));
+            let engine_result = self
+                .engine
+                .render_lyrics_frame_to_canvas(current_time_ms, canvas);
+            let caption_start = Instant::now();
+            draw_caption_bar(
+                canvas,
+                size.width as f32,
+                caption_h,
+                button_w,
+                density,
+                &title,
+                font.as_ref(),
+                hover,
+                always_on_top,
+            );
+            if collect_timing {
+                caption_ms = caption_start.elapsed().as_secs_f64() * 1000.0;
+            }
+            engine_result
         })?;
-        Ok(())
+
+        if collect_timing {
+            self.frame_timing.record(FrameSample {
+                engine: self.engine.last_engine_frame_timing(),
+                caption_ms,
+                gpu: drawn.timing,
+            });
+        }
+
+        self.last_animating = drawn.engine_result != 0;
+        Ok(self.last_animating || self.clock.is_playing)
     }
+}
+
+fn draw_caption_bar(
+    canvas: &skia_safe::Canvas,
+    width: f32,
+    height: f32,
+    button_w: f32,
+    density: f32,
+    title: &str,
+    font: Option<&Font>,
+    hover: CaptionHit,
+    always_on_top: bool,
+) {
+    // Semi-opaque strip so the mesh/background still reads through lightly.
+    let mut bar_paint = Paint::default();
+    bar_paint.set_anti_alias(true);
+    bar_paint.set_color4f(Color4f::new(0.05, 0.05, 0.07, 0.72), None);
+    canvas.draw_rect(Rect::from_xywh(0.0, 0.0, width, height), &bar_paint);
+
+    // Bottom hairline separator.
+    let mut line = Paint::default();
+    line.set_anti_alias(true);
+    line.set_color4f(Color4f::new(1.0, 1.0, 1.0, 0.08), None);
+    line.set_stroke_width(1.0_f32.max(density * 0.5));
+    line.set_style(paint::Style::Stroke);
+    canvas.draw_line(
+        Point::new(0.0, height - 0.5),
+        Point::new(width, height - 0.5),
+        &line,
+    );
+
+    // Title — left-aligned with a small inset matching the player top bar padding.
+    if let Some(font) = font {
+        let mut text_paint = Paint::default();
+        text_paint.set_anti_alias(true);
+        text_paint.set_color4f(Color4f::new(1.0, 1.0, 1.0, 0.72), None);
+        let inset = 12.0 * density;
+        // Three chrome buttons on the right (pin / min / close).
+        let max_text_w = (width - button_w * 3.0 - inset * 2.0).max(0.0);
+        let display = ellipsize(title, font, max_text_w);
+        if let Some(blob) = TextBlob::from_str(&display, font) {
+            // Skia FontMetrics: ascent is typically negative (above baseline),
+            // descent positive (below). Center the em-box in the caption strip:
+            //   mid = baseline + (ascent + descent) / 2  ==  height / 2
+            let (_, metrics) = font.metrics();
+            let baseline_y = height * 0.5 - (metrics.ascent + metrics.descent) * 0.5;
+            canvas.draw_text_blob(blob, (inset, baseline_y), &text_paint);
+        }
+    }
+
+    draw_caption_button(
+        canvas,
+        width - button_w * 3.0,
+        0.0,
+        button_w,
+        height,
+        density,
+        hover == CaptionHit::AlwaysOnTop,
+        CaptionGlyph::Pin { active: always_on_top },
+    );
+    draw_caption_button(
+        canvas,
+        width - button_w * 2.0,
+        0.0,
+        button_w,
+        height,
+        density,
+        hover == CaptionHit::Minimize,
+        CaptionGlyph::Minimize,
+    );
+    draw_caption_button(
+        canvas,
+        width - button_w,
+        0.0,
+        button_w,
+        height,
+        density,
+        hover == CaptionHit::Close,
+        CaptionGlyph::Close,
+    );
+}
+
+#[derive(Clone, Copy)]
+enum CaptionGlyph {
+    /// Pushpin: filled when always-on-top is active.
+    Pin { active: bool },
+    Minimize,
+    Close,
+}
+
+fn draw_caption_button(
+    canvas: &skia_safe::Canvas,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    density: f32,
+    hovered: bool,
+    glyph: CaptionGlyph,
+) {
+    let pin_active = matches!(glyph, CaptionGlyph::Pin { active: true });
+    if hovered || pin_active {
+        let mut bg = Paint::default();
+        bg.set_anti_alias(true);
+        match glyph {
+            CaptionGlyph::Close => {
+                bg.set_color4f(Color4f::new(0.91, 0.18, 0.22, 1.0), None);
+            }
+            CaptionGlyph::Pin { active: true } if !hovered => {
+                // Subtle highlight so the pin reads as "on" even without hover.
+                bg.set_color4f(Color4f::new(0.35, 0.55, 1.0, 0.28), None);
+            }
+            CaptionGlyph::Pin { .. } | CaptionGlyph::Minimize => {
+                bg.set_color4f(Color4f::new(1.0, 1.0, 1.0, 0.10), None);
+            }
+        }
+        canvas.draw_rect(Rect::from_xywh(x, y, w, h), &bg);
+    }
+
+    let mut icon = Paint::default();
+    icon.set_anti_alias(true);
+    let icon_alpha = if pin_active { 1.0 } else { 0.92 };
+    icon.set_color4f(Color4f::new(1.0, 1.0, 1.0, icon_alpha), None);
+    icon.set_style(paint::Style::Stroke);
+    icon.set_stroke_width((1.25 * density).max(1.0));
+    icon.set_stroke_cap(paint::Cap::Round);
+
+    let cx = x + w * 0.5;
+    let cy = y + h * 0.5;
+    let s = 4.5 * density;
+    match glyph {
+        CaptionGlyph::Pin { active } => {
+            // Simple pushpin: head circle + short needle below.
+            let head_r = s * 0.72;
+            let head_cy = cy - s * 0.25;
+            if active {
+                let mut fill = Paint::default();
+                fill.set_anti_alias(true);
+                fill.set_color4f(Color4f::new(0.55, 0.75, 1.0, 0.95), None);
+                fill.set_style(paint::Style::Fill);
+                canvas.draw_circle(Point::new(cx, head_cy), head_r, &fill);
+            }
+            canvas.draw_circle(Point::new(cx, head_cy), head_r, &icon);
+            canvas.draw_line(
+                Point::new(cx, head_cy + head_r),
+                Point::new(cx, cy + s * 0.95),
+                &icon,
+            );
+        }
+        CaptionGlyph::Minimize => {
+            canvas.draw_line(
+                Point::new(cx - s, cy),
+                Point::new(cx + s, cy),
+                &icon,
+            );
+        }
+        CaptionGlyph::Close => {
+            canvas.draw_line(
+                Point::new(cx - s, cy - s),
+                Point::new(cx + s, cy + s),
+                &icon,
+            );
+            canvas.draw_line(
+                Point::new(cx + s, cy - s),
+                Point::new(cx - s, cy + s),
+                &icon,
+            );
+        }
+    }
+}
+
+fn ellipsize(text: &str, font: &Font, max_width: f32) -> String {
+    if max_width <= 0.0 {
+        return String::new();
+    }
+    let full_width = font.measure_str(text, None).0;
+    if full_width <= max_width {
+        return text.to_string();
+    }
+    let ellipsis = "…";
+    let ellipsis_w = font.measure_str(ellipsis, None).0;
+    if ellipsis_w >= max_width {
+        return ellipsis.to_string();
+    }
+    let mut end = text.chars().count();
+    while end > 0 {
+        end -= 1;
+        let candidate: String = text.chars().take(end).collect::<String>() + ellipsis;
+        if font.measure_str(&candidate, None).0 <= max_width {
+            return candidate;
+        }
+    }
+    ellipsis.to_string()
+}
+
+fn make_caption_font(density: f32) -> Option<Font> {
+    let mgr = FontMgr::new();
+    let typeface = mgr
+        .match_family_style("Segoe UI", FontStyle::normal())
+        .or_else(|| mgr.match_family_style("Microsoft YaHei UI", FontStyle::normal()))
+        .or_else(|| mgr.match_family_style("sans-serif", FontStyle::normal()))?;
+    let size = 12.0 * density;
+    Some(Font::from_typeface(typeface, size))
 }
 
 #[derive(Debug)]
@@ -336,6 +1098,14 @@ impl PlaybackClock {
             self.anchor_position_ms
         }
     }
+
+    /// Force the smoothed display clock onto the current anchor (e.g. after a seek).
+    fn snap_display_to_anchor(&mut self) {
+        let now = Instant::now();
+        self.display_ms = self.projected_anchor_at(now) as f64;
+        self.last_clock = Some(now);
+        self.primed = true;
+    }
 }
 
 impl AppConfig {
@@ -375,8 +1145,9 @@ impl AppConfig {
 }
 
 fn help_text() -> String {
-    "usage: cargo run --features desktop --bin desktop_lyrics -- --lyrics-dir <folder> [--recursive]\n\
-     or set ACCOMPANIST_LYRICS_DIR=<folder>"
+    "usage: cargo run -r -p lyrics-desktop --bin desktop_lyrics -- --lyrics-dir <folder> [--recursive]\n\
+     or set ACCOMPANIST_LYRICS_DIR=<folder>\n\
+     set ACCOMPANIST_FRAME_TIMING=1 to log 1s frame phase averages (record/flush/swap + engine)"
         .to_string()
 }
 
@@ -595,6 +1366,48 @@ fn spawn_smtc_listener(sender: mpsc::Sender<PlaybackSnapshot>) {
     });
 }
 
+/// Ask the active SMTC session to seek to `position_ms` (background thread).
+fn seek_smtc_position_ms(position_ms: i32) {
+    #[cfg(windows)]
+    {
+        thread::spawn(move || {
+            if let Err(error) = seek_smtc_position_ms_windows(position_ms) {
+                eprintln!("SMTC seek to {position_ms}ms failed: {error}");
+            }
+        });
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = position_ms;
+        eprintln!("SMTC seek is only available on Windows");
+    }
+}
+
+#[cfg(windows)]
+fn seek_smtc_position_ms_windows(position_ms: i32) -> Result<(), String> {
+    use windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager;
+
+    let manager = GlobalSystemMediaTransportControlsSessionManager::RequestAsync()
+        .map_err(|error| error.to_string())?
+        .join()
+        .map_err(|error| error.to_string())?;
+    let session = manager
+        .GetCurrentSession()
+        .map_err(|error| error.to_string())?;
+
+    // TimeSpan ticks are 100 ns; 1 ms = 10_000 ticks.
+    let ticks = (position_ms as i64).saturating_mul(10_000);
+    let ok = session
+        .TryChangePlaybackPositionAsync(ticks)
+        .map_err(|error| error.to_string())?
+        .join()
+        .map_err(|error| error.to_string())?;
+    if !ok {
+        return Err("session rejected playback position change".into());
+    }
+    Ok(())
+}
+
 #[cfg(windows)]
 fn current_playback_snapshot(
     cached_media_key: &str,
@@ -632,10 +1445,21 @@ fn current_playback_snapshot(
         .Artist()
         .map_err(|error| error.to_string())?
         .to_string_lossy();
+    let source_app_id = session
+        .SourceAppUserModelId()
+        .map(|id| id.to_string_lossy())
+        .unwrap_or_default();
     let duration_ms = timespan_ms(timeline.EndTime().map_err(|error| error.to_string())?);
     let media_key = media_identity_key_from_parts(&artist, &title, duration_ms);
-    let artwork = if media_key == cached_media_key && cached_artwork.is_some() {
-        cached_artwork
+    // Always re-fetch when the track identity changes. For the same track, reuse a
+    // successful cache, but retry when the previous attempt failed (late-arriving
+    // thumbnails from some players).
+    let artwork = if media_key == cached_media_key {
+        if cached_artwork.is_some() {
+            cached_artwork
+        } else {
+            media_properties_artwork(&properties).map(Arc::new)
+        }
     } else {
         media_properties_artwork(&properties).map(Arc::new)
     };
@@ -649,6 +1473,7 @@ fn current_playback_snapshot(
             .PlaybackStatus()
             .map_err(|error| error.to_string())?
             == GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing,
+        source_app_id,
         artwork,
     })
 }
@@ -664,32 +1489,66 @@ fn media_properties_artwork(
 ) -> Option<Artwork> {
     let thumbnail = properties.Thumbnail().ok()?;
     let stream = thumbnail.OpenReadAsync().ok()?.join().ok()?;
-    let size = stream.Size().ok()?.min(16 * 1024 * 1024);
+    let size = stream.Size().ok()?.min(32 * 1024 * 1024);
     if size == 0 {
         return None;
     }
 
-    let input = stream.GetInputStreamAt(0).ok()?;
-    let reader = windows::Storage::Streams::DataReader::CreateDataReader(&input).ok()?;
-    let loaded = reader.LoadAsync(size as u32).ok()?.join().ok()?;
-    if loaded == 0 {
-        return None;
+    // Prefer the full buffer API when available; fall back to DataReader.
+    let mut bytes = vec![0u8; size as usize];
+    if let Ok(input) = stream.GetInputStreamAt(0) {
+        if let Ok(reader) = windows::Storage::Streams::DataReader::CreateDataReader(&input) {
+            let loaded = reader.LoadAsync(size as u32).ok()?.join().ok()?;
+            if loaded == 0 {
+                return None;
+            }
+            bytes.truncate(loaded as usize);
+            reader.ReadBytes(&mut bytes).ok()?;
+            return decode_artwork(&bytes);
+        }
     }
-
-    let mut bytes = vec![0u8; loaded as usize];
-    reader.ReadBytes(&mut bytes).ok()?;
-    decode_artwork(&bytes)
+    None
 }
 
 fn decode_artwork(bytes: &[u8]) -> Option<Artwork> {
-    let image = image::load_from_memory(bytes).ok()?.to_rgba8();
-    let (width, height) = image.dimensions();
+    use image::GenericImageView;
+
+    let image = match image::load_from_memory(bytes) {
+        Ok(image) => image,
+        Err(error) => {
+            // Log once per failure path so missing codecs / corrupt streams are visible.
+            eprintln!(
+                "artwork decode failed ({} bytes, magic={:02x?}): {error}",
+                bytes.len(),
+                bytes.iter().take(8).cloned().collect::<Vec<_>>()
+            );
+            return None;
+        }
+    };
+
+    // Downscale very large covers before ARGB conversion — mesh only needs 32² and
+    // the top-bar thumb is capped at 512; this also avoids Skia upload failures.
+    let image = {
+        let (w, h) = image.dimensions();
+        let max_edge = w.max(h);
+        if max_edge > ARTWORK_MAX_EDGE {
+            let scale = ARTWORK_MAX_EDGE as f32 / max_edge as f32;
+            let nw = ((w as f32 * scale).round() as u32).max(1);
+            let nh = ((h as f32 * scale).round() as u32).max(1);
+            image.resize(nw, nh, image::imageops::FilterType::Triangle)
+        } else {
+            image
+        }
+    };
+
+    let rgba = image.to_rgba8();
+    let (width, height) = rgba.dimensions();
     if width == 0 || height == 0 {
         return None;
     }
 
     let mut hash = 0xcbf29ce484222325u64;
-    let pixels = image
+    let pixels = rgba
         .pixels()
         .map(|pixel| {
             let [r, g, b, a] = pixel.0;
