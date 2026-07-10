@@ -361,6 +361,12 @@ impl LyricsRenderer {
                 scene_glyphs += collect_text_font_usage(phonetic, &mut scene_font_ids);
             }
         }
+        // The top-bar title/artist share the same Skia typeface pool, so their font
+        // ids must be resolved too or the text would draw with missing typefaces.
+        if let Some(top_bar) = &scene.top_bar {
+            scene_glyphs += collect_text_font_usage(&top_bar.title, &mut scene_font_ids);
+            scene_glyphs += collect_text_font_usage(&top_bar.artist, &mut scene_font_ids);
+        }
 
         let missing_ids: Vec<fontdb::ID> = scene_font_ids
             .iter()

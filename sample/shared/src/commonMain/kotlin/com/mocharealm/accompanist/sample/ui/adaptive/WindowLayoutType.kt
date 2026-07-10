@@ -36,9 +36,14 @@ fun AdaptiveLayoutProvider(
     content: @Composable () -> Unit
 ) {
     BoxWithConstraints {
+        // Classify by the SHORTER edge (smallest width), not just the width, so a
+        // phone stays `Phone` in landscape too — otherwise a phone turned sideways
+        // (wide but short) is misread as a Tablet/Desktop and loses the full-bleed
+        // fluid-mesh player. A real tablet's shorter edge is still ≥ the breakpoint.
+        val shortestEdge = minOf(maxWidth, maxHeight)
         val layoutType = when {
-            maxWidth < WindowBreakpoints.Tablet -> WindowLayoutType.Phone
-            maxWidth < WindowBreakpoints.Desktop -> WindowLayoutType.Tablet
+            shortestEdge < WindowBreakpoints.Tablet -> WindowLayoutType.Phone
+            shortestEdge < WindowBreakpoints.Desktop -> WindowLayoutType.Tablet
             else -> WindowLayoutType.Desktop
         }
         CompositionLocalProvider(LocalWindowLayoutType provides layoutType) {

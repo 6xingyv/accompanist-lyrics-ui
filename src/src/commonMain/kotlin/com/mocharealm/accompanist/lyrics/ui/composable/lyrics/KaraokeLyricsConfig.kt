@@ -64,7 +64,10 @@ data class KaraokeTypography(
  * Vertical/horizontal spacing.
  */
 data class KaraokeSpacing(
-    val horizontalPadding: Dp = 16.dp,
+    // Matches the in-surface top bar's 28dp left margin / right button margin (see
+    // RustSkiaLyricsView.resolveTopBar) so the lyrics text aligns with the top bar
+    // on both edges.
+    val horizontalPadding: Dp = 28.dp,
     val linePadding: Dp = 12.dp,
     val accompanimentGap: Dp = 8.dp,
     val phoneticGap: Dp = 8.dp,

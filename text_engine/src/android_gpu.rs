@@ -81,19 +81,19 @@ impl AndroidGpuRenderer {
             return Err("invalid native window");
         }
 
-        match vulkan::AndroidVulkanRenderer::from_native_window(window, frame_width, frame_height) {
-            Ok(renderer) => {
-                return Ok(Self {
-                    backend: AndroidGpuBackend::Vulkan(renderer),
-                });
-            }
-            Err(error) => {
-                warn!(
-                    "Failed to create Android Vulkan lyrics surface, falling back to GL: {}",
-                    error
-                );
-            }
-        }
+        // match vulkan::AndroidVulkanRenderer::from_native_window(window, frame_width, frame_height) {
+        //     Ok(renderer) => {
+        //         return Ok(Self {
+        //             backend: AndroidGpuBackend::Vulkan(renderer),
+        //         });
+        //     }
+        //     Err(error) => {
+        //         warn!(
+        //             "Failed to create Android Vulkan lyrics surface, falling back to GL: {}",
+        //             error
+        //         );
+        //     }
+        // }
 
         match gl::AndroidGlRenderer::from_native_window(window, frame_width, frame_height) {
             Ok(renderer) => Ok(Self {

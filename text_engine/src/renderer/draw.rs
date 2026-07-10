@@ -5,13 +5,240 @@ use skia_safe::{
     font_arguments::{variation_position::Coordinate, VariationPosition},
     gradient,
     image_filters::{self, CropRect},
-    BlendMode, BlurStyle, Color4f, Font, FontArguments, FontHinting, FourByteTag, GlyphId,
-    MaskFilter, Paint, Point, Rect, Shader, TileMode, Typeface,
+    BlendMode, BlurStyle, Color4f, Font, FontArguments, FontHinting, FourByteTag, GlyphId, Image,
+    MaskFilter, Paint, Point, RRect, Rect, SamplingOptions, Shader, TileMode, Typeface,
 };
 use std::collections::HashMap;
 use std::f32::consts::PI;
 
 use super::*;
+
+/// Draw the player top bar (album thumbnail + title/artist + ⋯ button) inside the
+/// surface. The thumbnail is a normal rounded-rect image; the title/artist and
+/// button are composited additively (`Plus`) — the GPU equivalent of the old
+/// Compose `graphicsLayer { blendMode = Plus }` metadata/controls.
+pub(super) fn draw_top_bar_skia(
+    canvas: &skia_safe::Canvas,
+    typefaces: &HashMap<fontdb::ID, Typeface>,
+    thumbnail: Option<&Image>,
+    bar: &PreparedTopBar,
+    current_time_ms: i32,
+) -> bool {
+    // Thumbnail (normal blend), clipped to a rounded rectangle.
+    if let Some(image) = thumbnail {
+        let dst = Rect::new(
+            bar.thumb_left,
+            bar.thumb_top,
+            bar.thumb_left + bar.thumb_size,
+            bar.thumb_top + bar.thumb_size,
+        );
+        let rrect = RRect::new_rect_xy(dst, bar.thumb_radius, bar.thumb_radius);
+        let mut paint = Paint::default();
+        paint.set_anti_alias(true);
+        canvas.save();
+        canvas.clip_rrect(rrect, None, true);
+        canvas.draw_image_rect_with_sampling_options(
+            image,
+            None,
+            dst,
+            SamplingOptions::from(skia_safe::sampling_options::FilterMode::Linear),
+            &paint,
+        );
+        canvas.restore();
+    }
+
+    // Title / artist / button — additive.
+    let white = (255u8, 255u8, 255u8, 255u8);
+    let mut plus_paint = Paint::default();
+    plus_paint.set_blend_mode(BlendMode::Plus);
+    canvas.save_layer(&SaveLayerRec::default().paint(&plus_paint));
+
+    // Title / artist marquee: when a line is wider than its column it scrolls
+    // toward the Start edge into the blank padding, its clip edges softened by a
+    // fade, easing at each end of the travel (see `draw_top_bar_marquee_line`).
+    let mut animating = false;
+    animating |= draw_top_bar_marquee_line(
+        canvas,
+        typefaces,
+        &bar.title,
+        bar.text_left,
+        bar.title_top,
+        bar.text_max_width,
+        white,
+        1.0,
+        current_time_ms,
+    );
+    animating |= draw_top_bar_marquee_line(
+        canvas,
+        typefaces,
+        &bar.artist,
+        bar.text_left,
+        bar.artist_top,
+        bar.text_max_width,
+        white,
+        bar.artist_alpha,
+        current_time_ms,
+    );
+
+    // ⋯ button: a faint circle background + three dots.
+    let mut bg = Paint::default();
+    bg.set_anti_alias(true);
+    bg.set_color4f(Color4f::new(1.0, 1.0, 1.0, 0.1), None);
+    canvas.draw_circle(
+        Point::new(bar.button_cx, bar.button_cy),
+        bar.button_radius,
+        &bg,
+    );
+    let mut dot = Paint::default();
+    dot.set_anti_alias(true);
+    dot.set_color4f(Color4f::new(1.0, 1.0, 1.0, 1.0), None);
+    let dot_r = (bar.button_radius * 0.11).max(1.0);
+    let spacing = bar.button_radius * 0.44;
+    for k in -1i32..=1 {
+        canvas.draw_circle(
+            Point::new(bar.button_cx + k as f32 * spacing, bar.button_cy),
+            dot_r,
+            &dot,
+        );
+    }
+
+    canvas.restore();
+    animating
+}
+
+// Top-bar marquee tuning.
+/// Width (px) of the soft fade at each edge of a marquee line's column.
+const MARQUEE_FADE_PX: f32 = 24.0;
+/// Scroll speed of the marquee travel, in px per second.
+const MARQUEE_SCROLL_PX_PER_SEC: f32 = 40.0;
+/// How long the text pauses (ms) at each end of the travel before easing back.
+const MARQUEE_HOLD_MS: f32 = 1600.0;
+
+/// Draw one top-bar text line (title or artist), marqueeing it when it overflows
+/// its `max_width` column. The line is isolated in a layer clipped to the column;
+/// an overflowing line is shifted toward the Start edge by an eased ping-pong
+/// offset and its left/right edges are dissolved with a fade so the text slides
+/// out of / into the surrounding padding cleanly. Returns whether it is animating
+/// (i.e. actually overflowing) so the caller can keep the render loop ticking.
+#[allow(clippy::too_many_arguments)]
+fn draw_top_bar_marquee_line(
+    canvas: &skia_safe::Canvas,
+    typefaces: &HashMap<fontdb::ID, Typeface>,
+    text: &PreparedText,
+    left: f32,
+    top: f32,
+    max_width: f32,
+    color: (u8, u8, u8, u8),
+    alpha: f32,
+    current_time_ms: i32,
+) -> bool {
+    if alpha <= 0.0 || max_width <= 0.0 {
+        return false;
+    }
+
+    let text_width = prepared_text_width(text);
+    let overflow = text_width - max_width;
+    let animating = overflow > 0.5;
+    let offset = if animating {
+        marquee_offset(current_time_ms, overflow)
+    } else {
+        0.0
+    };
+
+    // Isolate the line so the edge fade only dissolves this text, not the thumbnail
+    // or button. Vertical bounds are padded generously around the text box.
+    let top_bound = top - text.height * 0.5;
+    let bottom_bound = top + text.height * 1.5;
+    let bounds = Rect::new(left, top_bound, left + max_width, bottom_bound);
+    canvas.save_layer(&SaveLayerRec::default().bounds(&bounds));
+
+    canvas.save();
+    canvas.clip_rect(bounds, skia_safe::ClipOp::Intersect, false);
+    draw_prepared_text_skia(
+        canvas,
+        typefaces,
+        text,
+        left - offset,
+        top,
+        color,
+        alpha,
+        0.0,
+        None,
+    );
+    canvas.restore();
+
+    if animating {
+        apply_horizontal_edge_fade(
+            canvas,
+            left,
+            top_bound,
+            max_width,
+            bottom_bound - top_bound,
+            MARQUEE_FADE_PX,
+        );
+    }
+
+    canvas.restore();
+    animating
+}
+
+/// Eased ping-pong marquee offset (px, toward the Start edge) for the given clock.
+/// The text holds at the start, eases out to reveal its tail (travelling a bit past
+/// the overflow so the last glyph clears the fade), holds, then eases back — so both
+/// the start and end of every move are smooth rather than a constant-speed crawl.
+fn marquee_offset(current_time_ms: i32, overflow: f32) -> f32 {
+    let travel = overflow + MARQUEE_FADE_PX;
+    let scroll_ms = (travel / MARQUEE_SCROLL_PX_PER_SEC * 1000.0).max(1.0);
+    let hold_ms = MARQUEE_HOLD_MS;
+    let period = 2.0 * (scroll_ms + hold_ms);
+    let t = (current_time_ms as f32).rem_euclid(period);
+
+    let phase = if t < hold_ms {
+        0.0
+    } else if t < hold_ms + scroll_ms {
+        smooth_step((t - hold_ms) / scroll_ms)
+    } else if t < 2.0 * hold_ms + scroll_ms {
+        1.0
+    } else {
+        1.0 - smooth_step((t - 2.0 * hold_ms - scroll_ms) / scroll_ms)
+    };
+    phase * travel
+}
+
+/// Multiply the alpha of `[left, left+width]` by a horizontal gradient that fades to
+/// transparent over `fade_px` at each edge (`DstIn`), softening a marquee line's
+/// clip edges so the text dissolves into the padding instead of hard-clipping.
+fn apply_horizontal_edge_fade(
+    canvas: &skia_safe::Canvas,
+    left: f32,
+    top: f32,
+    width: f32,
+    height: f32,
+    fade_px: f32,
+) {
+    if width <= 0.0 || height <= 0.0 || fade_px <= 0.0 {
+        return;
+    }
+    let f = (fade_px / width).clamp(0.0, 0.5);
+    let clear = Color4f::new(1.0, 1.0, 1.0, 0.0);
+    let solid = Color4f::new(1.0, 1.0, 1.0, 1.0);
+    let colors = [clear, solid, solid, clear];
+    let positions = [0.0, f, 1.0 - f, 1.0];
+    let gradient_colors = gradient::Colors::new(&colors, Some(&positions), TileMode::Clamp, None);
+    let gradient = gradient::Gradient::new(gradient_colors, gradient::Interpolation::default());
+    let Some(shader) = gradient::shaders::linear_gradient(
+        (Point::new(left, 0.0), Point::new(left + width, 0.0)),
+        &gradient,
+        None,
+    ) else {
+        return;
+    };
+    let mut paint = Paint::default();
+    paint.set_anti_alias(false);
+    paint.set_shader(shader);
+    paint.set_blend_mode(BlendMode::DstIn);
+    canvas.draw_rect(Rect::new(left, top, left + width, top + height), &paint);
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct SkiaGlyphBatchKey {
@@ -698,9 +925,9 @@ pub(super) fn draw_breathing_dots_skia(
     }
 
     let origin_x = if interlude.right_aligned {
-        config.width as f32 - config.padding_x - total_width
+        config.width as f32 - config.content_right - config.padding_x - total_width
     } else {
-        config.padding_x
+        config.content_left + config.padding_x
     };
     let origin_y = y + config.padding_y;
     let (scale, alpha, enter_end, exit_start) =

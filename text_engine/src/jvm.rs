@@ -696,6 +696,19 @@ pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeTextE
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeTextEngine_nativeHitTestTopBar(
+    _env: JNIEnv,
+    _this: JObject,
+    handle: jlong,
+    x: jfloat,
+    y: jfloat,
+) -> jboolean {
+    bool_to_jboolean(with_engine(handle, false, |engine| {
+        engine.hit_test_top_bar_button(x, y)
+    }))
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeTextEngine_nativeSetBackgroundArt(
     env: JNIEnv,
     _this: JObject,

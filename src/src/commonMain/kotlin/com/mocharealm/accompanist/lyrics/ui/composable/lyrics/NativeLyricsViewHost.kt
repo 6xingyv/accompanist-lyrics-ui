@@ -19,10 +19,15 @@ internal expect fun NativeLyricsViewHost(
     config: KaraokeLyricsConfig,
     fontResource: FontResource?,
     // Full-bleed GPU mesh-gradient background (Android). `backgroundArtwork` enables
-    // it; `contentPadding` insets the lyrics band below the top bar / above the nav
-    // bar; `isPlaying`/`backgroundReactive` drive the animation. Ignored off Android.
+    // it; `contentPadding` carries the SYSTEM insets (status/caption top, nav bottom);
+    // `isPlaying`/`backgroundReactive` drive the animation. When `title` is non-null,
+    // the surface also draws the player top bar (thumbnail + title/artist + ⋯ button),
+    // and `onControlsClick` fires on a ⋯ tap. All ignored off Android.
     backgroundArtwork: ImageBitmap? = null,
     contentPadding: PaddingValues = PaddingValues(0.dp),
     isPlaying: Boolean = true,
     backgroundReactive: Boolean = false,
+    title: String? = null,
+    artist: String? = null,
+    onControlsClick: (() -> Unit)? = null,
 )

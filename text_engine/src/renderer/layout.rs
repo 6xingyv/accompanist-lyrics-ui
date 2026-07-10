@@ -20,6 +20,8 @@ impl LyricsRenderer {
         let manual = &style.manual_scroll;
         let content_top = scene.content_top.unwrap_or(0.0).max(0.0);
         let content_bottom = scene.content_bottom.unwrap_or(0.0).max(0.0);
+        let content_left = scene.content_left.unwrap_or(0.0).max(0.0);
+        let content_right = scene.content_right.unwrap_or(0.0).max(0.0);
         let config = SceneConfig {
             width: scene.width.unwrap_or(DEFAULT_WIDTH).max(DEFAULT_WIDTH),
             height: scene.height.unwrap_or(DEFAULT_HEIGHT).max(DEFAULT_HEIGHT),
@@ -60,6 +62,8 @@ impl LyricsRenderer {
             padding_y: spacing.line_padding,
             content_top,
             content_bottom,
+            content_left,
+            content_right,
             // The focus line sits `focus_top_offset` below the content-band top, so
             // fold the top inset into the keep-alive anchor that scroll/layout use.
             keep_alive: spacing.focus_top_offset + content_top,
@@ -101,7 +105,11 @@ impl LyricsRenderer {
             },
         };
 
-        let content_width = (config.width as f32 - config.padding_x * 2.0).max(1.0);
+        let content_width = (config.width as f32
+            - config.content_left
+            - config.content_right
+            - config.padding_x * 2.0)
+            .max(1.0);
         // Duet songs (lines aligned to both sides) lay each line out in an 80%-wide
         // band so the two singers' lines sit on opposite sides with an overlap in
         // the middle, instead of both spanning the full width. Right-aligned lines
@@ -397,10 +405,63 @@ impl LyricsRenderer {
             }
         }
 
+        let top_bar = self.prepare_top_bar(scene.top_bar.as_ref());
+
         Ok(PreparedScene {
             config,
             lines,
             content_height: cursor_y + config.keep_alive,
+            top_bar,
+        })
+    }
+
+    /// Shape the player top bar's title/artist once (with the engine's CJK-capable
+    /// font fallback), carrying the host-supplied geometry through unchanged. Text is
+    /// laid out un-wrapped (single line) and clipped to `text_max_width` at draw time.
+    fn prepare_top_bar(&mut self, input: Option<&TopBarInput>) -> Option<PreparedTopBar> {
+        let input = input?;
+        let no_wrap = (input.text_max_width.max(1.0)) * 100.0;
+        let saved = self.text_attrs;
+
+        self.text_attrs = TextAttrs {
+            weight: input.title_weight,
+            italic: false,
+        };
+        let title = self.prepare_plain_text(
+            &input.title,
+            input.title_font_size,
+            input.title_line_height,
+            no_wrap,
+            false,
+        );
+        self.text_attrs = TextAttrs {
+            weight: 400,
+            italic: false,
+        };
+        let artist = self.prepare_plain_text(
+            &input.artist,
+            input.artist_font_size,
+            input.artist_line_height,
+            no_wrap,
+            false,
+        );
+        self.text_attrs = saved;
+
+        Some(PreparedTopBar {
+            thumb_left: input.thumb_left,
+            thumb_top: input.thumb_top,
+            thumb_size: input.thumb_size,
+            thumb_radius: input.thumb_radius,
+            text_left: input.text_left,
+            text_max_width: input.text_max_width,
+            title_top: input.title_top,
+            artist_top: input.artist_top,
+            artist_alpha: input.artist_alpha.clamp(0.0, 1.0),
+            button_cx: input.button_cx,
+            button_cy: input.button_cy,
+            button_radius: input.button_radius,
+            title,
+            artist,
         })
     }
 

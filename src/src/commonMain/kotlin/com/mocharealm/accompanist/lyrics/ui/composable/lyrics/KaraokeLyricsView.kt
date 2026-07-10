@@ -39,6 +39,9 @@ fun KaraokeLyricsView(
     contentPadding: PaddingValues = PaddingValues(0.dp),
     isPlaying: Boolean = true,
     backgroundReactive: Boolean = false,
+    title: String? = null,
+    artist: String? = null,
+    onControlsClick: (() -> Unit)? = null,
 ) {
     NativeLyricsViewHost(
         lyrics = lyrics,
@@ -52,5 +55,8 @@ fun KaraokeLyricsView(
         contentPadding = contentPadding,
         isPlaying = isPlaying,
         backgroundReactive = backgroundReactive,
+        title = title,
+        artist = artist,
+        onControlsClick = onControlsClick,
     )
 }

@@ -26,6 +26,9 @@ internal actual fun NativeLyricsViewHost(
     contentPadding: PaddingValues,
     isPlaying: Boolean,
     backgroundReactive: Boolean,
+    title: String?,
+    artist: String?,
+    onControlsClick: (() -> Unit)?,
 ) {
     val density = LocalDensity.current
     val fontResourceBytes = rememberFontResourceBytes(fontResource)

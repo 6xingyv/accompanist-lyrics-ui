@@ -5,6 +5,7 @@ import android.graphics.Color
 import android.graphics.SurfaceTexture
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.SystemClock
 import android.util.AttributeSet
 import android.view.Choreographer
 import android.view.Surface
@@ -29,6 +30,16 @@ import kotlin.math.max
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
+// Playback-clock reconciliation tuning (see `computeDisplayTimeMs`).
+/** A gap larger than this between our clock and a fresh sample is a seek → snap. */
+private const val CLOCK_SEEK_SNAP_MS = 1000.0
+/** Window over which a small gap to the authoritative sample is eased away. */
+private const val CLOCK_RECONCILE_MS = 350.0
+/** Cap on the catch-up rate when the display clock is behind the sample. */
+private const val CLOCK_MAX_RATE = 2.5
+/** Clamp on a single frame's dt, so a stall doesn't lurch the clock. */
+private const val CLOCK_MAX_FRAME_MS = 64.0
+
 class RustSkiaLyricsView @JvmOverloads constructor(
     context: Context,
     attrs: AttributeSet? = null,
@@ -47,12 +58,25 @@ class RustSkiaLyricsView @JvmOverloads constructor(
 
     private var lyrics: SyncedLyrics? = null
 
-    // Playback position is written on the main thread and read on the render
-    // thread every frame, so it must be volatile. It is the ONLY per-frame value
-    // handed across threads — everything else the render thread needs lives behind
-    // the engine's own mutex.
+    // Playback clock. The host publishes only the AUTHORITATIVE position sample
+    // (~every 250ms, plus seeks) via `setCurrentPosition`; the render thread
+    // extrapolates from that anchor and eases its own smoothed `displayMs` toward it
+    // every frame. This replaces the old per-Compose-frame position push: the clock
+    // no longer round-trips through Compose, and an authoritative sample that lands
+    // BEHIND our extrapolation makes us decelerate until it catches up instead of
+    // snapping backward or freezing. `anchor*`/`isPlaying` cross the main→render
+    // thread boundary (volatile); `displayMs`/`lastClockNanos`/`clockPrimed` are
+    // render-thread-only. `lastRenderedTimeMs` is what we last drew (read by
+    // hit-testing on the main thread).
     @Volatile
-    private var currentTimeMs: Int = 0
+    private var anchorPositionMs: Int = 0
+    @Volatile
+    private var anchorClockNanos: Long = 0L
+    @Volatile
+    private var lastRenderedTimeMs: Int = 0
+    private var displayMs: Double = 0.0
+    private var lastClockNanos: Long = 0L
+    private var clockPrimed = false
     private var sceneDirty = true
     private var renderSurface: Surface? = null
     // Initial style is just the default config mapped at this view's density; the
@@ -74,11 +98,23 @@ class RustSkiaLyricsView @JvmOverloads constructor(
     private var backgroundHeight = 0
     private var backgroundSeed = 0
     private var backgroundReactive = false
+    @Volatile
     private var isPlaying = false
-    // Vertical content insets (view px) for the lyrics band on the full-bleed
-    // surface: `contentTopPx` = status bar + top bar, `contentBottomPx` = nav bar.
+    // Content insets (view px). Vertical: `contentTopPx` is the SYSTEM top inset
+    // (status + caption bar); the in-surface top bar (below) adds to it.
+    // `contentBottomPx` is the navigation-bar inset. Horizontal: `contentLeftPx` /
+    // `contentRightPx` are the safe-area sides (display cutout / side nav in
+    // landscape) so the top bar and lyrics stay clear of a cutout.
     private var contentTopPx = 0f
     private var contentBottomPx = 0f
+    private var contentLeftPx = 0f
+    private var contentRightPx = 0f
+
+    // In-surface player top bar (album thumbnail + title/artist + ⋯ button). When a
+    // title is set, the engine draws the top bar and the lyrics band starts below it.
+    private var topBarTitle: String? = null
+    private var topBarArtist: String? = null
+    private var onControlsClicked: (() -> Unit)? = null
 
     // --- Dedicated render thread ---------------------------------------------
     // The EGL context is created, used (draw + blocking eglSwapBuffers), and
@@ -126,6 +162,11 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         override fun onDown(e: MotionEvent): Boolean = true
 
         override fun onSingleTapUp(e: MotionEvent): Boolean {
+            if (!engineClosed && engine.hitTestTopBar(e.x * renderScale, e.y * renderScale)) {
+                performClick()
+                onControlsClicked?.invoke()
+                return true
+            }
             val lineIndex = hitTestLine(e.x, e.y) ?: return false
             performClick()
             onLineClicked?.invoke(lineIndex)
@@ -181,9 +222,17 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         }
     }
 
+    /**
+     * Publish the authoritative playback position (the value the player reports,
+     * projected to "now"). Re-anchors the render-thread clock, which then eases its
+     * smoothed display position toward it. Ignores an unchanged sample so a
+     * recomposition that re-sends the same value doesn't keep resetting the anchor
+     * (which would stall the extrapolation).
+     */
     fun setCurrentPosition(currentTimeMs: Int) {
-        if (this.currentTimeMs == currentTimeMs) return
-        this.currentTimeMs = currentTimeMs
+        if (currentTimeMs == anchorPositionMs) return
+        anchorPositionMs = currentTimeMs
+        anchorClockNanos = SystemClock.elapsedRealtimeNanos()
         requestRender()
     }
 
@@ -228,21 +277,146 @@ class RustSkiaLyricsView @JvmOverloads constructor(
      * top bar, `bottomPx` = navigation bar. Lyrics are clipped and edge-faded to the
      * band; the background still fills the whole surface.
      */
-    fun setContentInsets(topPx: Float, bottomPx: Float) {
-        if (contentTopPx == topPx && contentBottomPx == bottomPx) return
+    fun setContentInsets(topPx: Float, bottomPx: Float, leftPx: Float, rightPx: Float) {
+        if (contentTopPx == topPx && contentBottomPx == bottomPx &&
+            contentLeftPx == leftPx && contentRightPx == rightPx
+        ) {
+            return
+        }
         contentTopPx = topPx
         contentBottomPx = bottomPx
+        contentLeftPx = leftPx
+        contentRightPx = rightPx
         sceneDirty = true
         rebuildSceneAndRender()
+    }
+
+    /** Set the in-surface top bar's title/artist (null title disables it). */
+    fun setTopBar(title: String?, artist: String?) {
+        if (topBarTitle == title && topBarArtist == artist) return
+        topBarTitle = title
+        topBarArtist = artist
+        sceneDirty = true
+        rebuildSceneAndRender()
+    }
+
+    /** Callback for a tap on the top bar's ⋯ button. */
+    fun setOnControlsClicked(callback: (() -> Unit)?) {
+        onControlsClicked = callback
+    }
+
+    /**
+     * Resolve the top-bar geometry (in render px) + the lyrics band's top inset. The
+     * layout mirrors the old Compose top bar (28dp padding, 68dp thumbnail, 8dp gap,
+     * 17sp/15sp text, a ⋯ button on the right). Returns `(wire, contentTopPx)` where
+     * `contentTopPx` is the system inset alone when no top bar is set.
+     */
+    private fun resolveTopBar(sceneWidth: Int): Pair<TopBarWire?, Float> {
+        val s = renderScale
+        val sysTop = contentTopPx * s
+        // Horizontal safe-area insets (render px): keep the top bar clear of a
+        // landscape display cutout / side nav bar on either edge.
+        val sysLeft = contentLeftPx * s
+        val sysRight = contentRightPx * s
+        val title = topBarTitle ?: return null to sysTop
+
+        val d = resources.displayMetrics.density
+        val fs = resources.configuration.fontScale
+        fun dp(v: Float) = v * d * s
+        fun sp(v: Float) = v * d * fs * s
+
+        val barTop = sysTop + dp(28f)
+        val thumbSize = dp(68f)
+        val thumbLeft = sysLeft + dp(28f)
+        val gap = dp(8f)
+        val textLeft = thumbLeft + thumbSize + gap
+        val titleFontSize = sp(17f)
+        val artistFontSize = sp(15f)
+        val titleLineHeight = titleFontSize * 1.3f
+        val artistLineHeight = artistFontSize * 1.3f
+        val textBlockHeight = titleLineHeight + artistLineHeight
+        val titleTop = barTop + (thumbSize - textBlockHeight) / 2f
+        val artistTop = titleTop + titleLineHeight
+        val buttonRadius = dp(14f)
+        val buttonCx = sceneWidth - sysRight - dp(28f) - buttonRadius
+        val buttonCy = barTop + thumbSize / 2f
+        val textMaxWidth = (buttonCx - buttonRadius - gap - textLeft).coerceAtLeast(1f)
+
+        val wire = TopBarWire(
+            title = title,
+            artist = topBarArtist ?: "",
+            thumbLeft = thumbLeft,
+            thumbTop = barTop,
+            thumbSize = thumbSize,
+            thumbRadius = dp(14f),
+            textLeft = textLeft,
+            textMaxWidth = textMaxWidth,
+            titleTop = titleTop,
+            titleFontSize = titleFontSize,
+            titleLineHeight = titleLineHeight,
+            titleWeight = 600,
+            artistTop = artistTop,
+            artistFontSize = artistFontSize,
+            artistLineHeight = artistLineHeight,
+            artistAlpha = 0.4f,
+            buttonCx = buttonCx,
+            buttonCy = buttonCy,
+            buttonRadius = buttonRadius,
+        )
+        return wire to (barTop + thumbSize + dp(20f))
     }
 
     /** Drive the background: `playing` gates the time flow, `reactive` the audio reactivity. */
     fun setPlaybackState(playing: Boolean, reactive: Boolean) {
         if (isPlaying == playing && backgroundReactive == reactive) return
+        if (isPlaying != playing) {
+            // Fold the elapsed play time into the anchor before flipping play/pause,
+            // so the clock resumes/freezes at the current position instead of a stale
+            // anchor.
+            val now = SystemClock.elapsedRealtimeNanos()
+            if (isPlaying) {
+                anchorPositionMs += ((now - anchorClockNanos) / 1_000_000L).toInt()
+            }
+            anchorClockNanos = now
+        }
         isPlaying = playing
         backgroundReactive = reactive
         if (!engineClosed) engine.setPlaybackState(playing, reactive)
         requestRender()
+    }
+
+    /**
+     * Render-thread clock tick: extrapolate the authoritative anchor to now, then ease
+     * the smoothed [displayMs] toward it. A far jump (a real seek) snaps; otherwise the
+     * rate is `base + gap/RECONCILE_MS` clamped to `[0, MAX_RATE]` — so when the anchor
+     * lands BEHIND us (gap < 0) our rate drops below realtime (down to a pause, never
+     * reversing) until it catches up, and when it lands ahead we speed up to close the
+     * gap smoothly rather than jumping.
+     */
+    private fun computeDisplayTimeMs(): Int {
+        val now = SystemClock.elapsedRealtimeNanos()
+        val playing = isPlaying
+        val elapsedMs = if (playing) (now - anchorClockNanos) / 1_000_000.0 else 0.0
+        val target = anchorPositionMs + elapsedMs
+        if (!clockPrimed) {
+            clockPrimed = true
+            lastClockNanos = now
+            displayMs = target
+            return displayMs.roundToInt()
+        }
+        val dtMs = ((now - lastClockNanos) / 1_000_000.0).coerceIn(0.0, CLOCK_MAX_FRAME_MS)
+        lastClockNanos = now
+        val gap = target - displayMs
+        if (abs(gap) >= CLOCK_SEEK_SNAP_MS) {
+            displayMs = target
+        } else {
+            val baseRate = if (playing) 1.0 else 0.0
+            val rate = (baseRate + gap / CLOCK_RECONCILE_MS).coerceIn(0.0, CLOCK_MAX_RATE)
+            displayMs += rate * dtMs
+            // Catching up from behind: don't overshoot past the target.
+            if (gap > 0.0 && displayMs > target) displayMs = target
+        }
+        return displayMs.roundToInt()
     }
 
     /** (Re)apply the held background art + playback state to the native engine. */
@@ -323,7 +497,9 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         // per refresh. If this frame turns out idle/lost, the callback is cancelled
         // below so the loop still parks.
         scheduleFrame()
-        val result = engine.renderLyricsFrameToSurface(currentTimeMs)
+        val frameTimeMs = computeDisplayTimeMs()
+        lastRenderedTimeMs = frameTimeMs
+        val result = engine.renderLyricsFrameToSurface(frameTimeMs)
         if (result < 0) {
             // Surface lost — drop EGL. The Java Surface is released by the pending
             // onSurfaceTextureDestroyed handshake (or the next bind).
@@ -591,13 +767,17 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         val sceneWidth = renderWidth.takeIf { it > 0 } ?: width
         val sceneHeight = renderHeight.takeIf { it > 0 } ?: height
         if (sceneDirty) {
+            val (topBarWire, resolvedContentTop) = resolveTopBar(sceneWidth)
             engine.setLyricsScene(
                 sceneLyrics.toSceneJson(
                     sceneWidth,
                     sceneHeight,
                     sceneStyle.scaled(renderScale),
-                    contentTopPx * renderScale,
-                    contentBottomPx * renderScale,
+                    contentTop = resolvedContentTop,
+                    contentBottom = contentBottomPx * renderScale,
+                    contentLeft = contentLeftPx * renderScale,
+                    contentRight = contentRightPx * renderScale,
+                    topBar = topBarWire,
                 )
             )
             sceneDirty = false
@@ -612,7 +792,8 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         if (width <= 0 || height <= 0) return null
         if (!ensureScene(width, height)) return null
 
-        val lineIndex = engine.hitTestLyricsLine(x * renderScale, y * renderScale, currentTimeMs)
+        val lineIndex =
+            engine.hitTestLyricsLine(x * renderScale, y * renderScale, lastRenderedTimeMs)
         return lineIndex.takeIf { it in sceneLyrics.lines.indices }
     }
 

@@ -12,24 +12,32 @@
 //! `drawVertices(BlendMode::Modulate)`, matching the GL `col.rgb *= v_c`.
 
 use skia_safe::{
-    runtime_effect::ChildPtr, vertices::VertexMode, AlphaType, BlendMode, Canvas, Color, ColorType,
-    Data, Image, ImageInfo, ISize, Matrix, Paint, Point, RuntimeEffect, SamplingOptions, Shader,
-    TileMode, Vertices,
+    canvas::SaveLayerRec,
+    image_filters::{self, CropRect},
+    runtime_effect::ChildPtr,
+    vertices::VertexMode,
+    AlphaType, BlendMode, Canvas, Color, ColorType, CubicResampler, Data, Image, ImageInfo, ISize,
+    Matrix, Paint, Point, RuntimeEffect, SamplingOptions, Shader, TileMode, Vertices,
 };
 
-/// Subdivisions per Hermite patch. The GL reference uses 50; because the mesh is
-/// tessellated only when the artwork changes (never per frame), a generous value
-/// is cheap. 32 keeps the one-time vertex count reasonable while the colour
-/// gradient stays smooth (the fragment texture carries the fine detail anyway).
-const SUBDIVISIONS: usize = 32;
+/// Subdivisions per Hermite patch. The GL reference uses 50; here the per-frame
+/// breathing warp re-tessellates the vertex positions each frame, so this is kept
+/// modest — the linear-filtered texture + Hermite colour interpolation stay smooth
+/// at 20, and the deforming grid is cheap to rebuild.
+const SUBDIVISIONS: usize = 20;
 /// Processed-artwork texture edge (see [`process_bitmap`]). Matches the reference
 /// `ImageUtils.processBitmap` 32×32 downscale.
 const TEX_SIZE: i32 = 32;
 
 /// Ported `MeshShaders.FRAGMENT_SHADER`. `drawVertices` feeds the interpolated
-/// mesh UV (`v_t`) in as the shader coordinate, so rotation/scale/vignette all key
-/// off it. The GL vertex-stage breathing is folded in here as a subtle UV
-/// domain-warp so the vertex buffer can stay static.
+/// mesh UV (`v_t`) in as the shader coordinate, so the album rotate/scale, vignette
+/// and dither all key off it; the per-vertex mesh colour is multiplied in via
+/// `drawVertices(Modulate)`. The GL vertex-stage breathing is applied on the
+/// geometry (see [`MeshGradient::draw`]), not here. The result is returned OPAQUE:
+/// the reference disables depth-test/cull and blends, but a deformed mesh folds over
+/// itself, and blending those overlaps double-darkens the seams — an opaque result
+/// makes overlapping triangles simply overwrite (painter's order), so the fade is
+/// baked into RGB instead of alpha.
 const MESH_SKSL: &str = r#"
 uniform shader album;
 uniform float uTexSize;
@@ -41,12 +49,8 @@ half4 main(float2 uv) {
     float vol = uAmp * 2.0;
     float t = uTime + uAmp;
 
-    // Centre, then a gentle breathing domain-warp (the GL vertex breathing).
+    // Rotate + scale the texture sample around the centre (GL fragment stage).
     float2 c = uv - 0.5;
-    c.x += sin(uv.y * 3.0 + uTime * 0.5) * 0.03;
-    c.y += cos(uv.x * 2.5 + uTime * 0.6) * 0.03;
-
-    // Scale by (1 - volume), rotate over time, re-centre.
     float s = max(0.001, 1.0 - vol);
     float ca = cos(t * 2.0);
     float sa = sin(t * 2.0);
@@ -55,10 +59,9 @@ half4 main(float2 uv) {
 
     float4 col = float4(album.eval(tuv * uTexSize));
 
-    // alphaVolumeFactor: fade the layer as loudness rises.
+    // alphaVolumeFactor baked into RGB (opaque output — see the doc comment).
     float alphaFactor = uAlpha * clamp(1.0 - uAmp * 0.5, 0.5, 1.0);
     col.rgb *= alphaFactor;
-    col.a *= alphaFactor;
 
     // Hash-based dither to break up banding.
     float2 hp = fract(uv * float2(123.34, 456.21));
@@ -70,16 +73,34 @@ half4 main(float2 uv) {
     float vig = smoothstep(0.8, 0.3, length(uv - 0.5));
     col.rgb *= (0.6 + 0.4 * vig);
 
-    return half4(col);
+    return half4(col.rgb, 1.0);
 }
 "#;
 
-/// A GPU mesh-gradient built from one piece of artwork. Rebuilt only when the
-/// artwork changes; drawn every frame with just a matrix + uniform update.
+/// A GPU mesh-gradient built from one piece of artwork. The tessellation (base
+/// positions in `p*1.4` mesh space, UVs, per-vertex colours, triangle indices) is
+/// computed once; each frame the positions are re-breathed on the CPU (the GL
+/// vertex shader) and drawn with the per-fragment `RuntimeEffect`.
 pub struct MeshGradient {
     effect: RuntimeEffect,
     album: Shader,
-    vertices: Vertices,
+    /// The original (unprocessed) artwork, for the player top-bar thumbnail.
+    thumbnail: Image,
+    /// The processed 32×32 RGBA artwork, kept so the control-point grid can be
+    /// re-tessellated (and re-coloured) if the surface size/aspect changes.
+    processed: Vec<u8>,
+    /// Deterministic control-point layout seed (stable per song).
+    seed: u32,
+    /// Currently-built control-point grid `(cols, rows)`.
+    grid: (usize, usize),
+    /// Per-frame breathing amplitude (clip units), scaled to the grid so a denser
+    /// grid never breathes a cell over itself.
+    breath_amp: f32,
+    /// Base vertex positions after `×1.4` (mesh/clip space), before breathing.
+    base: Vec<Point>,
+    texs: Vec<Point>,
+    colors: Vec<Color>,
+    indices: Vec<u16>,
 }
 
 // The mesh's Skia handles (RuntimeEffect / Shader / Vertices) are immutable after
@@ -118,29 +139,70 @@ impl MeshGradient {
             log::warn!("[mesh] album shader build failed");
             return None;
         };
+        let Some(thumbnail) = make_thumbnail_image(pixels, width, height) else {
+            log::warn!("[mesh] thumbnail image build failed");
+            return None;
+        };
 
-        let preset = generate_control_points(seed);
-        let control_points = control_points_from_preset(&preset, &processed);
-        let Some(vertices) = tessellate(&preset, &control_points) else {
-            log::warn!("[mesh] tessellation failed (w={} h={})", preset.width, preset.height);
+        // Tessellate for a neutral phone-ish surface up front so the first frame has
+        // geometry; `ensure_grid` re-tessellates once the real surface size is known.
+        let (cols, rows) = desired_grid(1080.0, 1920.0);
+        let Some((base, texs, colors, indices)) = build_mesh_arrays(seed, cols, rows, &processed)
+        else {
+            log::warn!("[mesh] tessellation failed (grid {cols}x{rows})");
             return None;
         };
 
         Some(Self {
             effect,
             album,
-            vertices,
+            thumbnail,
+            processed,
+            seed,
+            grid: (cols, rows),
+            breath_amp: breath_amp_for(cols.max(rows)),
+            base,
+            texs,
+            colors,
+            indices,
         })
+    }
+
+    /// The original artwork as an image, for the top-bar thumbnail.
+    pub fn thumbnail(&self) -> &Image {
+        &self.thumbnail
+    }
+
+    /// Re-tessellate the control-point grid for the current surface size/aspect if
+    /// it no longer matches what was built. The grid dimensions come from the
+    /// surface's physical size and aspect (see [`desired_grid`]); this is cheap and
+    /// only actually rebuilds on a genuine size change (rotation / resize), never
+    /// per frame.
+    pub fn ensure_grid(&mut self, width: f32, height: f32) {
+        let (cols, rows) = desired_grid(width, height);
+        if (cols, rows) == self.grid {
+            return;
+        }
+        if let Some((base, texs, colors, indices)) =
+            build_mesh_arrays(self.seed, cols, rows, &self.processed)
+        {
+            self.base = base;
+            self.texs = texs;
+            self.colors = colors;
+            self.indices = indices;
+            self.grid = (cols, rows);
+            self.breath_amp = breath_amp_for(cols.max(rows));
+        }
     }
 
     /// Draw the background across the whole `width`×`height` surface.
     ///
     /// `time` is the (loudness-paced) animation clock; `amp` is the reactive
-    /// amplitude (the GL `u_amp`); `alpha` is a global fade (`u_alpha`). All of the
-    /// heavy work happens on the GPU — this only concatenates an affine transform,
-    /// packs 4 uniforms and issues one `drawVertices`.
+    /// amplitude (the GL `u_amp`); `alpha` is a global fade (`u_alpha`). Per frame:
+    /// re-breathe the geometry (GL vertex shader), then one `drawVertices` with the
+    /// per-fragment `RuntimeEffect`, wrapped in a slightly-blurred layer.
     pub fn draw(&self, canvas: &Canvas, width: f32, height: f32, time: f32, amp: f32, alpha: f32) {
-        if width <= 0.0 || height <= 0.0 {
+        if width <= 0.0 || height <= 0.0 || self.base.is_empty() {
             return;
         }
 
@@ -159,24 +221,53 @@ impl MeshGradient {
             return;
         };
 
+        // GL vertex-stage breathing: perturb each (already ×1.4) position by slow
+        // sine/cosine waves so the whole gradient undulates organically.
+        let breath_t = time * 0.5;
+        let positions: Vec<Point> = self
+            .base
+            .iter()
+            .map(|p| {
+                let off_x = (p.y * 3.0 + breath_t).sin() * self.breath_amp;
+                let off_y = (p.x * 2.5 + breath_t * 1.2).cos() * self.breath_amp;
+                Point::new(p.x + off_x, p.y + off_y)
+            })
+            .collect();
+        let vertices = Vertices::new_copy(
+            VertexMode::Triangles,
+            &positions,
+            &self.texs,
+            &self.colors,
+            Some(&self.indices),
+        );
+
         let mut paint = Paint::default();
         paint.set_anti_alias(false);
         paint.set_shader(shader);
 
-        canvas.save();
+        // "稍稍模糊": a light blur over the whole background softens the gradient and
+        // hides any residual fold seams from the deforming mesh.
+        let sigma = (width.min(height) * 0.005).clamp(2.0, 12.0);
+        let mut layer_paint = Paint::default();
+        if let Some(filter) = image_filters::blur((sigma, sigma), None, None, CropRect::NO_CROP_RECT)
+        {
+            layer_paint.set_image_filter(filter);
+        }
+        canvas.save_layer(&SaveLayerRec::default().paint(&layer_paint));
+        // Positions are in `p*1.4` space (breathing already applied); the matrix only
+        // does aspect correction + clip→pixel.
         canvas.concat(&mesh_to_pixel_matrix(width, height));
         // Modulate = multiply: shader_output * per-vertex mesh colour, matching the
         // GL `col.rgb *= v_c`.
-        canvas.draw_vertices(&self.vertices, BlendMode::Modulate, &paint);
+        canvas.draw_vertices(&vertices, BlendMode::Modulate, &paint);
         canvas.restore();
     }
 }
 
-/// Affine map from mesh space (surface points in ~[-1, 1], pre-`×1.4`) to surface
-/// pixels, replicating the GL vertex stage: `p *= 1.4`, aspect correction, then the
-/// clip→viewport transform (with Y flipped for Skia's Y-down canvas). Because every
-/// step is a per-axis scale/translate, the whole thing is one `Matrix`, so the
-/// vertex buffer stays in mesh space and never rebuilds on resize.
+/// Affine map from breathed mesh space (positions already `×1.4`) to surface pixels,
+/// replicating the GL vertex stage's aspect correction + the clip→viewport transform
+/// (with Y flipped for Skia's Y-down canvas). Each step is a per-axis scale/translate,
+/// so the whole thing is one `Matrix`.
 fn mesh_to_pixel_matrix(width: f32, height: f32) -> Matrix {
     let aspect = width / height;
     let (aspect_x, aspect_y) = if aspect > 1.0 {
@@ -184,11 +275,30 @@ fn mesh_to_pixel_matrix(width: f32, height: f32) -> Matrix {
     } else {
         (1.0 / aspect, 1.0)
     };
-    let sx = 1.4 * aspect_x * width * 0.5;
-    let sy = -1.4 * aspect_y * height * 0.5; // negative: clip +Y (up) → screen −Y
+    let sx = aspect_x * width * 0.5;
+    let sy = -aspect_y * height * 0.5; // negative: clip +Y (up) → screen −Y
     let tx = width * 0.5;
     let ty = height * 0.5;
     Matrix::new_all(sx, 0.0, tx, 0.0, sy, ty, 0.0, 0.0, 1.0)
+}
+
+/// Build a full-resolution image of the original artwork (ARGB_8888 → RGBA8888) for
+/// the top-bar thumbnail.
+fn make_thumbnail_image(pixels: &[u32], width: usize, height: usize) -> Option<Image> {
+    let mut rgba = Vec::with_capacity(width * height * 4);
+    for &argb in &pixels[..width * height] {
+        rgba.push(((argb >> 16) & 0xff) as u8); // R
+        rgba.push(((argb >> 8) & 0xff) as u8); // G
+        rgba.push((argb & 0xff) as u8); // B
+        rgba.push(((argb >> 24) & 0xff) as u8); // A
+    }
+    let info = ImageInfo::new(
+        ISize::new(width as i32, height as i32),
+        ColorType::RGBA8888,
+        AlphaType::Unpremul,
+        None,
+    );
+    Image::from_raster_data(&info, Data::new_copy(&rgba), width * 4)
 }
 
 fn make_album_shader(processed_rgba: &[u8]) -> Option<Shader> {
@@ -200,11 +310,15 @@ fn make_album_shader(processed_rgba: &[u8]) -> Option<Shader> {
     );
     let data = Data::new_copy(processed_rgba);
     let image = Image::from_raster_data(&info, data, (TEX_SIZE * 4) as usize)?;
-    // GL_MIRRORED_REPEAT + GL_LINEAR. The shader evaluates it at `uv * TEX_SIZE`,
-    // so no local matrix is needed.
+    // GL_MIRRORED_REPEAT, but Mitchell BICUBIC (not bilinear) filtering. The source
+    // is only 32×32, so it is stretched ~30× across the surface; bilinear upsampling
+    // is piecewise-linear and leaves visible Mach-band "stripes" at every texel
+    // boundary. A Mitchell cubic (B=C=1/3) is C¹-smooth and ringing-free, so the
+    // gradient reads as continuous with no texel grid. The shader evaluates it at
+    // `uv * TEX_SIZE`, so no local matrix is needed.
     image.to_shader(
         (TileMode::Mirror, TileMode::Mirror),
-        SamplingOptions::default(),
+        SamplingOptions::from(CubicResampler::mitchell()),
         None,
     )
 }
@@ -265,10 +379,57 @@ impl Rng {
     }
 }
 
-fn generate_control_points(seed: u32) -> Preset {
+/// Control-point grid dimensions `(cols, rows)` for a surface, derived from its
+/// physical size and aspect. The aspect correction in [`mesh_to_pixel_matrix`] maps
+/// the clip-space mesh to a CENTRED SQUARE of side `1.4 · max(width, height)` (its
+/// `|sx| == |sy|` always), so uniform, square screen-space cells — the look we want
+/// — need an equal column and row count. That count scales with the longer edge, so
+/// a bigger / higher-DPI surface gets a finer grid; it is clamped so the (one-time)
+/// tessellation stays cheap. This is what makes the grid track the screen instead of
+/// the old fixed random 4–6 × 4–6.
+fn desired_grid(width: f32, height: f32) -> (usize, usize) {
+    // ~one control point per this many render px along the mesh square's edge.
+    const TARGET_CELL_PX: f32 = 700.0;
+    let longer = width.max(height).max(1.0);
+    let n = (1.0 + 1.4 * longer / TARGET_CELL_PX)
+        .round()
+        .clamp(4.0, 7.0) as usize;
+    (n, n)
+}
+
+/// Per-frame breathing amplitude (in the `×1.4` base space) for a grid of `n` points
+/// per axis, scaled so a denser grid (smaller cells) breathes proportionally less
+/// and never folds a cell over. Capped at the original coarse-grid value so sparse
+/// grids keep the same organic motion as before.
+fn breath_amp_for(n: usize) -> f32 {
+    let spacing = 2.8 / (n.max(2) as f32 - 1.0); // cell size in the ×1.4 base space
+    (spacing * 0.12).min(0.05)
+}
+
+/// Build the tessellated mesh arrays for a `cols × rows` control-point grid.
+fn build_mesh_arrays(
+    seed: u32,
+    cols: usize,
+    rows: usize,
+    processed: &[u8],
+) -> Option<MeshArrays> {
+    let preset = generate_control_points(seed, cols, rows);
+    let control_points = control_points_from_preset(&preset, processed);
+    tessellate(&preset, &control_points)
+}
+
+fn generate_control_points(seed: u32, w: usize, h: usize) -> Preset {
     let mut rng = Rng::new(seed);
-    let w = (4 + rng.next_int(3)) as usize;
-    let h = (4 + rng.next_int(3)) as usize;
+
+    // Both the noise displacement and the Hermite tangent magnitudes are scaled to
+    // the grid cell size so neither a control point nor a patch's curve can reach
+    // into a neighbouring cell. Cell inversion is exactly what folds the mesh over
+    // itself and shows up as hard triangle facets, and it got worse as the grid got
+    // denser under the old fixed `strength = 0.5` / tangent range `0.5..1.5` (both
+    // far larger than a cell). `strength` keeps a point near its cell centre; the
+    // tangents stay Catmull-Rom sized (≈ one cell) so a patch doesn't overshoot.
+    let cell = 2.0 / (w.max(h).max(2) as f32 - 1.0);
+    let strength = cell * 0.35;
 
     let noise_offset_x = rng.next_f32() * 100.0;
     let noise_offset_y = rng.next_f32() * 100.0;
@@ -288,7 +449,6 @@ fn generate_control_points(seed: u32) -> Preset {
                 u * scale + noise_offset_x + 50.0,
                 v * scale + noise_offset_y + 50.0,
             );
-            let strength = 0.5;
             let mut x = bx + nx * strength;
             let mut y = by + ny * strength;
             if i == 0 {
@@ -309,8 +469,8 @@ fn generate_control_points(seed: u32) -> Preset {
             let rot_degrees = angle.to_degrees();
             let ur = if is_border { 0.0 } else { rot_degrees };
             let vr = if is_border { 0.0 } else { rot_degrees + 90.0 };
-            let up = if is_border { 1.0 } else { rng.range(0.5, 1.5) };
-            let vp = if is_border { 1.0 } else { rng.range(0.5, 1.5) };
+            let up = if is_border { cell } else { cell * rng.range(0.6, 1.0) };
+            let vp = if is_border { cell } else { cell * rng.range(0.6, 1.0) };
 
             points.push(RawControlPoint {
                 cx: i,
@@ -475,7 +635,10 @@ fn color_coefficients(
     m[6] = tan_v00;
     m[7] = tan_v01;
     m[8] = tan_u00;
-    m[9] = tan_v01;
+    // u-tangent at corner (0,1). With only two columns of samples this is the same
+    // forward difference as `tan_u00`; it was `tan_v01` — a stray v-tangent that
+    // warped the top edge's colour interpolation into corner artifacts.
+    m[9] = tan_u00;
     m[12] = tan_u10;
     m[13] = tan_u10;
     m
@@ -503,10 +666,13 @@ fn color_point(u: f32, v: f32, r: &Mat4, g: &Mat4, b: &Mat4) -> [f32; 3] {
     [eval(r), eval(g), eval(b)]
 }
 
-/// Tessellate the patch grid into a static `Vertices` in mesh space (positions in
-/// ~[-1, 1], UV in [0, 1], per-vertex colour from the artwork). Ported from
-/// `BHPMesh.update` + `generateIndices`.
-fn tessellate(preset: &Preset, control_points: &[Vec<ControlPoint>]) -> Option<Vertices> {
+/// Tessellate the patch grid into `(base_positions, texs, colors, indices)`. Base
+/// positions are the surface points scaled `×1.4` (mesh/clip space, before the
+/// per-frame breathing); UVs in [0, 1]; per-vertex colour Hermite-interpolated from
+/// the artwork. Ported from `BHPMesh.update` + `generateIndices`.
+type MeshArrays = (Vec<Point>, Vec<Point>, Vec<Color>, Vec<u16>);
+
+fn tessellate(preset: &Preset, control_points: &[Vec<ControlPoint>]) -> Option<MeshArrays> {
     let patch_rows = preset.height.checked_sub(1)?;
     let patch_cols = preset.width.checked_sub(1)?;
     if patch_rows == 0 || patch_cols == 0 {
@@ -552,7 +718,9 @@ fn tessellate(preset: &Preset, control_points: &[Vec<ControlPoint>]) -> Option<V
             let v_local = v_global * patch_rows as f32 - pj as f32;
 
             let (px, py) = surface_point(u_local, v_local, &c_x[pj][pi], &c_y[pj][pi]);
-            positions.push(Point::new(px, py));
+            // Bake the GL vertex-shader `p * 1.4` here so the base is in the space
+            // where breathing (± 0.05) and the aspect matrix operate.
+            positions.push(Point::new(px * 1.4, py * 1.4));
 
             let color = color_point(u_local, v_local, &c_r[pj][pi], &c_g[pj][pi], &c_b[pj][pi]);
             colors.push(Color::from_argb(
@@ -584,18 +752,12 @@ fn tessellate(preset: &Preset, control_points: &[Vec<ControlPoint>]) -> Option<V
     }
 
     // u16 indices cap the vertex count at 65535; SUBDIVISIONS is chosen so a
-    // realistic 6×6 control grid (5 patches → 161 verts/side, ~25k) stays under.
+    // realistic 6×6 control grid stays comfortably under.
     if num_vertices > u16::MAX as usize {
         return None;
     }
 
-    Some(Vertices::new_copy(
-        VertexMode::Triangles,
-        &positions,
-        &texs,
-        &colors,
-        Some(&indices),
-    ))
+    Some((positions, texs, colors, indices))
 }
 
 // ---------------------------------------------------------------------------

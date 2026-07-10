@@ -4,11 +4,14 @@ import android.graphics.Bitmap
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.viewinterop.AndroidView
 import com.mocharealm.accompanist.lyrics.core.model.ISyncedLine
 import com.mocharealm.accompanist.lyrics.core.model.SyncedLyrics
@@ -57,21 +60,31 @@ internal actual fun NativeLyricsViewHost(
     contentPadding: PaddingValues,
     isPlaying: Boolean,
     backgroundReactive: Boolean,
+    title: String?,
+    artist: String?,
+    onControlsClick: (() -> Unit)?,
 ) {
     val density = LocalDensity.current
     val fontResourceBytes = rememberFontResourceBytes(fontResource)
     val style = config.toSceneStyle(density)
     // Convert the artwork to a downscaled pixel copy once per bitmap.
     val backgroundArt = remember(backgroundArtwork) { backgroundArtwork?.toBackgroundArt() }
+    val layoutDirection = LocalLayoutDirection.current
     val contentTopPx = with(density) { contentPadding.calculateTopPadding().toPx() }
     val contentBottomPx = with(density) { contentPadding.calculateBottomPadding().toPx() }
+    val contentLeftPx = with(density) { contentPadding.calculateLeftPadding(layoutDirection).toPx() }
+    val contentRightPx =
+        with(density) { contentPadding.calculateRightPadding(layoutDirection).toPx() }
+    val latestControlsClick by rememberUpdatedState(onControlsClick)
 
     fun RustSkiaLyricsView.applyAll() {
         // Background art + insets + playback FIRST: a fresh view/engine picks them
         // up before the scene is built, and re-applies survive font reconfig.
         setBackgroundArt(backgroundArt?.pixels, backgroundArt?.width ?: 0, backgroundArt?.height ?: 0)
-        setContentInsets(contentTopPx, contentBottomPx)
+        setContentInsets(contentTopPx, contentBottomPx, contentLeftPx, contentRightPx)
         setPlaybackState(isPlaying, backgroundReactive)
+        setTopBar(title, artist)
+        setOnControlsClicked { latestControlsClick?.invoke() }
         configureFonts(fontResourceBytes)
         setStyle(style)
         setLyrics(lyrics)

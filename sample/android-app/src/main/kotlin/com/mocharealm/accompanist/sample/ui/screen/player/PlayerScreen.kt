@@ -29,12 +29,16 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.captionBar
 import androidx.compose.foundation.layout.captionBarPadding
+import androidx.compose.foundation.layout.displayCutout
+import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -47,11 +51,8 @@ import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -59,7 +60,6 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.BlendMode
@@ -70,6 +70,7 @@ import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextMotion
 import androidx.compose.ui.unit.dp
@@ -93,13 +94,11 @@ import com.mocharealm.accompanist.sample.ui.screen.share.ShareScreen
 import com.mocharealm.accompanist.sample.ui.screen.share.ShareViewModel
 import com.mocharealm.accompanist.sample.ui.theme.SFPro
 import com.mocharealm.gaze.capsule.ContinuousRoundedRectangle
-import kotlinx.coroutines.android.awaitFrame
 import kotlinx.coroutines.launch
 import org.jetbrains.compose.resources.imageResource
 import org.jetbrains.compose.resources.painterResource
 import org.koin.compose.viewmodel.koinViewModel
 import java.io.File
-import kotlin.math.abs
 
 
 @Composable
@@ -107,32 +106,22 @@ fun PlayerScreen(
     playerViewModel: PlayerViewModel = koinViewModel(),
     shareViewModel: ShareViewModel = koinViewModel(),
 ) {
-    val animatedPositionState = remember { mutableLongStateOf(0L) }
-
-    val currentPositionProvider = remember {
-        { animatedPositionState.longValue.toInt() }
-    }
-
     val uiState by playerViewModel.uiState.collectAsState()
     val latestPlaybackState by rememberUpdatedState(uiState.playbackState)
 
-    LaunchedEffect(latestPlaybackState.isPlaying) {
-        if (latestPlaybackState.isPlaying) {
-            while (true) {
-                val elapsed = System.currentTimeMillis() - latestPlaybackState.lastUpdateTime
-                val newPosition = (latestPlaybackState.position + elapsed).coerceAtMost(
-                    latestPlaybackState.duration
-                )
-
-                val currentAnimPos = animatedPositionState.longValue
-
-                if (currentAnimPos <= newPosition || abs(newPosition - currentAnimPos) >= 100) {
-                    animatedPositionState.longValue = newPosition
-                }
-                awaitFrame()
-            }
-        } else {
-            animatedPositionState.longValue = latestPlaybackState.position
+    // Playback position is no longer interpolated frame-by-frame in Compose (which
+    // pushed a new value through recomposition every frame and froze on overshoot).
+    // This provider just reports the AUTHORITATIVE sample the player publishes
+    // (~every 250ms, plus seeks), projected to "now". The native view smoothly
+    // interpolates between samples on its render thread and decelerates to reconcile
+    // when a sample lands behind it — so the read path is one hop, not a frame loop.
+    val currentPositionProvider = remember {
+        {
+            val ps = latestPlaybackState
+            val elapsed = if (ps.isPlaying) System.currentTimeMillis() - ps.lastUpdateTime else 0L
+            val projected = ps.position + elapsed
+            val bounded = if (ps.duration > 0) projected.coerceAtMost(ps.duration) else projected
+            bounded.coerceAtLeast(0L).toInt()
         }
     }
 
@@ -201,11 +190,18 @@ fun BoxScope.MobilePlayerScreen(
     uiState: PlayerUiState
 ) {
     val density = LocalDensity.current
-    // Measured top-bar height → the lyrics band's top inset; the nav-bar inset is
-    // its bottom. Both are handed to the full-bleed surface so the lyrics stay clear
-    // of the top bar and navigation bar while the mesh background fills everything.
-    var topBarHeightPx by remember { mutableIntStateOf(0) }
-    val navBottomPx = WindowInsets.navigationBars.getBottom(density)
+    // Full-bleed surface renders the mesh background + top bar (thumbnail + metadata +
+    // ⋯ button) + lyrics. The engine lays out the top bar from the SYSTEM insets, so
+    // hand it the status/caption top inset and the navigation-bar bottom inset only.
+    val layoutDirection = LocalLayoutDirection.current
+    val topInsetPx = WindowInsets.statusBars.getTop(density) +
+        WindowInsets.captionBar.getTop(density)
+    val bottomInsetPx = WindowInsets.navigationBars.getBottom(density)
+    // Horizontal safe-area insets: the display cutout and any side navigation bar,
+    // so in landscape the top bar and lyrics stay clear of a cutout on either edge.
+    val horizontalInsets = WindowInsets.displayCutout.union(WindowInsets.navigationBars)
+    val leftInsetPx = horizontalInsets.getLeft(density, layoutDirection)
+    val rightInsetPx = horizontalInsets.getRight(density, layoutDirection)
 
     val cover =
         (uiState.backgroundState.bitmap ?: imageResource(Res.drawable.empty)).asAndroidBitmap()
@@ -235,49 +231,21 @@ fun BoxScope.MobilePlayerScreen(
             }
         },
         backgroundArtwork = uiState.backgroundState.bitmap,
-        contentPadding = PaddingValues(
-            top = with(density) { topBarHeightPx.toDp() },
-            bottom = with(density) { navBottomPx.toDp() }
-        ),
+        contentPadding = with(density) {
+            PaddingValues.Absolute(
+                left = leftInsetPx.toDp(),
+                top = topInsetPx.toDp(),
+                right = rightInsetPx.toDp(),
+                bottom = bottomInsetPx.toDp(),
+            )
+        },
         isPlaying = uiState.playbackState.isPlaying,
         backgroundReactive = true,
+        title = uiState.currentMusicItem?.label ?: "Unknown Title",
+        artist = uiState.currentMusicItem?.artist ?: "Unknown",
+        onControlsClick = { playerViewModel.onOpenSongSelection() },
         modifier = Modifier.fillMaxSize()
     )
-
-    Row(
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier
-            .align(Alignment.TopStart)
-            .onGloballyPositioned { topBarHeightPx = it.size.height }
-            .captionBarPadding()
-            .statusBarsPadding()
-            .padding(horizontal = 28.dp)
-            .padding(top = 28.dp)
-            .fillMaxWidth()
-    ) {
-        Row(
-            Modifier.weight(1f),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            uiState.backgroundState.bitmap?.let { bitmap ->
-                Image(
-                    bitmap,
-                    null,
-                    Modifier
-                        .clip(ContinuousRoundedRectangle(14.dp))
-                        .size(68.dp)
-                )
-            }
-            PlayerMetadata(
-                uiState.currentMusicItem?.label ?: "Unknown Title",
-                uiState.currentMusicItem?.artist ?: "Unknown"
-            )
-        }
-        Spacer(Modifier.width(8.dp))
-        PlayerControls(onOpenSongSelection = { playerViewModel.onOpenSongSelection() })
-    }
 }
 
 @Composable
@@ -637,6 +605,9 @@ fun PlayerLyrics(
     contentPadding: PaddingValues = PaddingValues(0.dp),
     isPlaying: Boolean = true,
     backgroundReactive: Boolean = false,
+    title: String? = null,
+    artist: String? = null,
+    onControlsClick: (() -> Unit)? = null,
 ) {
     if (lyrics == null) return
 
@@ -674,5 +645,8 @@ fun PlayerLyrics(
         contentPadding = contentPadding,
         isPlaying = isPlaying,
         backgroundReactive = backgroundReactive,
+        title = title,
+        artist = artist,
+        onControlsClick = onControlsClick,
     )
 }

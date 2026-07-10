@@ -142,8 +142,36 @@ internal data class LyricsSceneWire(
     val locale: String,
     val contentTop: Float = 0f,
     val contentBottom: Float = 0f,
+    val contentLeft: Float = 0f,
+    val contentRight: Float = 0f,
+    val topBar: TopBarWire? = null,
     val style: SceneStyle,
     val lines: List<LyricsLineWire>,
+)
+
+/** The player top bar rendered inside the surface: album thumbnail + title/artist +
+ * ⋯ button. All geometry is in render px; the thumbnail is the background artwork. */
+@Serializable
+internal data class TopBarWire(
+    val title: String,
+    val artist: String,
+    val thumbLeft: Float,
+    val thumbTop: Float,
+    val thumbSize: Float,
+    val thumbRadius: Float,
+    val textLeft: Float,
+    val textMaxWidth: Float,
+    val titleTop: Float,
+    val titleFontSize: Float,
+    val titleLineHeight: Float,
+    val titleWeight: Int,
+    val artistTop: Float,
+    val artistFontSize: Float,
+    val artistLineHeight: Float,
+    val artistAlpha: Float,
+    val buttonCx: Float,
+    val buttonCy: Float,
+    val buttonRadius: Float,
 )
 
 @Serializable
@@ -334,6 +362,9 @@ internal fun SyncedLyrics.toSceneJson(
     style: SceneStyle,
     contentTop: Float = 0f,
     contentBottom: Float = 0f,
+    contentLeft: Float = 0f,
+    contentRight: Float = 0f,
+    topBar: TopBarWire? = null,
 ): String =
     lyricsSceneJson.encodeToString(
         LyricsSceneWire(
@@ -342,6 +373,9 @@ internal fun SyncedLyrics.toSceneJson(
             locale = detectNativeLyricsLocale(),
             contentTop = contentTop,
             contentBottom = contentBottom,
+            contentLeft = contentLeft,
+            contentRight = contentRight,
+            topBar = topBar,
             style = style,
             lines = toSceneLines(),
         )

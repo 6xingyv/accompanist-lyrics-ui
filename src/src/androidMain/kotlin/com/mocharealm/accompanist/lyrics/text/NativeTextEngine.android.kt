@@ -144,6 +144,11 @@ actual class NativeTextEngine actual constructor(
         return if (handle != 0L) nativeHitTestLyricsLine(handle, x, y, currentTimeMs) else -1
     }
 
+    /** Whether (x, y) in render px hits the top bar's ⋯ button. */
+    fun hitTestTopBar(x: Float, y: Float): Boolean {
+        return handle != 0L && nativeHitTestTopBar(handle, x, y)
+    }
+
     /**
      * Install album artwork (ARGB_8888 pixels, `width`×`height`) for the GPU
      * mesh-gradient background and enable the full-bleed background mode. `seed`
@@ -381,6 +386,8 @@ actual class NativeTextEngine actual constructor(
         y: Float,
         currentTimeMs: Int
     ): Int
+
+    private external fun nativeHitTestTopBar(handle: Long, x: Float, y: Float): Boolean
 
     private external fun nativeSetBackgroundArt(
         handle: Long,

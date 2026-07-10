@@ -18,7 +18,8 @@ mod text_utils;
 
 use draw::{
     accompaniment_visibility, apply_vertical_fade_skia_band, draw_breathing_dots_skia,
-    draw_prepared_text_skia, interlude_visibility, make_interlude_slot, rgba_from_argb,
+    draw_prepared_text_skia, draw_top_bar_skia, interlude_visibility, make_interlude_slot,
+    rgba_from_argb,
 };
 use font_fallback::{cjk_family_priority, new_font_system};
 use fonts::*;
@@ -157,10 +158,45 @@ pub struct LyricsScene {
     pub content_top: Option<f32>,
     #[serde(default, rename = "contentBottom")]
     pub content_bottom: Option<f32>,
+    /// Horizontal content insets (px) — the safe area's left/right (display cutout /
+    /// side navigation bar in landscape). Lyrics + top bar are kept clear of them.
+    #[serde(default, rename = "contentLeft")]
+    pub content_left: Option<f32>,
+    #[serde(default, rename = "contentRight")]
+    pub content_right: Option<f32>,
+    /// Optional player top bar (album thumbnail + title/artist + ⋯ button) rendered
+    /// inside the surface. All geometry is in render px; the thumbnail image is the
+    /// background artwork already installed via `set_background_art`.
+    #[serde(default, rename = "topBar")]
+    pub top_bar: Option<TopBarInput>,
     #[serde(default)]
     pub style: SceneStyleInput,
     #[serde(default)]
     pub lines: Vec<LyricsLineInput>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TopBarInput {
+    pub title: String,
+    pub artist: String,
+    pub thumb_left: f32,
+    pub thumb_top: f32,
+    pub thumb_size: f32,
+    pub thumb_radius: f32,
+    pub text_left: f32,
+    pub text_max_width: f32,
+    pub title_top: f32,
+    pub title_font_size: f32,
+    pub title_line_height: f32,
+    pub title_weight: u16,
+    pub artist_top: f32,
+    pub artist_font_size: f32,
+    pub artist_line_height: f32,
+    pub artist_alpha: f32,
+    pub button_cx: f32,
+    pub button_cy: f32,
+    pub button_radius: f32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -577,6 +613,27 @@ struct PreparedScene {
     config: SceneConfig,
     lines: Vec<PreparedLine>,
     content_height: f32,
+    /// Player top bar (thumbnail + title/artist + ⋯ button), if the host supplied one.
+    top_bar: Option<PreparedTopBar>,
+}
+
+/// Resolved top-bar geometry (render px) + shaped title/artist text.
+#[derive(Debug)]
+struct PreparedTopBar {
+    thumb_left: f32,
+    thumb_top: f32,
+    thumb_size: f32,
+    thumb_radius: f32,
+    text_left: f32,
+    text_max_width: f32,
+    title_top: f32,
+    artist_top: f32,
+    artist_alpha: f32,
+    button_cx: f32,
+    button_cy: f32,
+    button_radius: f32,
+    title: PreparedText,
+    artist: PreparedText,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -640,6 +697,12 @@ struct SceneConfig {
     // the lyrics fill the surface, as when Compose sized the view to the band).
     content_top: f32,
     content_bottom: f32,
+    // Horizontal content insets (px): the safe-area left/right (display cutout / side
+    // navigation bar in landscape). The lyrics origin and wrap width are inset by
+    // these so text/top-bar never sit under a cutout. Both default 0 (portrait /
+    // legacy: no horizontal inset).
+    content_left: f32,
+    content_right: f32,
     keep_alive: f32,
     text_color: u32,
     show_translation: bool,
@@ -970,9 +1033,8 @@ impl LyricsRenderer {
         let now = Instant::now();
         let dt = self
             .last_mesh_frame_at
-            .map(|last| (now - last).as_secs_f32())
-            .unwrap_or(0.0)
-            .clamp(0.0, 0.1);
+            .map(|last| (now - last).as_secs_f32() * 0.2)
+            .unwrap_or(0.0);
         self.last_mesh_frame_at = Some(now);
 
         // Reference pacing (MeshGradientSurface): smooth the loudness, then map to a
@@ -994,8 +1056,15 @@ impl LyricsRenderer {
         // Ease the artwork in.
         self.background_alpha = (self.background_alpha + dt * 2.0).min(1.0);
 
-        if let Some(mesh) = &self.mesh_gradient {
-            mesh.draw(canvas, width, height, self.mesh_time, amp, self.background_alpha);
+        // Re-tessellate the control-point grid if the surface size/aspect changed
+        // (cheap; only rebuilds on a real resize), then draw. The linear fade-in
+        // progress is eased so the artwork blooms in smoothly rather than ramping.
+        let eased_alpha = ease_in_out(self.background_alpha);
+        if let Some(mesh) = self.mesh_gradient.as_mut() {
+            mesh.ensure_grid(width, height);
+        }
+        if let Some(mesh) = self.mesh_gradient.as_ref() {
+            mesh.draw(canvas, width, height, self.mesh_time, amp, eased_alpha);
         }
         // Keep animating while playing (frozen — and parkable — when paused).
         self.playback_active
@@ -1204,16 +1273,32 @@ impl LyricsRenderer {
         // fade (`DstIn`, which scales framebuffer alpha) dissolves only the lyrics
         // and never darkens the background beneath them. Both a no-op in the legacy
         // transparent-overlay mode (insets 0, background disabled).
-        let band_bottom = height as f32 - content_bottom;
+        // Round the band edges to whole pixels: the isolated lyrics layer is
+        // composited with `Plus` (additive), and a fractional layer/clip edge leaves
+        // a faint bright 1px seam at the band top/bottom under that blend (the edge
+        // pixel gets fractional coverage that the fade doesn't fully zero). Aligning
+        // to the pixel grid removes the seam.
+        let band_top = content_top.round();
+        let band_bottom = (height as f32 - content_bottom).round();
         let inset_lyrics = content_top > 0.0 || content_bottom > 0.0;
         let isolate_lyrics = self.background_enabled;
         if isolate_lyrics {
-            let bounds = skia_safe::Rect::new(0.0, content_top, width, band_bottom);
-            canvas.save_layer(&skia_safe::canvas::SaveLayerRec::default().bounds(&bounds));
+            let bounds = skia_safe::Rect::new(0.0, band_top, width, band_bottom);
+            // Composite the lyrics layer additively (`Plus`) over the mesh
+            // background — the GPU-path equivalent of the old Compose
+            // `graphicsLayer { blendMode = Plus }`, so the text screens/glows over
+            // the artwork instead of flatly covering it.
+            let mut layer_paint = skia_safe::Paint::default();
+            layer_paint.set_blend_mode(skia_safe::BlendMode::Plus);
+            canvas.save_layer(
+                &skia_safe::canvas::SaveLayerRec::default()
+                    .bounds(&bounds)
+                    .paint(&layer_paint),
+            );
         } else if inset_lyrics {
             canvas.save();
             canvas.clip_rect(
-                skia_safe::Rect::new(0.0, content_top, width, band_bottom),
+                skia_safe::Rect::new(0.0, band_top, width, band_bottom),
                 skia_safe::ClipOp::Intersect,
                 true,
             );
@@ -1239,9 +1324,10 @@ impl LyricsRenderer {
                 .as_ref()
                 .map(|slot| slot.height * dynamic_layout.interlude_visibility)
                 .unwrap_or(0.0);
-            // Left edge of this line's text: `padding_x`, plus the duet right-band
-            // shift for right-aligned lines of a duet song (zero otherwise).
-            let origin_x = scene.config.padding_x + line.x_offset;
+            // Left edge of this line's text: the left content inset + `padding_x`,
+            // plus the duet right-band shift for right-aligned lines of a duet song
+            // (zero otherwise).
+            let origin_x = scene.config.content_left + scene.config.padding_x + line.x_offset;
             let focus_alpha = scene.focus_alpha(line, current_time_ms);
             let distance_alpha = focus_alpha * dynamic_layout.text_visibility;
             // Unify the dim of already-sung and not-yet-sung lines: as a line dims
@@ -1315,9 +1401,9 @@ impl LyricsRenderer {
             let scaled_accompaniment = accompaniment_scale < 0.999;
             if scaled_accompaniment {
                 let pivot_x = if line.right_aligned {
-                    scene.config.width as f32 - scene.config.padding_x
+                    scene.config.width as f32 - scene.config.content_right - scene.config.padding_x
                 } else {
-                    scene.config.padding_x
+                    scene.config.content_left + scene.config.padding_x
                 };
                 let draw_top = y + text_y_offset + scene.config.padding_y;
                 let pivot_y = if line.cluster_role == ClusterRole::BeforeAccompaniment {
@@ -1435,12 +1521,12 @@ impl LyricsRenderer {
         // they scroll off. The top fade stays inside the keep-alive gap so the
         // active line (anchored at keep_alive from the top) is never touched. The
         // band collapses to the whole surface when no insets are set.
-        let band_height = (band_bottom - content_top).max(1.0);
-        let inner_keep_alive = (keep_alive - content_top).max(0.0);
+        let band_height = (band_bottom - band_top).max(1.0);
+        let inner_keep_alive = (keep_alive - band_top).max(0.0);
         apply_vertical_fade_skia_band(
             canvas,
             width,
-            content_top,
+            band_top,
             band_bottom,
             inner_keep_alive * 0.7,
             band_height * 0.12,
@@ -1448,6 +1534,20 @@ impl LyricsRenderer {
 
         if isolate_lyrics || inset_lyrics {
             canvas.restore();
+        }
+
+        // Player top bar (thumbnail + title/artist + ⋯ button) over the background,
+        // in the top-inset region above the lyrics band. Returns whether an
+        // overflowing title/artist is marqueeing so the loop keeps ticking.
+        let mut top_bar_animating = false;
+        if let Some(top_bar) = &scene.top_bar {
+            top_bar_animating = draw_top_bar_skia(
+                canvas,
+                &self.skia_typefaces,
+                self.mesh_gradient.as_ref().map(|mesh| mesh.thumbnail()),
+                top_bar,
+                current_time_ms,
+            );
         }
 
         if should_log_debug {
@@ -1483,11 +1583,34 @@ impl LyricsRenderer {
             }
         }
 
-        if self.layout_animation_active || self.manual_scroll_active || background_animating {
+        // Keep the render loop ticking every frame while playing: the host no longer
+        // pushes a position each Compose frame (it interpolates the clock on the
+        // render thread instead), so the loop must sustain itself so the karaoke
+        // sweep, marquee and background all keep advancing. It still parks when
+        // paused (`playback_active` false) and nothing else is animating.
+        let _ = top_bar_animating;
+        if self.layout_animation_active
+            || self.manual_scroll_active
+            || self.playback_active
+            || background_animating
+        {
             1
         } else {
             0
         }
+    }
+
+    /// Whether `(x, y)` (render px) falls on the top bar's ⋯ button.
+    pub fn hit_test_top_bar_button(&self, x: f32, y: f32) -> bool {
+        let Some(scene) = &self.scene else {
+            return false;
+        };
+        let Some(bar) = &scene.top_bar else {
+            return false;
+        };
+        let dx = x - bar.button_cx;
+        let dy = y - bar.button_cy;
+        dx * dx + dy * dy <= bar.button_radius * bar.button_radius
     }
 
     pub fn hit_test_line(&mut self, x: f32, y: f32, current_time_ms: i32) -> i32 {
@@ -1824,6 +1947,13 @@ fn focus_alpha_from_progress(progress: f32, min_alpha: f32) -> f32 {
     min_alpha + (1.0 - min_alpha) * eased
 }
 
+/// Smoothstep ease-in-out for a `[0, 1]` progress. Used to smooth otherwise-linear
+/// fades (e.g. the background artwork bloom) so they accelerate and settle.
+fn ease_in_out(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
 /// The karaoke "unsung" multiplier, chosen so the unsung ("unplayed") text sits
 /// at a CONSTANT alpha for a line's whole life — the dimmed floor `dim_min`, which
 /// is also where a dimmed already-sung line sits, so played and unplayed lines are
@@ -1877,6 +2007,8 @@ mod tests {
             translation_gap: ROW_GAP,
             accompaniment_translation_gap: ROW_GAP,
             padding_x: 16.0,
+            content_left: 0.0,
+            content_right: 0.0,
             padding_y: 8.0,
             content_top: 0.0,
             content_bottom: 0.0,
@@ -1950,6 +2082,7 @@ mod tests {
                 indexed_line(4, 4_000, 5_000, 50.0),
             ],
             content_height: 0.0,
+            top_bar: None,
         };
 
         // A line deep in the gapless run is its own group, not swallowed by the
@@ -1980,6 +2113,7 @@ mod tests {
                 indexed_line(1, 1_500, 3_500, 50.0),
             ],
             content_height: 0.0,
+            top_bar: None,
         };
 
         // At t=1000 only line 0 is focused, but line 1 begins before it ends, so
@@ -2002,6 +2136,7 @@ mod tests {
                 indexed_line(4, 6_000, 8_000, 50.0),
             ],
             content_height: 0.0,
+            top_bar: None,
         };
 
         // Every line overlaps the next, so without a cap the whole run chains into
@@ -2095,6 +2230,7 @@ mod tests {
             config: narrow,
             lines: vec![],
             content_height: 0.0,
+            top_bar: None,
         };
         assert!(narrow_scene.blur_radius_for_screen_y(far, 0.0) > 0.0);
 
@@ -2104,6 +2240,7 @@ mod tests {
             config: wide,
             lines: vec![],
             content_height: 0.0,
+            top_bar: None,
         };
         assert_eq!(wide_scene.blur_radius_for_screen_y(far, 0.0), 0.0);
     }
@@ -2114,6 +2251,7 @@ mod tests {
             config: test_config(),
             lines: vec![test_line(ClusterRole::Standalone, 1_000, 2_000, 50.0)],
             content_height: 0.0,
+            top_bar: None,
         };
         let line = &scene.lines[0];
 
@@ -2140,6 +2278,7 @@ mod tests {
             config: test_config(),
             lines: vec![test_line(ClusterRole::Standalone, 1_000, 2_000, 50.0)],
             content_height: 0.0,
+            top_bar: None,
         });
 
         let hit = renderer.hit_test_line(20.0, 40.0, 1_000);
@@ -2273,6 +2412,7 @@ mod tests {
                 test_line(ClusterRole::AfterAccompaniment, 2_100, 3_000, 30.0),
             ],
             content_height: 0.0,
+            top_bar: None,
         };
 
         // Collapsed before it starts, and still collapsed at the instant it starts
@@ -2305,6 +2445,7 @@ mod tests {
             config: test_config(),
             lines: vec![test_line(ClusterRole::Main, 1_000, 2_000, 50.0), after],
             content_height: 0.0,
+            top_bar: None,
         };
 
         // Collapsed before the main appears.
@@ -2336,6 +2477,7 @@ mod tests {
             config: test_config(),
             lines,
             content_height: 0.0,
+            top_bar: None,
         });
 
         let content: Vec<DynamicLineLayout> = (0..6)

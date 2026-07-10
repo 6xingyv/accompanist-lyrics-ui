@@ -429,6 +429,11 @@ impl TextEngine {
         self.renderer.hit_test_line(x, y, current_time_ms)
     }
 
+    /// Whether `(x, y)` (render px) hits the top bar's ⋯ button.
+    pub fn hit_test_top_bar_button(&self, x: f32, y: f32) -> bool {
+        self.renderer.hit_test_top_bar_button(x, y)
+    }
+
     pub fn begin_lyrics_scroll(&mut self) {
         self.renderer.begin_manual_scroll();
     }
