@@ -2489,7 +2489,8 @@ mod tests {
             })
             .collect();
         let viewport = 600.0;
-        let scroll_of = |renderer: &LyricsRenderer, i: usize| content[i].top - renderer.frame_layouts[i].top;
+        let scroll_of =
+            |renderer: &LyricsRenderer, i: usize| content[i].top - renderer.frame_layouts[i].top;
 
         // Settle at the top so the cluster (rows 3-4) sits below the focus.
         for _ in 0..200 {
@@ -2530,7 +2531,8 @@ mod tests {
         let inactive = 0.2;
         let mut focus_alpha = dim_min;
         while focus_alpha <= 1.0 + 1e-6 {
-            let unplayed = focus_alpha * unified_inactive_karaoke_alpha(focus_alpha, dim_min, inactive);
+            let unplayed =
+                focus_alpha * unified_inactive_karaoke_alpha(focus_alpha, dim_min, inactive);
             assert!(
                 (unplayed - dim_min).abs() < 1e-4,
                 "focus_alpha {focus_alpha}: unplayed {unplayed} should stay at {dim_min}"

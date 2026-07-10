@@ -194,6 +194,15 @@ impl LyricsRenderer {
         loaded
     }
 
+    #[cfg(not(target_os = "android"))]
+    pub fn load_system_fonts(&mut self) -> usize {
+        let before = self.font_system.db().len();
+        self.font_system.db_mut().load_system_fonts();
+        let after = self.font_system.db().len();
+        self.font_selection_cache.clear();
+        after.saturating_sub(before)
+    }
+
     /// Lazily pull in the system fonts a piece of text needs (Android): for each
     /// glyph not yet seen at this weight/style, ask the NDK `AFontMatcher` which
     /// system font covers it and load just that file into the db. Cached per

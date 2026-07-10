@@ -1,4 +1,4 @@
-use crate::core::TextEngine;
+use lyrics_renderer::TextEngine;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::sync::Mutex;

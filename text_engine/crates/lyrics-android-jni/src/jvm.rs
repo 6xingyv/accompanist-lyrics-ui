@@ -3,9 +3,27 @@ use jni::sys::{jboolean, jbyteArray, jfloat, jint, jintArray, jlong};
 use jni::JNIEnv;
 use std::sync::Mutex;
 
-use crate::core::TextEngine;
+#[cfg(target_os = "android")]
+use crate::android_gpu::AndroidGpuRenderer;
+use lyrics_renderer::TextEngine;
 
-type EngineBox = Mutex<TextEngine>;
+struct EngineState {
+    engine: TextEngine,
+    #[cfg(target_os = "android")]
+    gpu_renderer: Option<AndroidGpuRenderer>,
+}
+
+impl EngineState {
+    fn new(atlas_width: u32, atlas_height: u32) -> Self {
+        Self {
+            engine: TextEngine::new(atlas_width, atlas_height),
+            #[cfg(target_os = "android")]
+            gpu_renderer: None,
+        }
+    }
+}
+
+type EngineBox = Mutex<EngineState>;
 
 fn bool_to_jboolean(value: bool) -> jboolean {
     if value {
@@ -19,6 +37,14 @@ unsafe fn with_engine_mut<R>(
     handle: jlong,
     fallback: R,
     f: impl FnOnce(&mut TextEngine) -> R,
+) -> R {
+    with_state_mut(handle, fallback, |state| f(&mut state.engine))
+}
+
+unsafe fn with_state_mut<R>(
+    handle: jlong,
+    fallback: R,
+    f: impl FnOnce(&mut EngineState) -> R,
 ) -> R {
     if handle == 0 {
         return fallback;
@@ -38,7 +64,7 @@ unsafe fn with_engine<R>(handle: jlong, fallback: R, f: impl FnOnce(&TextEngine)
 
     let engine = &*(handle as *mut EngineBox);
     match engine.lock() {
-        Ok(guard) => f(&guard),
+        Ok(guard) => f(&guard.engine),
         Err(_) => fallback,
     }
 }
@@ -51,7 +77,7 @@ pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeTextE
     atlas_height: jint,
 ) -> jlong {
     crate::init_logging();
-    Box::into_raw(Box::new(Mutex::new(TextEngine::new(
+    Box::into_raw(Box::new(Mutex::new(EngineState::new(
         atlas_width as u32,
         atlas_height as u32,
     )))) as jlong
@@ -76,8 +102,8 @@ pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeTextE
     atlas_width: jint,
     atlas_height: jint,
 ) {
-    with_engine_mut(handle, (), |engine| {
-        *engine = TextEngine::new(atlas_width as u32, atlas_height as u32);
+    with_state_mut(handle, (), |engine| {
+        *engine = EngineState::new(atlas_width as u32, atlas_height as u32);
     });
 }
 
@@ -540,15 +566,25 @@ pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeTextE
     frame_width: jint,
     frame_height: jint,
 ) -> jboolean {
-    bool_to_jboolean(with_engine_mut(handle, false, |engine| {
-        engine.set_android_render_surface(
+    bool_to_jboolean(with_state_mut(handle, false, |state| {
+        state.gpu_renderer = None;
+        match AndroidGpuRenderer::from_java_surface(
             env.get_native_interface(),
             surface.into_inner(),
             surface_width.max(0) as u32,
             surface_height.max(0) as u32,
             frame_width.max(0) as u32,
             frame_height.max(0) as u32,
-        )
+        ) {
+            Ok(renderer) => {
+                state.gpu_renderer = Some(renderer);
+                true
+            }
+            Err(error) => {
+                warn!("Failed to create Android GPU lyrics surface: {}", error);
+                false
+            }
+        }
     }))
 }
 
@@ -590,12 +626,25 @@ pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeTextE
     frame_width: jint,
     frame_height: jint,
 ) -> jboolean {
-    bool_to_jboolean(with_engine_mut(handle, false, |engine| {
-        engine.set_android_render_surface_from_window(
+    bool_to_jboolean(with_state_mut(handle, false, |state| {
+        state.gpu_renderer = None;
+        match AndroidGpuRenderer::from_window_ptr(
             window_ptr as *mut std::ffi::c_void,
             frame_width.max(0) as u32,
             frame_height.max(0) as u32,
-        )
+        ) {
+            Ok(renderer) => {
+                state.gpu_renderer = Some(renderer);
+                true
+            }
+            Err(error) => {
+                warn!(
+                    "Failed to create Android GPU lyrics surface from window: {}",
+                    error
+                );
+                false
+            }
+        }
     }))
 }
 
@@ -606,8 +655,13 @@ pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeTextE
     _this: JObject,
     handle: jlong,
 ) {
-    with_engine_mut(handle, (), |engine| {
-        engine.clear_android_render_surface();
+    with_state_mut(handle, (), |state| {
+        if let Some(renderer) = state.gpu_renderer.as_mut() {
+            if let Err(error) = renderer.clear() {
+                warn!("Failed to clear Android GPU lyrics surface: {}", error);
+            }
+        }
+        state.gpu_renderer = None;
     });
 }
 
@@ -619,8 +673,23 @@ pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeTextE
     handle: jlong,
     current_time_ms: jint,
 ) -> jint {
-    with_engine_mut(handle, -1, |engine| {
-        engine.render_lyrics_frame_to_android_surface(current_time_ms)
+    with_state_mut(handle, -1, |state| {
+        let Some(mut gpu_renderer) = state.gpu_renderer.take() else {
+            return -20;
+        };
+
+        let mut render_result = 0;
+        let present_result = gpu_renderer.draw_frame(|canvas| {
+            render_result = state
+                .engine
+                .render_lyrics_frame_to_canvas(current_time_ms, canvas);
+        });
+        state.gpu_renderer = Some(gpu_renderer);
+        if let Err(error) = present_result {
+            warn!("Failed to render Android GPU lyrics frame: {}", error);
+            return -21;
+        }
+        render_result
     })
 }
 
@@ -787,7 +856,7 @@ pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeAudio
     // Direct ByteBuffers are allocated 8-byte aligned, so reading them as f32 is
     // sound; clamp to the byte length so a short buffer can't over-read.
     let samples = unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const f32, count) };
-    crate::audio::push_pcm(samples);
+    lyrics_renderer::audio::push_pcm(samples);
 }
 
 #[no_mangle]
@@ -796,7 +865,7 @@ pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeAudio
     _class: JObject,
     sample_rate: jfloat,
 ) {
-    crate::audio::set_sample_rate(sample_rate);
+    lyrics_renderer::audio::set_sample_rate(sample_rate);
 }
 
 #[no_mangle]
@@ -804,5 +873,5 @@ pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeAudio
     _env: JNIEnv,
     _class: JObject,
 ) {
-    crate::audio::reset();
+    lyrics_renderer::audio::reset();
 }

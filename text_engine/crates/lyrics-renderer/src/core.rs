@@ -1,5 +1,3 @@
-#[cfg(target_os = "android")]
-use crate::android_gpu::AndroidGpuRenderer;
 use crate::atlas::{AtlasManager, Rect};
 use crate::font::FontWrapper;
 use crate::renderer::LyricsRenderer;
@@ -49,8 +47,6 @@ pub struct TextEngine {
     pub atlas_width: u32,
     pub atlas_height: u32,
     renderer: LyricsRenderer,
-    #[cfg(target_os = "android")]
-    gpu_renderer: Option<AndroidGpuRenderer>,
 }
 
 impl TextEngine {
@@ -63,8 +59,6 @@ impl TextEngine {
             atlas_width,
             atlas_height,
             renderer: LyricsRenderer::new(),
-            #[cfg(target_os = "android")]
-            gpu_renderer: None,
         }
     }
 
@@ -312,6 +306,11 @@ impl TextEngine {
         self.renderer.load_system_fonts()
     }
 
+    #[cfg(not(target_os = "android"))]
+    pub fn load_system_fonts(&mut self) -> usize {
+        self.renderer.load_system_fonts()
+    }
+
     pub fn set_lyrics_scene_json(&mut self, json: &str) -> String {
         self.renderer
             .set_scene_json(json)
@@ -323,96 +322,19 @@ impl TextEngine {
         self.renderer.metrics_json()
     }
 
-    #[cfg(target_os = "android")]
-    pub unsafe fn set_android_render_surface(
+    pub fn render_lyrics_frame_to_canvas(
         &mut self,
-        env: *mut jni::sys::JNIEnv,
-        surface: jni::sys::jobject,
-        surface_width: u32,
-        surface_height: u32,
-        frame_width: u32,
-        frame_height: u32,
-    ) -> bool {
-        self.gpu_renderer = None;
-        match AndroidGpuRenderer::from_java_surface(
-            env,
-            surface,
-            surface_width,
-            surface_height,
-            frame_width,
-            frame_height,
-        ) {
-            Ok(renderer) => {
-                self.gpu_renderer = Some(renderer);
-                true
-            }
-            Err(error) => {
-                warn!("Failed to create Android GPU lyrics surface: {}", error);
-                false
-            }
-        }
-    }
-
-    /// Install a render surface from a pre-acquired `ANativeWindow` pointer.
-    /// Unlike [`set_android_render_surface`], this carries no `JNIEnv` and so can
-    /// run on the dedicated render thread. Ownership of `window_ptr` transfers to
-    /// the renderer (released on failure by `from_window_ptr`).
-    #[cfg(target_os = "android")]
-    pub unsafe fn set_android_render_surface_from_window(
-        &mut self,
-        window_ptr: *mut std::ffi::c_void,
-        frame_width: u32,
-        frame_height: u32,
-    ) -> bool {
-        self.gpu_renderer = None;
-        match AndroidGpuRenderer::from_window_ptr(window_ptr, frame_width, frame_height) {
-            Ok(renderer) => {
-                self.gpu_renderer = Some(renderer);
-                true
-            }
-            Err(error) => {
-                warn!(
-                    "Failed to create Android GPU lyrics surface from window: {}",
-                    error
-                );
-                false
-            }
-        }
-    }
-
-    #[cfg(target_os = "android")]
-    pub fn clear_android_render_surface(&mut self) {
-        if let Some(renderer) = self.gpu_renderer.as_mut() {
-            if let Err(error) = renderer.clear() {
-                warn!("Failed to clear Android GPU lyrics surface: {}", error);
-            }
-        }
-        self.gpu_renderer = None;
-    }
-
-    #[cfg(target_os = "android")]
-    pub fn render_lyrics_frame_to_android_surface(&mut self, current_time_ms: i32) -> i32 {
-        let Some(mut gpu_renderer) = self.gpu_renderer.take() else {
-            return -20;
-        };
-
-        let mut render_result = 0;
-        let present_result = gpu_renderer.draw_frame(|canvas| {
-            render_result = self
-                .renderer
-                .render_frame_to_canvas(current_time_ms, canvas);
-        });
-        self.gpu_renderer = Some(gpu_renderer);
-        if let Err(error) = present_result {
-            warn!("Failed to render Android GPU lyrics frame: {}", error);
-            return -21;
-        }
-        render_result
+        current_time_ms: i32,
+        canvas: &skia_safe::Canvas,
+    ) -> i32 {
+        self.renderer
+            .render_frame_to_canvas(current_time_ms, canvas)
     }
 
     /// Install album artwork for the GPU mesh-gradient background (ARGB_8888).
     pub fn set_background_art(&mut self, pixels: &[u32], width: usize, height: usize, seed: u32) {
-        self.renderer.set_background_art(pixels, width, height, seed);
+        self.renderer
+            .set_background_art(pixels, width, height, seed);
     }
 
     /// Turn the mesh-gradient background off (revert to transparent overlay).

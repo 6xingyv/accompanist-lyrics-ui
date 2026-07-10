@@ -1041,7 +1041,12 @@ fn breathing_dots_state(
     if current < still_start {
         let progress =
             ((current - dip_start) / (still_start - dip_start).max(f32::EPSILON)).clamp(0.0, 1.0);
-        return (0.8 + 0.2 * (progress * 2.0 * PI).cos(), 1.0, enter_end, exit_start);
+        return (
+            0.8 + 0.2 * (progress * 2.0 * PI).cos(),
+            1.0,
+            enter_end,
+            exit_start,
+        );
     }
     if current < exit_start {
         return (1.0, 1.0, enter_end, exit_start);

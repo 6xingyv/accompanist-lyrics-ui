@@ -16,7 +16,7 @@ use skia_safe::{
     image_filters::{self, CropRect},
     runtime_effect::ChildPtr,
     vertices::VertexMode,
-    AlphaType, BlendMode, Canvas, Color, ColorType, CubicResampler, Data, Image, ImageInfo, ISize,
+    AlphaType, BlendMode, Canvas, Color, ColorType, CubicResampler, Data, ISize, Image, ImageInfo,
     Matrix, Paint, Point, RuntimeEffect, SamplingOptions, Shader, TileMode, Vertices,
 };
 
@@ -123,7 +123,12 @@ impl MeshGradient {
     /// compile or the artwork is empty.
     pub fn new(pixels: &[u32], width: usize, height: usize, seed: u32) -> Option<Self> {
         if width == 0 || height == 0 || pixels.len() < width * height {
-            log::warn!("[mesh] bad art dims w={} h={} len={}", width, height, pixels.len());
+            log::warn!(
+                "[mesh] bad art dims w={} h={} len={}",
+                width,
+                height,
+                pixels.len()
+            );
             return None;
         }
         let effect = match RuntimeEffect::make_for_shader(MESH_SKSL, None) {
@@ -249,7 +254,8 @@ impl MeshGradient {
         // hides any residual fold seams from the deforming mesh.
         let sigma = (width.min(height) * 0.005).clamp(2.0, 12.0);
         let mut layer_paint = Paint::default();
-        if let Some(filter) = image_filters::blur((sigma, sigma), None, None, CropRect::NO_CROP_RECT)
+        if let Some(filter) =
+            image_filters::blur((sigma, sigma), None, None, CropRect::NO_CROP_RECT)
         {
             layer_paint.set_image_filter(filter);
         }
@@ -407,12 +413,7 @@ fn breath_amp_for(n: usize) -> f32 {
 }
 
 /// Build the tessellated mesh arrays for a `cols × rows` control-point grid.
-fn build_mesh_arrays(
-    seed: u32,
-    cols: usize,
-    rows: usize,
-    processed: &[u8],
-) -> Option<MeshArrays> {
+fn build_mesh_arrays(seed: u32, cols: usize, rows: usize, processed: &[u8]) -> Option<MeshArrays> {
     let preset = generate_control_points(seed, cols, rows);
     let control_points = control_points_from_preset(&preset, processed);
     tessellate(&preset, &control_points)
@@ -469,8 +470,16 @@ fn generate_control_points(seed: u32, w: usize, h: usize) -> Preset {
             let rot_degrees = angle.to_degrees();
             let ur = if is_border { 0.0 } else { rot_degrees };
             let vr = if is_border { 0.0 } else { rot_degrees + 90.0 };
-            let up = if is_border { cell } else { cell * rng.range(0.6, 1.0) };
-            let vp = if is_border { cell } else { cell * rng.range(0.6, 1.0) };
+            let up = if is_border {
+                cell
+            } else {
+                cell * rng.range(0.6, 1.0)
+            };
+            let vp = if is_border {
+                cell
+            } else {
+                cell * rng.range(0.6, 1.0)
+            };
 
             points.push(RawControlPoint {
                 cx: i,
@@ -882,7 +891,11 @@ fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (f32, f32, f32) {
     if s.abs() < 1e-6 {
         return (l, l, l);
     }
-    let q = if l < 0.5 { l * (1.0 + s) } else { l + s - l * s };
+    let q = if l < 0.5 {
+        l * (1.0 + s)
+    } else {
+        l + s - l * s
+    };
     let p = 2.0 * l - q;
     let hue = |mut t: f32| {
         t = t.rem_euclid(1.0);
