@@ -308,11 +308,10 @@ impl LyricsRenderer {
                     } else {
                         config.normal_line_height
                     };
-                    let is_rtl = line.syllables.iter().any(|s| contains_rtl(&s.content));
-                    let right_aligned = match line.alignment {
-                        AlignmentInput::Start | AlignmentInput::Unspecified => is_rtl,
-                        AlignmentInput::End => !is_rtl,
-                    };
+                    // Physical alignment intentionally stays opposite to bidi's
+                    // logical start for RTL text. Syllables keep their input order;
+                    // each syllable's glyph shaping is still handled by cosmic-text.
+                    let right_aligned = matches!(line.alignment, AlignmentInput::End);
                     let mut prepared_syllables =
                         prepare_karaoke_syllables(&line.syllables, line.is_accompaniment);
                     self.text_attrs = if line.is_accompaniment {
@@ -328,7 +327,6 @@ impl LyricsRenderer {
                         line_height,
                         layout_width,
                         right_aligned,
-                        is_rtl,
                         config.show_phonetic,
                         config.phonetic_font_size,
                         config.phonetic_line_height,
@@ -410,7 +408,8 @@ impl LyricsRenderer {
                         interlude: None,
                         kind: PreparedLineKind::Karaoke {
                             is_accompaniment: line.is_accompaniment,
-                            is_rtl,
+                            // RTL reverses the old sweep, while LTR remains LTR.
+                            gradient_is_rtl: false,
                             syllables: prepared_syllables,
                             text: prepared_text,
                         },
@@ -425,14 +424,14 @@ impl LyricsRenderer {
                         .cluster_role
                         .map(ClusterRole::from)
                         .unwrap_or(ClusterRole::Standalone);
-                    let is_rtl = contains_rtl(&line.content);
                     self.text_attrs = config.normal_attrs;
+                    let right_aligned = false;
                     let text = self.prepare_plain_text(
                         &line.content,
                         config.normal_font_size,
                         config.normal_line_height,
                         layout_width,
-                        is_rtl,
+                        right_aligned,
                     );
                     let translation = if config.show_translation {
                         self.text_attrs = config.translation_attrs;
@@ -442,7 +441,7 @@ impl LyricsRenderer {
                                 config.translation_font_size,
                                 config.translation_line_height,
                                 layout_width,
-                                is_rtl,
+                                right_aligned,
                             )
                         })
                     } else {
@@ -461,8 +460,8 @@ impl LyricsRenderer {
                         effective_end: line.end,
                         entrance_start: line.start,
                         height,
-                        right_aligned: is_rtl,
-                        x_offset: if is_rtl { right_align_offset } else { 0.0 },
+                        right_aligned,
+                        x_offset: 0.0,
                         interlude: None,
                         kind: PreparedLineKind::Synced { text },
                         translation,
@@ -662,7 +661,6 @@ impl LyricsRenderer {
         line_height: f32,
         width: f32,
         right_aligned: bool,
-        is_rtl: bool,
         show_phonetic: bool,
         phonetic_font_size: f32,
         phonetic_line_height: f32,
@@ -714,7 +712,6 @@ impl LyricsRenderer {
             phonetic_line_height,
             phonetic_gap,
             right_aligned,
-            is_rtl,
         )
     }
 
@@ -1108,7 +1105,6 @@ impl LyricsRenderer {
         phonetic_line_height: f32,
         phonetic_gap: f32,
         right_aligned: bool,
-        is_rtl: bool,
     ) -> PreparedText {
         let mut rows = Vec::new();
         let mut first_baseline = None;
@@ -1148,19 +1144,11 @@ impl LyricsRenderer {
             } else {
                 0.0
             };
-            let mut current_x = if is_rtl {
-                start_x + wrapped_line.total_width
-            } else {
-                start_x
-            };
+            let mut current_x = start_x;
             let mut row_glyphs = Vec::new();
 
             for layout in wrapped_line.syllables {
-                let position_x = if is_rtl {
-                    current_x - layout.width
-                } else {
-                    current_x
-                };
+                let position_x = current_x;
                 let vertical_offset = max_baseline - layout.first_baseline;
                 let position_y = row_top_y + vertical_offset;
                 let bottom_y = position_y + layout.height;
@@ -1209,11 +1197,7 @@ impl LyricsRenderer {
                     }
                 }
 
-                if is_rtl {
-                    current_x -= layout.width;
-                } else {
-                    current_x += layout.width;
-                }
+                current_x += layout.width;
             }
 
             rows.push(PreparedRow {
@@ -1389,14 +1373,8 @@ impl LyricsRenderer {
 /// both sides).
 fn input_line_right_aligned(input: &LyricsLineInput) -> bool {
     match input {
-        LyricsLineInput::Karaoke(line) => {
-            let is_rtl = line.syllables.iter().any(|s| contains_rtl(&s.content));
-            match line.alignment {
-                AlignmentInput::Start | AlignmentInput::Unspecified => is_rtl,
-                AlignmentInput::End => !is_rtl,
-            }
-        }
-        LyricsLineInput::Synced(line) => contains_rtl(&line.content),
+        LyricsLineInput::Karaoke(line) => matches!(line.alignment, AlignmentInput::End),
+        LyricsLineInput::Synced(_) => false,
     }
 }
 

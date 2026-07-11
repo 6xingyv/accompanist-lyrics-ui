@@ -13,15 +13,6 @@ pub(super) fn is_blank_text(text: &str) -> bool {
     text.chars().all(char::is_whitespace)
 }
 
-pub(super) fn contains_rtl(text: &str) -> bool {
-    text.chars().any(|ch| {
-        matches!(
-            ch as u32,
-            0x0590..=0x08ff | 0xfb1d..=0xfdff | 0xfe70..=0xfeff | 0x10800..=0x10fff
-        )
-    })
-}
-
 pub(super) fn contains_han(text: &str) -> bool {
     text.chars()
         .any(|ch| matches!(ch as u32, 0x3400..=0x9fff | 0xf900..=0xfaff))

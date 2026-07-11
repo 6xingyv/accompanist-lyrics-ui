@@ -39,6 +39,7 @@ impl LyricsRenderer {
 
     pub(super) fn reset_layout_animation_state(&mut self) {
         self.spring_layouts.clear();
+        self.focus_scale_states.clear();
         self.last_spring_frame_at = None;
         self.last_spring_playback_ms = None;
         self.last_seek_detection_playback_ms = None;

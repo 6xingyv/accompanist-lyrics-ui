@@ -17,15 +17,15 @@ mod scroll;
 mod text_utils;
 
 use draw::{
-    accompaniment_visibility, apply_vertical_fade_skia_band, draw_breathing_dots_skia,
-    draw_prepared_text_skia, draw_top_bar_skia, interlude_visibility, make_interlude_slot,
-    rgba_from_argb,
+    accompaniment_visibility, apply_vertical_fade_skia_band, cubic_bezier_easing,
+    draw_breathing_dots_skia, draw_prepared_text_skia, draw_top_bar_skia, interlude_visibility,
+    make_interlude_slot, rgba_from_argb,
 };
 use font_fallback::{cjk_family_priority, new_font_system};
 use fonts::*;
 use scroll::{ManualScrollState, SpringLineState};
 use text_utils::{
-    contains_han, contains_rtl, has_trailing_whitespace, is_blank_text, is_punctuation_or_space,
+    contains_han, has_trailing_whitespace, is_blank_text, is_punctuation_or_space,
     should_use_simple_animation, trailing_whitespace_count, trim_end_whitespace,
 };
 
@@ -145,6 +145,9 @@ const DUET_LINE_WIDTH_RATIO: f32 = 0.85;
 /// The top-bar overflow glyph is drawn in a 28dp circle, but its interactive
 /// target follows the conventional 48dp square touch/click area.
 const TOP_BAR_BUTTON_HIT_SCALE: f32 = 24.0 / 14.0;
+const MAIN_LINE_UNFOCUSED_SCALE: f32 = 0.98;
+const MAIN_LINE_FOCUS_ENTER_MS: f32 = 600.0;
+const MAIN_LINE_FOCUS_EXIT_MS: f32 = 300.0;
 
 // Wire contract with the Kotlin data layer. The grouped shape and camelCase field
 // names are kept identical to `SceneStyle`/`LyricsSceneWire` in
@@ -554,6 +557,8 @@ pub struct LyricsRenderer {
     /// layout don't heap-allocate a fresh `Vec` on every frame.
     spring_chained_targets: Vec<f32>,
     frame_layouts: Vec<DynamicLineLayout>,
+    /// Per-primary-row visual scale, independent of line measurement and scroll.
+    focus_scale_states: Vec<FocusScaleState>,
     last_spring_frame_at: Option<Instant>,
     last_spring_playback_ms: Option<i32>,
     last_seek_detection_playback_ms: Option<i32>,
@@ -881,13 +886,90 @@ struct PreparedInterlude {
 enum PreparedLineKind {
     Karaoke {
         is_accompaniment: bool,
-        is_rtl: bool,
+        /// Visual progress direction; text shaping/order is kept separate.
+        gradient_is_rtl: bool,
         syllables: Vec<PreparedSyllable>,
         text: PreparedText,
     },
     Synced {
         text: PreparedText,
     },
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FocusScaleState {
+    value: f32,
+    start: f32,
+    target: f32,
+    started_at: Option<Instant>,
+    duration_ms: f32,
+    initialized: bool,
+}
+
+impl Default for FocusScaleState {
+    fn default() -> Self {
+        Self {
+            value: 1.0,
+            start: 1.0,
+            target: 1.0,
+            started_at: None,
+            duration_ms: 0.0,
+            initialized: false,
+        }
+    }
+}
+
+impl FocusScaleState {
+    fn sample(&mut self, now: Instant) -> bool {
+        let Some(started_at) = self.started_at else {
+            self.value = self.target;
+            return false;
+        };
+        let progress = (now.saturating_duration_since(started_at).as_secs_f32() * 1000.0
+            / self.duration_ms.max(1.0))
+        .clamp(0.0, 1.0);
+        let eased = if self.target > self.start {
+            cubic_bezier_easing(progress, 0.0, 0.0, 0.2, 1.0)
+        } else {
+            cubic_bezier_easing(progress, 0.42, 0.0, 0.58, 1.0)
+        };
+        self.value = self.start + (self.target - self.start) * eased;
+        if progress >= 1.0 {
+            self.value = self.target;
+            self.started_at = None;
+            false
+        } else {
+            true
+        }
+    }
+
+    fn update(&mut self, focused: bool, now: Instant) -> bool {
+        let target = if focused {
+            1.0
+        } else {
+            MAIN_LINE_UNFOCUSED_SCALE
+        };
+        if !self.initialized {
+            self.value = target;
+            self.start = target;
+            self.target = target;
+            self.initialized = true;
+            return false;
+        }
+
+        self.sample(now);
+        if (target - self.target).abs() > f32::EPSILON {
+            self.start = self.value;
+            self.target = target;
+            self.duration_ms = if focused {
+                MAIN_LINE_FOCUS_ENTER_MS
+            } else {
+                MAIN_LINE_FOCUS_EXIT_MS
+            };
+            self.started_at = Some(now);
+        }
+        self.sample(now)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1006,6 +1088,7 @@ impl LyricsRenderer {
             spring_layouts: Vec::new(),
             spring_chained_targets: Vec::new(),
             frame_layouts: Vec::new(),
+            focus_scale_states: Vec::new(),
             last_spring_frame_at: None,
             last_spring_playback_ms: None,
             last_seek_detection_playback_ms: None,
@@ -1285,6 +1368,21 @@ impl LyricsRenderer {
         // While the user manually scrolls the depth-of-field blur is eased away
         // so the lyrics stay sharp for reading.
         let blur_scale = (1.0 - self.manual_scroll_blur_release).clamp(0.0, 1.0);
+        let focus_scale_animating = {
+            let line_count = self.scene.as_ref().map_or(0, |scene| scene.lines.len());
+            self.focus_scale_states
+                .resize(line_count, FocusScaleState::default());
+            let now = Instant::now();
+            let mut animating = false;
+            if let Some(scene) = &self.scene {
+                for (state, line) in self.focus_scale_states.iter_mut().zip(&scene.lines) {
+                    let focused = !line.cluster_role.is_nested_accompaniment()
+                        && scene.is_line_focused(line, current_time_ms);
+                    animating |= state.update(focused, now);
+                }
+            }
+            animating
+        };
         // The spring pass filled the reused `frame_layouts` buffer; borrow it back
         // (shared) alongside the scene for the draw pass.
         let dynamic_layouts = &self.frame_layouts;
@@ -1450,6 +1548,29 @@ impl LyricsRenderer {
                 frame_stats.visible_lines += 1;
             }
 
+            // Compose LyricsLineItem scales only the primary row, around the
+            // bottom-left or bottom-right corner selected by visual alignment.
+            // Layout stays unchanged; this is a canvas-only transform.
+            let main_line_scale = self
+                .focus_scale_states
+                .get(line_index)
+                .map(|state| state.value)
+                .unwrap_or(1.0);
+            let scaled_main_line = !line.cluster_role.is_nested_accompaniment()
+                && (main_line_scale - 1.0).abs() > 0.0001;
+            if scaled_main_line {
+                let pivot_x = if line.right_aligned {
+                    scene.config.width as f32 - scene.config.content_right - scene.config.padding_x
+                } else {
+                    scene.config.content_left + scene.config.padding_x
+                };
+                let pivot_y = y + text_y_offset + line.height;
+                canvas.save();
+                canvas.translate((pivot_x, pivot_y));
+                canvas.scale((main_line_scale, main_line_scale));
+                canvas.translate((-pivot_x, -pivot_y));
+            }
+
             // Nested accompaniment lines bloom out of the main line's adjacent edge
             // and retract back the same way. The scale tracks `text_visibility`
             // (the same enter/hold/exit curve as the alpha and the make-room
@@ -1484,7 +1605,7 @@ impl LyricsRenderer {
             match &line.kind {
                 PreparedLineKind::Karaoke {
                     is_accompaniment,
-                    is_rtl,
+                    gradient_is_rtl,
                     syllables,
                     text,
                 } => {
@@ -1506,7 +1627,7 @@ impl LyricsRenderer {
                         blur_radius,
                         Some((
                             current_time_ms,
-                            *is_rtl,
+                            *gradient_is_rtl,
                             effective_inactive_karaoke_alpha,
                             syllables,
                         )),
@@ -1577,6 +1698,9 @@ impl LyricsRenderer {
             }
 
             if scaled_accompaniment {
+                canvas.restore();
+            }
+            if scaled_main_line {
                 canvas.restore();
             }
         }
@@ -1662,6 +1786,7 @@ impl LyricsRenderer {
             || self.manual_scroll_active
             || self.playback_active
             || background_animating
+            || focus_scale_animating
         {
             1
         } else {
@@ -2370,6 +2495,71 @@ mod tests {
     }
 
     #[test]
+    fn rtl_uses_opposite_physical_start_and_gradient_without_reordering() {
+        let mut renderer = LyricsRenderer::new();
+        renderer.load_system_fonts();
+        let json = r#"{
+            "width": 320, "height": 240,
+            "style": { "showTranslation": false, "showPhonetic": false },
+            "lines": [
+                {
+                    "kind": "karaoke", "start": 0, "end": 1000,
+                    "isAccompaniment": false, "alignment": "start",
+                    "translation": null, "phonetic": null,
+                    "syllables": [
+                        {"content":"שלום", "start":0, "end":500, "phonetic":null},
+                        {"content":"עולם", "start":500, "end":1000, "phonetic":null}
+                    ]
+                },
+                {
+                    "kind": "karaoke", "start": 1000, "end": 2000,
+                    "isAccompaniment": false, "alignment": "end",
+                    "translation": null, "phonetic": null,
+                    "syllables": [{"content":"עולם", "start":1000, "end":2000, "phonetic":null}]
+                },
+                {
+                    "kind": "synced", "start": 2000, "end": 3000,
+                    "content": "مرحبا", "translation": null
+                }
+            ]
+        }"#;
+        let scene: LyricsScene = serde_json::from_str(json).unwrap();
+        let prepared = renderer.prepare_scene(scene).unwrap();
+
+        assert!(!prepared.lines[0].right_aligned);
+        assert!(prepared.lines[1].right_aligned);
+        assert!(!prepared.lines[2].right_aligned);
+        let PreparedLineKind::Karaoke {
+            gradient_is_rtl,
+            syllables,
+            ..
+        } = &prepared.lines[0].kind
+        else {
+            panic!("expected karaoke line");
+        };
+        assert!(!gradient_is_rtl);
+        assert!(syllables[0].layout_x < syllables[1].layout_x);
+    }
+
+    #[test]
+    fn main_line_focus_scale_uses_asymmetric_tweens() {
+        let start = Instant::now();
+        let mut state = FocusScaleState::default();
+
+        assert!(!state.update(false, start));
+        assert_eq!(state.value, MAIN_LINE_UNFOCUSED_SCALE);
+        assert!(state.update(true, start));
+        assert!(state.sample(start + std::time::Duration::from_millis(300)));
+        assert!(state.value > MAIN_LINE_UNFOCUSED_SCALE && state.value < 1.0);
+        assert!(!state.sample(start + std::time::Duration::from_millis(600)));
+        assert_eq!(state.value, 1.0);
+
+        assert!(state.update(false, start + std::time::Duration::from_millis(600)));
+        assert!(!state.sample(start + std::time::Duration::from_millis(900)));
+        assert_eq!(state.value, MAIN_LINE_UNFOCUSED_SCALE);
+    }
+
+    #[test]
     fn interlude_alignment_follows_next_main_past_before_accompaniment() {
         let json = r#"{
             "lines": [
@@ -2710,7 +2900,6 @@ mod tests {
             16.0,
             4.0,
             true,
-            false,
         );
 
         assert_eq!(text.rows.len(), 1);

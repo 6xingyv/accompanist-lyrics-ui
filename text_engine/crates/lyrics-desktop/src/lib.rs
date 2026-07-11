@@ -15,6 +15,7 @@ use lyrics_renderer::TextEngine;
 use skia_safe::{
     paint, Color, Color4f, Font, FontMgr, FontStyle, Paint, Point, Rect, TextBlob, Typeface,
 };
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
@@ -31,10 +32,12 @@ const DEFAULT_HEIGHT: u32 = 520;
 const SMTC_POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// Used only when refresh-rate detection fails entirely.
 const DEFAULT_REFRESH_HZ: f64 = 60.0;
-const CLOCK_SEEK_SNAP_MS: f64 = 1000.0;
+const CLOCK_SEEK_SNAP_MS: f64 = 500.0;
 const CLOCK_RECONCILE_MS: f64 = 350.0;
 const CLOCK_MAX_RATE: f64 = 2.5;
 const CLOCK_MAX_FRAME_MS: f64 = 64.0;
+const APPLE_MUSIC_CLOCK_SAMPLE_COUNT: usize = 8;
+const APPLE_MUSIC_SEEK_SNAP_MS: f64 = 1500.0;
 const SEEK_ACK_TOLERANCE_MS: u32 = 1_000;
 const SEEK_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 /// Manual SMTC publishers are commonly updated on a ~5 s cadence. Once the
@@ -47,6 +50,8 @@ const WINDOWS_TO_UNIX_EPOCH_TICKS: i64 = 116_444_736_000_000_000;
 /// Logical (density-independent) caption bar height — matches a compact Win11 title bar.
 const CAPTION_HEIGHT_DP: f32 = 32.0;
 const CAPTION_BUTTON_WIDTH_DP: f32 = 46.0;
+const CAPTION_FADE_IN_MS: f32 = 180.0;
+const CAPTION_FADE_OUT_MS: f32 = 240.0;
 /// Physical travel per OS-configured wheel "line". Tao already multiplies a
 /// wheel notch by the user's Windows scroll-lines setting (normally three).
 const WHEEL_LINE_STEP_DP: f32 = 18.0;
@@ -62,6 +67,8 @@ struct PlaybackSnapshot {
     is_playing: bool,
     /// SMTC `SourceAppUserModelId` (e.g. `Spotify.exe`) for per-app audio capture.
     source_app_id: String,
+    /// Raw SMTC timeline-update identity used by the Apple Music clock adapter.
+    smtc_update_ticks: i64,
     artwork: Option<Arc<Artwork>>,
 }
 
@@ -426,6 +433,68 @@ fn detect_display_timing(window: &Window) -> DisplayTiming {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct CaptionFade {
+    alpha: f32,
+    start_alpha: f32,
+    target_alpha: f32,
+    started_at: Option<Instant>,
+    duration_ms: f32,
+}
+
+impl Default for CaptionFade {
+    fn default() -> Self {
+        Self {
+            alpha: 0.0,
+            start_alpha: 0.0,
+            target_alpha: 0.0,
+            started_at: None,
+            duration_ms: 0.0,
+        }
+    }
+}
+
+impl CaptionFade {
+    fn sample(&mut self, now: Instant) -> (f32, bool) {
+        let Some(started_at) = self.started_at else {
+            self.alpha = self.target_alpha;
+            return (self.alpha, false);
+        };
+        let progress = (now.saturating_duration_since(started_at).as_secs_f32() * 1000.0
+            / self.duration_ms.max(1.0))
+        .clamp(0.0, 1.0);
+        let eased = progress * progress * (3.0 - 2.0 * progress);
+        self.alpha = self.start_alpha + (self.target_alpha - self.start_alpha) * eased;
+        if progress >= 1.0 {
+            self.alpha = self.target_alpha;
+            self.started_at = None;
+            (self.alpha, false)
+        } else {
+            (self.alpha, true)
+        }
+    }
+
+    fn set_visible(&mut self, visible: bool, now: Instant) {
+        self.sample(now);
+        let target = if visible { 1.0 } else { 0.0 };
+        if (target - self.target_alpha).abs() <= f32::EPSILON {
+            return;
+        }
+        self.start_alpha = self.alpha;
+        self.target_alpha = target;
+        self.duration_ms = if visible {
+            CAPTION_FADE_IN_MS
+        } else {
+            CAPTION_FADE_OUT_MS
+        };
+        self.started_at = Some(now);
+    }
+
+    fn is_animating(&self) -> bool {
+        self.started_at.is_some()
+    }
+}
+
 struct DesktopLyricsApp {
     config: AppConfig,
     playback_rx: Receiver<PlaybackSnapshot>,
@@ -452,6 +521,7 @@ struct DesktopLyricsApp {
     always_on_top: bool,
     /// Last render return value — whether the engine asked for another frame.
     last_animating: bool,
+    caption_fade: CaptionFade,
     caption_font_tower: Option<CaptionFontTower>,
     caption_text: Option<CaptionTextLayout>,
     caption_text_key: Option<CaptionTextKey>,
@@ -499,6 +569,7 @@ impl DesktopLyricsApp {
             pointer_down: None,
             always_on_top,
             last_animating: true,
+            caption_fade: CaptionFade::default(),
             caption_font_tower: make_caption_font_tower(density.max(0.5)),
             caption_text: None,
             caption_text_key: None,
@@ -604,8 +675,21 @@ impl DesktopLyricsApp {
             true
         };
         if accept_clock_sample {
-            self.clock
-                .publish_sample(snapshot.position_ms, snapshot.is_playing);
+            if track_changed {
+                self.clock.force_smtc_sample(
+                    snapshot.position_ms,
+                    snapshot.is_playing,
+                    &snapshot.source_app_id,
+                    snapshot.smtc_update_ticks,
+                );
+            } else {
+                self.clock.publish_smtc_sample(
+                    snapshot.position_ms,
+                    snapshot.is_playing,
+                    &snapshot.source_app_id,
+                    snapshot.smtc_update_ticks,
+                );
+            }
         } else {
             // A poll that was already in flight when the click happened may still
             // contain the old position. Preserve the optimistic seek anchor, but
@@ -688,7 +772,7 @@ impl DesktopLyricsApp {
     fn wants_continuous_frames(&self) -> bool {
         // Keep the present loop hot while media is playing or the engine still
         // has in-flight animation (springs, marquee, mesh fade, etc.).
-        self.last_animating || self.clock.is_playing
+        self.last_animating || self.clock.is_playing || self.caption_fade.is_animating()
     }
 
     fn on_cursor_moved(&mut self, window: &Window, position: PhysicalPosition<f64>) {
@@ -833,8 +917,7 @@ impl DesktopLyricsApp {
             issued_at: Instant::now(),
             api_accepted: false,
         });
-        self.clock.publish_sample(start_ms, self.clock.is_playing);
-        self.clock.snap_display_to_anchor();
+        self.clock.force_sample(start_ms, self.clock.is_playing);
         true
     }
 
@@ -876,6 +959,10 @@ impl DesktopLyricsApp {
         } else {
             CaptionHit::None
         };
+        let caption_now = Instant::now();
+        self.caption_fade
+            .set_visible(caption_bar_visible(hover), caption_now);
+        let (caption_alpha, caption_animating) = self.caption_fade.sample(caption_now);
         let density = self.density;
         let caption_h = self.caption_height_px();
         let button_w = self.caption_button_width_px();
@@ -920,6 +1007,7 @@ impl DesktopLyricsApp {
                 caption_text.as_ref(),
                 hover,
                 always_on_top,
+                caption_alpha,
             );
             if collect_timing {
                 caption_ms = caption_start.elapsed().as_secs_f64() * 1000.0;
@@ -936,7 +1024,7 @@ impl DesktopLyricsApp {
         }
 
         self.last_animating = drawn.engine_result != 0;
-        Ok(self.last_animating || self.clock.is_playing)
+        Ok(self.last_animating || self.clock.is_playing || caption_animating)
     }
 }
 
@@ -949,12 +1037,22 @@ fn draw_caption_bar(
     title: Option<&CaptionTextLayout>,
     hover: CaptionHit,
     always_on_top: bool,
+    alpha: f32,
 ) {
     // Caption chrome is discoverable on hover: when the pointer is outside its
     // strip, leave the mesh player completely unobstructed.
-    if !caption_bar_visible(hover) {
+    if alpha <= 0.001 {
         return;
     }
+
+    let bounds = Rect::from_xywh(0.0, 0.0, width, height);
+    let mut opacity = Paint::default();
+    opacity.set_alpha_f(alpha.clamp(0.0, 1.0));
+    canvas.save_layer(
+        &skia_safe::canvas::SaveLayerRec::default()
+            .bounds(&bounds)
+            .paint(&opacity),
+    );
 
     // Semi-opaque strip so the mesh/background still reads through lightly.
     let mut bar_paint = Paint::default();
@@ -1023,6 +1121,7 @@ fn draw_caption_bar(
         hover == CaptionHit::Close,
         CaptionGlyph::Close,
     );
+    canvas.restore();
 }
 
 fn caption_bar_visible(hover: CaptionHit) -> bool {
@@ -1310,6 +1409,93 @@ impl PendingSeek {
     }
 }
 
+fn is_apple_music_source(source_app_id: &str) -> bool {
+    source_app_id
+        .to_ascii_lowercase()
+        .starts_with("appleinc.applemusicwin_")
+}
+
+/// Stable source clock for Apple Music's unusual SMTC publisher. Every distinct
+/// `LastUpdatedTime` yields an estimate of the position-at-reference-time; a short
+/// moving average removes the independent timestamp/Position cadence while the
+/// resulting clock advances monotonically at 1x between updates.
+#[derive(Debug)]
+struct AppleMusicClock {
+    reference_clock: Instant,
+    base_samples_ms: VecDeque<f64>,
+    last_update_ticks: Option<i64>,
+    is_playing: bool,
+}
+
+impl AppleMusicClock {
+    fn new(position_ms: i32, update_ticks: i64, is_playing: bool, now: Instant) -> Self {
+        let mut clock = Self {
+            reference_clock: now,
+            base_samples_ms: VecDeque::with_capacity(APPLE_MUSIC_CLOCK_SAMPLE_COUNT),
+            last_update_ticks: None,
+            is_playing,
+        };
+        clock.reset_at(position_ms, update_ticks, is_playing, now);
+        clock
+    }
+
+    fn reset_at(&mut self, position_ms: i32, update_ticks: i64, is_playing: bool, now: Instant) {
+        self.reference_clock = now;
+        self.base_samples_ms.clear();
+        self.base_samples_ms.push_back(position_ms as f64);
+        self.last_update_ticks = (update_ticks > 0).then_some(update_ticks);
+        self.is_playing = is_playing;
+    }
+
+    /// Returns `(averaged_position_now, reanchored)`.
+    fn publish_at(
+        &mut self,
+        position_ms: i32,
+        update_ticks: i64,
+        is_playing: bool,
+        now: Instant,
+    ) -> (i32, bool) {
+        let current = self.position_at(now);
+        let state_changed = self.is_playing != is_playing;
+        let discontinuity =
+            (position_ms as f64 - current as f64).abs() >= APPLE_MUSIC_SEEK_SNAP_MS;
+        if state_changed || !is_playing || discontinuity {
+            self.reset_at(position_ms, update_ticks, is_playing, now);
+            return (position_ms.max(0), true);
+        }
+
+        let is_new_update = update_ticks <= 0 || self.last_update_ticks != Some(update_ticks);
+        if is_new_update {
+            let elapsed_ms = now
+                .saturating_duration_since(self.reference_clock)
+                .as_secs_f64()
+                * 1000.0;
+            self.base_samples_ms
+                .push_back(position_ms as f64 - elapsed_ms);
+            while self.base_samples_ms.len() > APPLE_MUSIC_CLOCK_SAMPLE_COUNT {
+                self.base_samples_ms.pop_front();
+            }
+            self.last_update_ticks = (update_ticks > 0).then_some(update_ticks);
+        }
+        (self.position_at(now), false)
+    }
+
+    fn position_at(&self, now: Instant) -> i32 {
+        let average_base = self.base_samples_ms.iter().sum::<f64>()
+            / self.base_samples_ms.len().max(1) as f64;
+        let elapsed_ms = if self.is_playing {
+            now.saturating_duration_since(self.reference_clock)
+                .as_secs_f64()
+                * 1000.0
+        } else {
+            0.0
+        };
+        (average_base + elapsed_ms)
+            .round()
+            .clamp(0.0, i32::MAX as f64) as i32
+    }
+}
+
 #[derive(Debug)]
 struct PlaybackClock {
     anchor_position_ms: i32,
@@ -1318,6 +1504,7 @@ struct PlaybackClock {
     last_clock: Option<Instant>,
     primed: bool,
     is_playing: bool,
+    apple_music: Option<AppleMusicClock>,
 }
 
 impl Default for PlaybackClock {
@@ -1329,18 +1516,93 @@ impl Default for PlaybackClock {
             last_clock: None,
             primed: false,
             is_playing: false,
+            apple_music: None,
         }
     }
 }
 
 impl PlaybackClock {
-    fn publish_sample(&mut self, position_ms: i32, is_playing: bool) {
-        let now = Instant::now();
+    fn publish_smtc_sample(
+        &mut self,
+        position_ms: i32,
+        is_playing: bool,
+        source_app_id: &str,
+        update_ticks: i64,
+    ) {
+        self.publish_smtc_sample_at(
+            position_ms,
+            is_playing,
+            source_app_id,
+            update_ticks,
+            Instant::now(),
+        );
+    }
+
+    fn publish_smtc_sample_at(
+        &mut self,
+        position_ms: i32,
+        is_playing: bool,
+        source_app_id: &str,
+        update_ticks: i64,
+        now: Instant,
+    ) {
+        if is_apple_music_source(source_app_id) {
+            let (target, _) = match self.apple_music.as_mut() {
+                Some(clock) => clock.publish_at(position_ms, update_ticks, is_playing, now),
+                None => {
+                    self.apple_music = Some(AppleMusicClock::new(
+                        position_ms,
+                        update_ticks,
+                        is_playing,
+                        now,
+                    ));
+                    (position_ms, true)
+                }
+            };
+            self.publish_sample_at(target, is_playing, now);
+        } else {
+            self.apple_music = None;
+            self.publish_sample_at(position_ms, is_playing, now);
+        }
+    }
+
+    fn publish_sample_at(&mut self, position_ms: i32, is_playing: bool, now: Instant) {
         self.set_playing_at(is_playing, now);
         if self.anchor_position_ms != position_ms {
             self.anchor_position_ms = position_ms;
             self.anchor_clock = now;
         }
+    }
+
+    fn force_smtc_sample(
+        &mut self,
+        position_ms: i32,
+        is_playing: bool,
+        source_app_id: &str,
+        update_ticks: i64,
+    ) {
+        let now = Instant::now();
+        self.apple_music = is_apple_music_source(source_app_id).then(|| {
+            AppleMusicClock::new(position_ms, update_ticks, is_playing, now)
+        });
+        self.force_sample_at(position_ms, is_playing, now);
+    }
+
+    fn force_sample(&mut self, position_ms: i32, is_playing: bool) {
+        let now = Instant::now();
+        if let Some(clock) = self.apple_music.as_mut() {
+            clock.reset_at(position_ms, 0, is_playing, now);
+        }
+        self.force_sample_at(position_ms, is_playing, now);
+    }
+
+    fn force_sample_at(&mut self, position_ms: i32, is_playing: bool, now: Instant) {
+        self.anchor_position_ms = position_ms;
+        self.anchor_clock = now;
+        self.display_ms = position_ms.max(0) as f64;
+        self.last_clock = Some(now);
+        self.primed = true;
+        self.is_playing = is_playing;
     }
 
     fn set_playing(&mut self, is_playing: bool) {
@@ -1359,7 +1621,10 @@ impl PlaybackClock {
     }
 
     fn compute_display_time_ms(&mut self) -> i32 {
-        let now = Instant::now();
+        self.compute_display_time_at(Instant::now())
+    }
+
+    fn compute_display_time_at(&mut self, now: Instant) -> i32 {
         let target = self.projected_anchor_at(now) as f64;
         if !self.primed {
             self.primed = true;
@@ -1370,7 +1635,7 @@ impl PlaybackClock {
 
         let dt_ms = self
             .last_clock
-            .map(|last| now.duration_since(last).as_secs_f64() * 1000.0)
+            .map(|last| now.saturating_duration_since(last).as_secs_f64() * 1000.0)
             .unwrap_or(0.0)
             .clamp(0.0, CLOCK_MAX_FRAME_MS);
         self.last_clock = Some(now);
@@ -1391,21 +1656,13 @@ impl PlaybackClock {
     fn projected_anchor_at(&self, now: Instant) -> i32 {
         if self.is_playing {
             self.anchor_position_ms.saturating_add(
-                now.duration_since(self.anchor_clock)
+                now.saturating_duration_since(self.anchor_clock)
                     .as_millis()
                     .min(i32::MAX as u128) as i32,
             )
         } else {
             self.anchor_position_ms
         }
-    }
-
-    /// Force the smoothed display clock onto the current anchor (e.g. after a seek).
-    fn snap_display_to_anchor(&mut self) {
-        let now = Instant::now();
-        self.display_ms = self.projected_anchor_at(now) as f64;
-        self.last_clock = Some(now);
-        self.primed = true;
     }
 }
 
@@ -1830,10 +2087,12 @@ fn current_playback_snapshot(
             .Duration,
         timeline_start_ticks,
     );
-    let sample_age_ms = timeline
+    let smtc_update_ticks = timeline
         .LastUpdatedTime()
         .ok()
-        .and_then(|updated| windows_datetime_age_ms(updated.UniversalTime))
+        .map(|updated| updated.UniversalTime)
+        .unwrap_or(0);
+    let sample_age_ms = windows_datetime_age_ms(smtc_update_ticks)
         .unwrap_or(0);
     let position_ms = project_smtc_position_ms(
         raw_position_ms,
@@ -1850,6 +2109,7 @@ fn current_playback_snapshot(
         duration_ms,
         is_playing,
         source_app_id,
+        smtc_update_ticks,
         artwork,
     })
 }
@@ -2083,6 +2343,34 @@ mod tests {
     }
 
     #[test]
+    fn caption_chrome_fades_in_and_out() {
+        let start = Instant::now();
+        let mut fade = CaptionFade::default();
+
+        fade.set_visible(true, start);
+        let (alpha, animating) = fade.sample(
+            start + Duration::from_secs_f32(CAPTION_FADE_IN_MS / 2000.0),
+        );
+        assert!(animating);
+        assert!(alpha > 0.0 && alpha < 1.0);
+        let (alpha, animating) =
+            fade.sample(start + Duration::from_secs_f32(CAPTION_FADE_IN_MS / 1000.0));
+        assert!(!animating);
+        assert_eq!(alpha, 1.0);
+
+        let hide_at = start + Duration::from_millis(500);
+        fade.set_visible(false, hide_at);
+        let (alpha, animating) =
+            fade.sample(hide_at + Duration::from_secs_f32(CAPTION_FADE_OUT_MS / 2000.0));
+        assert!(animating);
+        assert!(alpha > 0.0 && alpha < 1.0);
+        let (alpha, animating) =
+            fade.sample(hide_at + Duration::from_secs_f32(CAPTION_FADE_OUT_MS / 1000.0));
+        assert!(!animating);
+        assert_eq!(alpha, 0.0);
+    }
+
+    #[test]
     fn pending_seek_rejects_old_poll_then_accepts_acknowledgement() {
         let issued_at = Instant::now();
         let pending = PendingSeek {
@@ -2127,6 +2415,81 @@ mod tests {
             project_smtc_position_ms(10_000, 750, false, 1.0, 60_000),
             10_000
         );
+    }
+
+    #[test]
+    fn apple_music_clock_averages_distinct_smtc_update_times() {
+        let start = Instant::now();
+        let mut clock = AppleMusicClock::new(45_068, 1, true, start);
+
+        // Captured from Apple Music: raw Position advances in one-second steps,
+        // while LastUpdatedTime resets independently. The projected values are
+        // therefore non-uniform and can even move backward. Repeated polls for
+        // the same update do not add weight to the average.
+        let (same_update, reanchored) =
+            clock.publish_at(45_569, 1, true, start + Duration::from_millis(500));
+        assert!(!reanchored);
+        assert_eq!(same_update, 45_568);
+        assert_eq!(clock.base_samples_ms.len(), 1);
+
+        let (second_update, reanchored) =
+            clock.publish_at(46_301, 2, true, start + Duration::from_millis(751));
+        assert!(!reanchored);
+        assert_eq!(second_update, 46_060);
+        assert_eq!(clock.base_samples_ms.len(), 2);
+
+        let (backward_sample, reanchored) =
+            clock.publish_at(46_258, 3, true, start + Duration::from_millis(1_251));
+        assert!(!reanchored);
+        assert_eq!(backward_sample, 46_459);
+        assert_eq!(clock.base_samples_ms.len(), 3);
+    }
+
+    #[test]
+    fn apple_music_clock_reanchors_on_seek_and_playback_boundaries() {
+        let start = Instant::now();
+        let mut clock = AppleMusicClock::new(10_000, 1, true, start);
+
+        let jitter_at = start + Duration::from_millis(500);
+        let (_, reanchored) = clock.publish_at(11_300, 2, true, jitter_at);
+        assert!(!reanchored, "Apple cadence jitter is not a seek");
+
+        let seek_at = start + Duration::from_millis(1_000);
+        let (position, reanchored) = clock.publish_at(20_000, 2, true, seek_at);
+        assert!(reanchored);
+        assert_eq!(position, 20_000);
+        assert_eq!(clock.base_samples_ms.len(), 1);
+
+        let pause_at = seek_at + Duration::from_millis(300);
+        let (position, reanchored) = clock.publish_at(20_300, 3, false, pause_at);
+        assert!(reanchored);
+        assert_eq!(position, 20_300);
+        assert_eq!(clock.position_at(pause_at + Duration::from_secs(2)), 20_300);
+
+        let resume_at = pause_at + Duration::from_secs(2);
+        let (position, reanchored) = clock.publish_at(20_300, 4, true, resume_at);
+        assert!(reanchored);
+        assert_eq!(position, 20_300);
+        assert_eq!(clock.position_at(resume_at + Duration::from_millis(250)), 20_550);
+    }
+
+    #[test]
+    fn non_apple_sources_keep_dynamic_clock_chasing() {
+        assert!(is_apple_music_source(
+            "AppleInc.AppleMusicWin_nzyj5cx40ttqa!App"
+        ));
+        assert!(!is_apple_music_source("Spotify.exe"));
+
+        let start = Instant::now();
+        let mut clock = PlaybackClock::default();
+        clock.publish_smtc_sample_at(10_000, true, "Spotify.exe", 1, start);
+        assert_eq!(clock.compute_display_time_at(start), 10_000);
+
+        let update_at = start + Duration::from_millis(100);
+        clock.publish_smtc_sample_at(10_400, true, "Spotify.exe", 2, update_at);
+        let display = clock.compute_display_time_at(update_at);
+        assert!(display > 10_100 && display < 10_400);
+        assert!(clock.apple_music.is_none());
     }
 
     #[test]

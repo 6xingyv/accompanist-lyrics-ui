@@ -1414,7 +1414,7 @@ pub(super) fn interlude_visibility(start_ms: i32, end_ms: i32, current_time_ms: 
     enter.min(exit)
 }
 
-fn cubic_bezier_easing(fraction: f32, x1: f32, y1: f32, x2: f32, y2: f32) -> f32 {
+pub(super) fn cubic_bezier_easing(fraction: f32, x1: f32, y1: f32, x2: f32, y2: f32) -> f32 {
     let x = fraction.clamp(0.0, 1.0);
     if x <= 0.0 {
         return 0.0;
