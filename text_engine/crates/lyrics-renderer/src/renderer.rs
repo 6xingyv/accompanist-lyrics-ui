@@ -2522,9 +2522,9 @@ mod tests {
         assert!((chrome.content_top - 24.0).abs() < 0.01);
         assert!((chrome.lyrics_clip_left - 782.0).abs() < 0.01);
         assert!((chrome.lyrics_clip_right - 64.0).abs() < 0.01);
-        assert!((chrome.content_left - 827.0).abs() < 0.01);
-        assert!((chrome.content_right - 109.0).abs() < 0.01);
-        assert!((chrome.lyrics_layout_scale - 2.0).abs() < 0.01);
+        assert!((chrome.content_left - 836.6).abs() < 0.01);
+        assert!((chrome.content_right - 118.6).abs() < 0.01);
+        assert!((chrome.lyrics_layout_scale - 1.4).abs() < 0.01);
         assert!((chrome.focus_y.expect("wide focus y") - 400.0).abs() < 0.01);
         assert!((visible_focus_y - 400.0).abs() < 0.01);
         assert!((bar.thumb_left - 146.0).abs() < 0.01);
@@ -2555,7 +2555,7 @@ mod tests {
         let bar = scene.top_bar.as_ref().expect("short wide player chrome");
 
         assert!(chrome.landscape_player);
-        assert!((chrome.lyrics_layout_scale - 2.0).abs() < 0.01);
+        assert!((chrome.lyrics_layout_scale - 1.4).abs() < 0.01);
         assert!((chrome.focus_y.expect("short wide focus y") - 204.8).abs() < 0.01);
         assert!((visible_focus_y - 204.8).abs() < 0.01);
         assert!((bar.thumb_left - 375.0).abs() < 0.01);

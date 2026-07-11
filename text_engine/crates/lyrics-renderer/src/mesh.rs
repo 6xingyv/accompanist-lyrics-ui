@@ -292,6 +292,9 @@ fn mesh_to_pixel_matrix(width: f32, height: f32) -> Matrix {
 /// (3k–4k) can fail Skia's `Image::from_raster_data` / GPU upload; the thumb is
 /// only drawn at ~68dp so 512px is plenty.
 const THUMBNAIL_MAX_EDGE: usize = 512;
+/// Some media sessions publish extremely small covers (even 1×1 placeholders).
+/// Upload a modestly upscaled copy so every backend can sample it as a thumbnail.
+const THUMBNAIL_MIN_EDGE: usize = 32;
 
 /// Build an image of the original artwork (ARGB_8888 → RGBA8888) for the top-bar
 /// thumbnail. Large sources are box-downscaled so upload always succeeds.
@@ -301,8 +304,15 @@ fn make_thumbnail_image(pixels: &[u32], width: usize, height: usize) -> Option<I
     }
 
     let max_edge = width.max(height);
-    let (out_w, out_h, rgba) = if max_edge > THUMBNAIL_MAX_EDGE {
-        let scale = THUMBNAIL_MAX_EDGE as f32 / max_edge as f32;
+    let resize_edge = if max_edge > THUMBNAIL_MAX_EDGE {
+        Some(THUMBNAIL_MAX_EDGE)
+    } else if max_edge < THUMBNAIL_MIN_EDGE {
+        Some(THUMBNAIL_MIN_EDGE)
+    } else {
+        None
+    };
+    let (out_w, out_h, rgba) = if let Some(target_edge) = resize_edge {
+        let scale = target_edge as f32 / max_edge as f32;
         let out_w = ((width as f32 * scale).round() as usize).max(1);
         let out_h = ((height as f32 * scale).round() as usize).max(1);
         let mut rgba = Vec::with_capacity(out_w * out_h * 4);
@@ -416,14 +426,10 @@ impl Rng {
     }
 }
 
-/// Control-point grid dimensions `(cols, rows)` for a surface, derived from its
-/// physical size and aspect. The aspect correction in [`mesh_to_pixel_matrix`] maps
-/// the clip-space mesh to a CENTRED SQUARE of side `1.4 · max(width, height)` (its
-/// `|sx| == |sy|` always), so uniform, square screen-space cells — the look we want
-/// — need an equal column and row count. That count scales with the longer edge, so
-/// a bigger / higher-DPI surface gets a finer grid; it is clamped so the (one-time)
-/// tessellation stays cheap. This is what makes the grid track the screen instead of
-/// the old fixed random 4–6 × 4–6.
+/// Control-point grid dimensions `(cols, rows)` for a surface. Portrait keeps the
+/// density-derived square grid. Landscape is intentionally much coarser — at most
+/// 3 columns × 5 rows — so very wide render targets do not create an unnecessarily
+/// dense mesh from their long edge.
 fn desired_grid(width: f32, height: f32) -> (usize, usize) {
     // ~one control point per this many render px along the mesh square's edge.
     const TARGET_CELL_PX: f32 = 700.0;
@@ -431,7 +437,11 @@ fn desired_grid(width: f32, height: f32) -> (usize, usize) {
     let n = (1.0 + 1.4 * longer / TARGET_CELL_PX)
         .round()
         .clamp(4.0, 7.0) as usize;
-    (n, n)
+    if width > height {
+        (n.min(3), n.min(5))
+    } else {
+        (n, n)
+    }
 }
 
 /// Per-frame breathing amplitude (in the `×1.4` base space) for a grid of `n` points
@@ -914,6 +924,29 @@ mod tests {
             MeshGradient::new(&pixels, 64, 64, 12345).is_some(),
             "MeshGradient::new returned None for valid art"
         );
+    }
+
+    #[test]
+    fn tiny_art_is_upscaled_and_still_builds() {
+        let pixels = vec![0xff_20_60_a0u32];
+        let thumbnail = make_thumbnail_image(&pixels, 1, 1).expect("tiny thumbnail");
+        assert_eq!((thumbnail.width(), thumbnail.height()), (32, 32));
+        assert!(MeshGradient::new(&pixels, 1, 1, 12345).is_some());
+    }
+
+    #[test]
+    fn landscape_grid_is_capped_at_three_by_five() {
+        assert_eq!(desired_grid(4000.0, 1000.0), (3, 5));
+        let (cols, rows) = desired_grid(1200.0, 800.0);
+        assert!(cols <= 3);
+        assert!(rows <= 5);
+    }
+
+    #[test]
+    fn portrait_grid_keeps_density_derived_square_shape() {
+        let (cols, rows) = desired_grid(1080.0, 1920.0);
+        assert_eq!(cols, rows);
+        assert!(cols >= 4);
     }
 }
 

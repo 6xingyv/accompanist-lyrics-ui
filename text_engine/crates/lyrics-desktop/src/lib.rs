@@ -692,6 +692,11 @@ impl DesktopLyricsApp {
     }
 
     fn on_cursor_moved(&mut self, window: &Window, position: PhysicalPosition<f64>) {
+        let previous_hit = if self.cursor_inside {
+            self.hit_test_caption(self.cursor)
+        } else {
+            CaptionHit::None
+        };
         self.cursor = position;
         self.cursor_inside = true;
         let hit = self.hit_test_caption(position);
@@ -701,9 +706,10 @@ impl DesktopLyricsApp {
             CaptionHit::None => CursorIcon::Default,
         };
         window.set_cursor_icon(icon);
-        // Hover state is drawn in the caption bar — refresh while the cursor is
-        // over chrome so button highlights stay live even when lyrics are idle.
-        if hit != CaptionHit::None {
+        // Redraw on both enter and leave. Without the leave transition, a paused
+        // renderer could retain the last visible caption after the pointer moved
+        // from the caption into the lyrics area.
+        if hit != previous_hit {
             window.request_redraw();
         }
     }
@@ -944,6 +950,12 @@ fn draw_caption_bar(
     hover: CaptionHit,
     always_on_top: bool,
 ) {
+    // Caption chrome is discoverable on hover: when the pointer is outside its
+    // strip, leave the mesh player completely unobstructed.
+    if !caption_bar_visible(hover) {
+        return;
+    }
+
     // Semi-opaque strip so the mesh/background still reads through lightly.
     let mut bar_paint = Paint::default();
     bar_paint.set_anti_alias(true);
@@ -1011,6 +1023,10 @@ fn draw_caption_bar(
         hover == CaptionHit::Close,
         CaptionGlyph::Close,
     );
+}
+
+fn caption_bar_visible(hover: CaptionHit) -> bool {
+    hover != CaptionHit::None
 }
 
 #[derive(Clone, Copy)]
@@ -2055,6 +2071,15 @@ mod tests {
             .text_to_glyphs_vec(&run.text)
             .into_iter()
             .all(|glyph| glyph != 0)));
+    }
+
+    #[test]
+    fn caption_chrome_is_hidden_without_hover() {
+        assert!(!caption_bar_visible(CaptionHit::None));
+        assert!(caption_bar_visible(CaptionHit::Drag));
+        assert!(caption_bar_visible(CaptionHit::AlwaysOnTop));
+        assert!(caption_bar_visible(CaptionHit::Minimize));
+        assert!(caption_bar_visible(CaptionHit::Close));
     }
 
     #[test]
