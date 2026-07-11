@@ -7,6 +7,8 @@ use super::*;
 const WIDE_MIN_ASPECT_RATIO: f32 = 1.3;
 const WIDE_MIN_WIDTH: f32 = 1024.0;
 const WIDE_TEXT_SCALE: f32 = 1.2;
+const WIDE_LYRICS_LAYOUT_SCALE: f32 = 1.4;
+const WIDE_FOCUS_Y_RATIO: f32 = 0.4;
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct ResolvedPlayerChrome {
@@ -17,7 +19,22 @@ pub(super) struct ResolvedPlayerChrome {
     pub(super) lyrics_clip_left: f32,
     pub(super) lyrics_clip_right: f32,
     pub(super) landscape_player: bool,
+    pub(super) lyrics_layout_scale: f32,
+    pub(super) focus_y: Option<f32>,
     pub(super) thumb_border_width: f32,
+}
+
+pub(super) fn resolve_keep_alive(
+    chrome: &ResolvedPlayerChrome,
+    spacing: &SpacingInput,
+) -> f32 {
+    chrome
+        .focus_y
+        .map(|focus_y| {
+            (focus_y - spacing.line_padding * chrome.lyrics_layout_scale)
+                .max(chrome.content_top)
+        })
+        .unwrap_or(spacing.focus_top_offset + chrome.content_top)
 }
 
 /// Resolve the full-bleed player's chrome inside the renderer. Hosts always send
@@ -29,6 +46,9 @@ pub(super) fn resolve_player_chrome(scene: &mut LyricsScene) -> ResolvedPlayerCh
     let safe_left = scene.content_left.unwrap_or(0.0).max(0.0);
     let safe_right = scene.content_right.unwrap_or(0.0).max(0.0);
     let aspect_ratio = width / height.max(1.0);
+    let landscape_player = scene.top_bar.is_some()
+        && aspect_ratio >= WIDE_MIN_ASPECT_RATIO
+        && width >= WIDE_MIN_WIDTH;
     let mut chrome = ResolvedPlayerChrome {
         content_top: scene.content_top.unwrap_or(0.0).max(0.0),
         content_bottom: scene.content_bottom.unwrap_or(0.0).max(0.0),
@@ -36,9 +56,13 @@ pub(super) fn resolve_player_chrome(scene: &mut LyricsScene) -> ResolvedPlayerCh
         content_right: safe_right,
         lyrics_clip_left: safe_left,
         lyrics_clip_right: safe_right,
-        landscape_player: scene.top_bar.is_some()
-            && aspect_ratio >= WIDE_MIN_ASPECT_RATIO
-            && width >= WIDE_MIN_WIDTH,
+        landscape_player,
+        lyrics_layout_scale: if landscape_player {
+            WIDE_LYRICS_LAYOUT_SCALE
+        } else {
+            1.0
+        },
+        focus_y: landscape_player.then_some(height * WIDE_FOCUS_Y_RATIO),
         thumb_border_width: 0.0,
     };
     if !chrome.landscape_player {
@@ -74,7 +98,8 @@ pub(super) fn resolve_player_chrome(scene: &mut LyricsScene) -> ResolvedPlayerCh
         .max(1.0)
         .min(max_text_width);
     let text_left = lyrics_clip_left + (lyrics_viewport_width - text_width) * 0.5;
-    let line_padding_x = scene.style.spacing.horizontal_padding.max(0.0);
+    let line_padding_x =
+        scene.style.spacing.horizontal_padding.max(0.0) * chrome.lyrics_layout_scale;
 
     chrome.content_top = system_top;
     chrome.content_left = (text_left - line_padding_x).max(0.0);
@@ -134,36 +159,41 @@ impl LyricsRenderer {
         let dots = &style.breathing_dots;
         let spring = &style.auto_scroll_spring;
         let manual = &style.manual_scroll;
+        let lyrics_layout_scale = chrome.lyrics_layout_scale;
         let config = SceneConfig {
             width: scene.width.unwrap_or(DEFAULT_WIDTH).max(DEFAULT_WIDTH),
             height: scene.height.unwrap_or(DEFAULT_HEIGHT).max(DEFAULT_HEIGHT),
             landscape_player: chrome.landscape_player,
-            normal_font_size: typography.normal_font_size,
-            normal_line_height: typography.normal_line_height,
+            normal_font_size: typography.normal_font_size * lyrics_layout_scale,
+            normal_line_height: typography.normal_line_height * lyrics_layout_scale,
             normal_attrs: TextAttrs {
                 weight: typography.normal_font_weight,
                 italic: typography.normal_font_italic,
             },
-            accompaniment_font_size: typography.accompaniment_font_size,
-            accompaniment_line_height: typography.accompaniment_line_height,
+            accompaniment_font_size: typography.accompaniment_font_size * lyrics_layout_scale,
+            accompaniment_line_height: typography.accompaniment_line_height
+                * lyrics_layout_scale,
             accompaniment_attrs: TextAttrs {
                 weight: typography.accompaniment_font_weight,
                 italic: typography.accompaniment_font_italic,
             },
-            translation_font_size: typography.translation_font_size,
-            translation_line_height: typography.translation_line_height,
+            translation_font_size: typography.translation_font_size * lyrics_layout_scale,
+            translation_line_height: typography.translation_line_height * lyrics_layout_scale,
             translation_attrs: TextAttrs {
                 weight: typography.translation_font_weight,
                 italic: typography.translation_font_italic,
             },
-            accompaniment_translation_font_size: typography.accompaniment_translation_font_size,
-            accompaniment_translation_line_height: typography.accompaniment_translation_line_height,
+            accompaniment_translation_font_size: typography.accompaniment_translation_font_size
+                * lyrics_layout_scale,
+            accompaniment_translation_line_height: typography
+                .accompaniment_translation_line_height
+                * lyrics_layout_scale,
             accompaniment_translation_attrs: TextAttrs {
                 weight: typography.accompaniment_translation_font_weight,
                 italic: typography.accompaniment_translation_font_italic,
             },
-            phonetic_font_size: typography.phonetic_font_size,
-            phonetic_line_height: typography.phonetic_line_height,
+            phonetic_font_size: typography.phonetic_font_size * lyrics_layout_scale,
+            phonetic_line_height: typography.phonetic_line_height * lyrics_layout_scale,
             phonetic_attrs: TextAttrs {
                 weight: typography.phonetic_font_weight,
                 italic: typography.phonetic_font_italic,
@@ -171,17 +201,18 @@ impl LyricsRenderer {
             phonetic_gap: spacing.phonetic_gap.max(0.0),
             translation_gap: spacing.translation_gap.max(0.0),
             accompaniment_translation_gap: spacing.accompaniment_translation_gap.max(0.0),
-            padding_x: spacing.horizontal_padding,
-            padding_y: spacing.line_padding,
+            padding_x: spacing.horizontal_padding * lyrics_layout_scale,
+            padding_y: spacing.line_padding * lyrics_layout_scale,
             content_top: chrome.content_top,
             content_bottom: chrome.content_bottom,
             content_left: chrome.content_left,
             content_right: chrome.content_right,
             lyrics_clip_left: chrome.lyrics_clip_left,
             lyrics_clip_right: chrome.lyrics_clip_right,
-            // The focus line sits `focus_top_offset` below the content-band top, so
-            // fold the top inset into the keep-alive anchor that scroll/layout use.
-            keep_alive: spacing.focus_top_offset + chrome.content_top,
+            // `padding_y` is added when the glyphs are drawn. Subtract the doubled
+            // Wide padding here so the focused lyric's visible top-left, rather
+            // than merely its padded line box, lands at absolute 0.4H.
+            keep_alive: resolve_keep_alive(&chrome, spacing),
             text_color: style.text_color,
             show_translation: style.show_translation,
             show_phonetic: style.show_phonetic,

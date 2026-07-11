@@ -2514,14 +2514,19 @@ mod tests {
         }"#;
         let mut scene: LyricsScene = serde_json::from_str(json).expect("landscape scene");
         let chrome = layout::resolve_player_chrome(&mut scene);
+        let visible_focus_y = layout::resolve_keep_alive(&chrome, &scene.style.spacing)
+            + scene.style.spacing.line_padding * chrome.lyrics_layout_scale;
         let bar = scene.top_bar.as_ref().expect("resolved player chrome");
 
         assert!(chrome.landscape_player);
         assert!((chrome.content_top - 24.0).abs() < 0.01);
         assert!((chrome.lyrics_clip_left - 782.0).abs() < 0.01);
         assert!((chrome.lyrics_clip_right - 64.0).abs() < 0.01);
-        assert!((chrome.content_left - 843.0).abs() < 0.01);
-        assert!((chrome.content_right - 125.0).abs() < 0.01);
+        assert!((chrome.content_left - 827.0).abs() < 0.01);
+        assert!((chrome.content_right - 109.0).abs() < 0.01);
+        assert!((chrome.lyrics_layout_scale - 2.0).abs() < 0.01);
+        assert!((chrome.focus_y.expect("wide focus y") - 400.0).abs() < 0.01);
+        assert!((visible_focus_y - 400.0).abs() < 0.01);
         assert!((bar.thumb_left - 146.0).abs() < 0.01);
         assert!((bar.thumb_top - 208.2).abs() < 0.01);
         assert!((bar.thumb_size - 500.0).abs() < 0.01);
@@ -2545,9 +2550,14 @@ mod tests {
         }"#;
         let mut scene: LyricsScene = serde_json::from_str(json).expect("short wide scene");
         let chrome = layout::resolve_player_chrome(&mut scene);
+        let visible_focus_y = layout::resolve_keep_alive(&chrome, &scene.style.spacing)
+            + scene.style.spacing.line_padding * chrome.lyrics_layout_scale;
         let bar = scene.top_bar.as_ref().expect("short wide player chrome");
 
         assert!(chrome.landscape_player);
+        assert!((chrome.lyrics_layout_scale - 2.0).abs() < 0.01);
+        assert!((chrome.focus_y.expect("short wide focus y") - 204.8).abs() < 0.01);
+        assert!((visible_focus_y - 204.8).abs() < 0.01);
         assert!((bar.thumb_left - 375.0).abs() < 0.01);
         assert!((bar.thumb_top - 112.4).abs() < 0.01);
         assert!((bar.thumb_size - 256.0).abs() < 0.01);
@@ -2573,6 +2583,8 @@ mod tests {
         let chrome = layout::resolve_player_chrome(&mut scene);
 
         assert!(!chrome.landscape_player);
+        assert!((chrome.lyrics_layout_scale - 1.0).abs() < 0.01);
+        assert!(chrome.focus_y.is_none());
     }
 
     #[test]
@@ -2595,6 +2607,8 @@ mod tests {
         let bar = scene.top_bar.as_ref().expect("portrait top bar");
 
         assert!(!chrome.landscape_player);
+        assert!((chrome.lyrics_layout_scale - 1.0).abs() < 0.01);
+        assert!(chrome.focus_y.is_none());
         assert!((chrome.content_top - 140.0).abs() < 0.01);
         assert!((chrome.content_left - 10.0).abs() < 0.01);
         assert!((chrome.content_right - 20.0).abs() < 0.01);
