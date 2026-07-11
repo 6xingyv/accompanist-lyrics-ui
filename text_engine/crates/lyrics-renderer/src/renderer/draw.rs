@@ -44,6 +44,15 @@ pub(super) fn draw_top_bar_skia(
             &paint,
         );
         canvas.restore();
+
+        if bar.thumb_border_width > 0.0 {
+            let mut border = Paint::default();
+            border.set_anti_alias(true);
+            border.set_color4f(Color4f::new(1.0, 1.0, 1.0, 0.2), None);
+            border.set_style(skia_safe::paint::Style::Stroke);
+            border.set_stroke_width(bar.thumb_border_width);
+            canvas.draw_path(&bar.thumb_clip, &border);
+        }
     }
 
     // Title / artist / button — additive.

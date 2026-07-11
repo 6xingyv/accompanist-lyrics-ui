@@ -4,10 +4,104 @@
 
 use super::*;
 
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ResolvedPlayerChrome {
+    pub(super) content_top: f32,
+    pub(super) content_bottom: f32,
+    pub(super) content_left: f32,
+    pub(super) content_right: f32,
+    pub(super) landscape_player: bool,
+    pub(super) thumb_border_width: f32,
+}
+
+/// Resolve the full-bleed player's chrome inside the renderer. Hosts always send
+/// the compact portrait top-bar geometry; when that scene is wider than it is tall,
+/// reshape the same artwork/title/artist/button into the main branch's two-pane
+/// player: cover + metadata on the left, lyrics on the right.
+pub(super) fn resolve_player_chrome(scene: &mut LyricsScene) -> ResolvedPlayerChrome {
+    let width = scene.width.unwrap_or(DEFAULT_WIDTH).max(DEFAULT_WIDTH) as f32;
+    let height = scene.height.unwrap_or(DEFAULT_HEIGHT).max(DEFAULT_HEIGHT) as f32;
+    let mut chrome = ResolvedPlayerChrome {
+        content_top: scene.content_top.unwrap_or(0.0).max(0.0),
+        content_bottom: scene.content_bottom.unwrap_or(0.0).max(0.0),
+        content_left: scene.content_left.unwrap_or(0.0).max(0.0),
+        content_right: scene.content_right.unwrap_or(0.0).max(0.0),
+        landscape_player: scene.top_bar.is_some() && width > height,
+        thumb_border_width: 0.0,
+    };
+    if !chrome.landscape_player {
+        return chrome;
+    }
+
+    let line_padding_x = scene.style.spacing.horizontal_padding.max(0.0);
+    let Some(bar) = scene.top_bar.as_mut() else {
+        return chrome;
+    };
+
+    // Both Android and desktop build the compact input with a 68dp thumbnail.
+    // Recover the scene's px-per-dp scale from it so the renderer can reproduce
+    // the main branch's 100dp/72dp/28dp landscape spacing without a new wire field.
+    let scale = (bar.thumb_size / 68.0).clamp(0.25, 8.0);
+    let dp = |value: f32| value * scale;
+    let system_top = (bar.thumb_top - dp(28.0)).max(0.0);
+    let safe_left = chrome.content_left;
+    let safe_right = chrome.content_right;
+    let safe_width = (width - safe_left - safe_right).max(1.0);
+    let pane_right = safe_left + safe_width * 0.4;
+
+    // The main branch gives the lyrics pane 72dp of outer padding on each side;
+    // retain it where possible, but shrink it on unusually narrow landscape
+    // surfaces so the renderer always leaves a positive text wrap width.
+    let right_pane_width = (width - safe_right - pane_right).max(1.0);
+    let max_outer_padding = ((right_pane_width - line_padding_x * 2.0 - 1.0) * 0.5).max(0.0);
+    let lyrics_outer_padding = dp(72.0).min(max_outer_padding);
+    chrome.content_top = system_top;
+    chrome.content_left = pane_right + lyrics_outer_padding;
+    chrome.content_right = safe_right + lyrics_outer_padding;
+    chrome.thumb_border_width = dp(1.0);
+
+    // Left pane: the main branch uses 40% of the width, 100dp start padding, a
+    // square cover, 28dp gap, then a metadata row with the overflow control.
+    let preferred_cover_left = safe_left + dp(100.0);
+    let minimum_cover_margin = dp(28.0);
+    let base_cover_left =
+        preferred_cover_left.min((pane_right - minimum_cover_margin).max(safe_left));
+    let horizontal_cover_size = (pane_right - base_cover_left).max(1.0);
+    let cover_gap = dp(28.0);
+    let button_radius = bar.button_radius.max(dp(1.0));
+    let text_block_height = bar.title_line_height + bar.artist_line_height;
+    let metadata_height = text_block_height.max(button_radius * 2.0);
+    let chrome_top = system_top + dp(28.0);
+    let chrome_bottom = (height - chrome.content_bottom - dp(28.0)).max(chrome_top + 1.0);
+    let available_height = (chrome_bottom - chrome_top).max(1.0);
+    let max_cover_size = (available_height - cover_gap - metadata_height).max(1.0);
+    let cover_size = horizontal_cover_size.min(max_cover_size);
+    let cover_left = base_cover_left + (horizontal_cover_size - cover_size) * 0.5;
+    let player_height = cover_size + cover_gap + metadata_height;
+    let cover_top = chrome_top + ((available_height - player_height) * 0.5).max(0.0);
+    let metadata_top = cover_top + cover_size + cover_gap;
+
+    bar.thumb_left = cover_left;
+    bar.thumb_top = cover_top;
+    bar.thumb_size = cover_size;
+    bar.thumb_radius = dp(12.0).min(cover_size * 0.5);
+    bar.text_left = cover_left;
+    bar.title_top = metadata_top + (metadata_height - text_block_height) * 0.5;
+    bar.artist_top = bar.title_top + bar.title_line_height;
+    bar.button_cx = cover_left + cover_size - button_radius;
+    bar.button_cy = metadata_top + metadata_height * 0.5;
+    bar.text_max_width = (bar.button_cx - button_radius - dp(8.0) - bar.text_left).max(1.0);
+
+    chrome
+}
+
 impl LyricsRenderer {
     pub(super) fn prepare_scene(&mut self, scene: LyricsScene) -> Result<PreparedScene, String> {
+        let mut scene = scene;
         let locale = scene.locale.as_deref().unwrap_or("en-US");
         self.set_locale(locale);
+
+        let chrome = resolve_player_chrome(&mut scene);
 
         // All style defaults now live in the wire `*Input` structs' `Default`
         // impls, so this just copies the (already-defaulted) values across and
@@ -18,13 +112,10 @@ impl LyricsRenderer {
         let dots = &style.breathing_dots;
         let spring = &style.auto_scroll_spring;
         let manual = &style.manual_scroll;
-        let content_top = scene.content_top.unwrap_or(0.0).max(0.0);
-        let content_bottom = scene.content_bottom.unwrap_or(0.0).max(0.0);
-        let content_left = scene.content_left.unwrap_or(0.0).max(0.0);
-        let content_right = scene.content_right.unwrap_or(0.0).max(0.0);
         let config = SceneConfig {
             width: scene.width.unwrap_or(DEFAULT_WIDTH).max(DEFAULT_WIDTH),
             height: scene.height.unwrap_or(DEFAULT_HEIGHT).max(DEFAULT_HEIGHT),
+            landscape_player: chrome.landscape_player,
             normal_font_size: typography.normal_font_size,
             normal_line_height: typography.normal_line_height,
             normal_attrs: TextAttrs {
@@ -60,13 +151,13 @@ impl LyricsRenderer {
             accompaniment_translation_gap: spacing.accompaniment_translation_gap.max(0.0),
             padding_x: spacing.horizontal_padding,
             padding_y: spacing.line_padding,
-            content_top,
-            content_bottom,
-            content_left,
-            content_right,
+            content_top: chrome.content_top,
+            content_bottom: chrome.content_bottom,
+            content_left: chrome.content_left,
+            content_right: chrome.content_right,
             // The focus line sits `focus_top_offset` below the content-band top, so
             // fold the top inset into the keep-alive anchor that scroll/layout use.
-            keep_alive: spacing.focus_top_offset + content_top,
+            keep_alive: spacing.focus_top_offset + chrome.content_top,
             text_color: style.text_color,
             show_translation: style.show_translation,
             show_phonetic: style.show_phonetic,
@@ -405,7 +496,7 @@ impl LyricsRenderer {
             }
         }
 
-        let top_bar = self.prepare_top_bar(scene.top_bar.as_ref());
+        let top_bar = self.prepare_top_bar(scene.top_bar.as_ref(), chrome.thumb_border_width);
 
         Ok(PreparedScene {
             config,
@@ -416,9 +507,13 @@ impl LyricsRenderer {
     }
 
     /// Shape the player top bar's title/artist once (with the engine's CJK-capable
-    /// font fallback), carrying the host-supplied geometry through unchanged. Text is
-    /// laid out un-wrapped (single line) and clipped to `text_max_width` at draw time.
-    fn prepare_top_bar(&mut self, input: Option<&TopBarInput>) -> Option<PreparedTopBar> {
+    /// font fallback), using either the host's portrait geometry or the renderer's
+    /// resolved landscape geometry. Text is single-line and clipped at draw time.
+    fn prepare_top_bar(
+        &mut self,
+        input: Option<&TopBarInput>,
+        thumb_border_width: f32,
+    ) -> Option<PreparedTopBar> {
         let input = input?;
         let no_wrap = (input.text_max_width.max(1.0)) * 100.0;
         let saved = self.text_attrs;
@@ -458,6 +553,7 @@ impl LyricsRenderer {
             thumb_top: input.thumb_top,
             thumb_size: input.thumb_size,
             thumb_clip: crate::capsule::continuous_rounded_rect(thumb_rect, input.thumb_radius),
+            thumb_border_width,
             text_left: input.text_left,
             text_max_width: input.text_max_width,
             title_top: input.title_top,

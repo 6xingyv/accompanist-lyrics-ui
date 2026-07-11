@@ -648,6 +648,9 @@ struct PreparedTopBar {
     thumb_size: f32,
     /// Capsule G2 clip, resolved once with the scene instead of rebuilt per frame.
     thumb_clip: Path,
+    /// Main-branch landscape player draws a subtle border around the large cover.
+    /// Portrait thumbnails keep this at zero.
+    thumb_border_width: f32,
     text_left: f32,
     text_max_width: f32,
     title_top: f32,
@@ -692,6 +695,8 @@ struct FrameGlyphStats {
 struct SceneConfig {
     width: u32,
     height: u32,
+    /// Full-bleed player scene using the main-branch two-pane landscape layout.
+    landscape_player: bool,
     normal_font_size: f32,
     normal_line_height: f32,
     normal_attrs: TextAttrs,
@@ -722,9 +727,9 @@ struct SceneConfig {
     content_top: f32,
     content_bottom: f32,
     // Horizontal content insets (px): the safe-area left/right (display cutout / side
-    // navigation bar in landscape). The lyrics origin and wrap width are inset by
-    // these so text/top-bar never sit under a cutout. Both default 0 (portrait /
-    // legacy: no horizontal inset).
+    // navigation bar in landscape). In a full-bleed landscape player, `content_left`
+    // additionally reserves the cover/metadata pane. The lyrics origin, clip, wrap
+    // width, and hit target all use this band.
     content_left: f32,
     content_right: f32,
     keep_alive: f32,
@@ -1193,6 +1198,8 @@ impl LyricsRenderer {
             height,
             content_top,
             content_bottom,
+            content_left,
+            content_right,
             keep_alive,
             base_color,
             focus_end,
@@ -1215,6 +1222,8 @@ impl LyricsRenderer {
                 scene.config.height.max(DEFAULT_HEIGHT),
                 scene.config.content_top,
                 scene.config.content_bottom,
+                scene.config.content_left,
+                scene.config.content_right,
                 scene.config.keep_alive,
                 rgba_from_argb(scene.config.text_color),
                 focus_end,
@@ -1323,12 +1332,15 @@ impl LyricsRenderer {
         // pixel gets fractional coverage that the fade doesn't fully zero). Aligning
         // to the pixel grid removes the seam.
         let phase = Instant::now();
+        let band_left = content_left.round().clamp(0.0, width);
+        let band_right = (width - content_right).round().clamp(band_left, width);
         let band_top = content_top.round();
         let band_bottom = (height as f32 - content_bottom).round();
-        let inset_lyrics = content_top > 0.0 || content_bottom > 0.0;
+        let inset_lyrics =
+            content_top > 0.0 || content_bottom > 0.0 || content_left > 0.0 || content_right > 0.0;
         let isolate_lyrics = self.background_enabled;
         if isolate_lyrics {
-            let bounds = skia_safe::Rect::new(0.0, band_top, width, band_bottom);
+            let bounds = skia_safe::Rect::new(band_left, band_top, band_right, band_bottom);
             // Composite the lyrics layer additively (`Plus`) over the mesh
             // background — the GPU-path equivalent of the old Compose
             // `graphicsLayer { blendMode = Plus }`, so the text screens/glows over
@@ -1340,10 +1352,11 @@ impl LyricsRenderer {
                     .bounds(&bounds)
                     .paint(&layer_paint),
             );
+            canvas.clip_rect(bounds, skia_safe::ClipOp::Intersect, false);
         } else if inset_lyrics {
             canvas.save();
             canvas.clip_rect(
-                skia_safe::Rect::new(0.0, band_top, width, band_bottom),
+                skia_safe::Rect::new(band_left, band_top, band_right, band_bottom),
                 skia_safe::ClipOp::Intersect,
                 true,
             );
@@ -1665,11 +1678,20 @@ impl LyricsRenderer {
         let Some(scene) = &self.scene else {
             return false;
         };
-        scene.top_bar.is_some()
-            && x >= 0.0
-            && x <= scene.config.width as f32
-            && y >= 0.0
-            && y < scene.config.content_top
+        if scene.top_bar.is_none()
+            || x < 0.0
+            || x > scene.config.width as f32
+            || y < 0.0
+            || y > scene.config.height as f32
+        {
+            return false;
+        }
+        if scene.config.landscape_player {
+            x < scene.config.content_left
+                || x > scene.config.width as f32 - scene.config.content_right
+        } else {
+            y < scene.config.content_top
+        }
     }
 
     pub fn hit_test_line(&mut self, x: f32, y: f32, current_time_ms: i32) -> i32 {
@@ -1682,11 +1704,12 @@ impl LyricsRenderer {
             self.pending_lyric_click_seek = None;
             return -1;
         }
-        // `content_top` reserves the full player top bar (including its margins),
-        // while `content_bottom` reserves the bottom system/chrome inset. Lines
-        // may animate underneath those clipped bands, but they must never remain
-        // clickable there.
-        if y < scene.config.content_top
+        // Match the renderer's four-sided lyrics clip. In landscape the left inset
+        // includes the cover/metadata pane, so tapping the player chrome must never
+        // select a lyric that happens to share the same y coordinate.
+        if x < scene.config.content_left
+            || x > scene.config.width as f32 - scene.config.content_right
+            || y < scene.config.content_top
             || y > scene.config.height as f32 - scene.config.content_bottom
         {
             self.pending_lyric_click_seek = None;
@@ -2084,6 +2107,7 @@ mod tests {
         SceneConfig {
             width: 300,
             height: 200,
+            landscape_player: false,
             normal_font_size: 34.0,
             normal_line_height: 42.0,
             normal_attrs: TextAttrs::default(),
@@ -2163,6 +2187,7 @@ mod tests {
                 skia_safe::Rect::new(20.0, 20.0, 88.0, 88.0),
                 14.0,
             ),
+            thumb_border_width: 0.0,
             text_left: 96.0,
             text_max_width: 160.0,
             title_top: 30.0,
@@ -2461,6 +2486,91 @@ mod tests {
         assert!(renderer.hit_test_top_bar_region(20.0, 60.0));
         assert_eq!(renderer.hit_test_line(20.0, 60.0, 1_000), -1);
         assert!(renderer.pending_lyric_click_seek.is_none());
+    }
+
+    #[test]
+    fn landscape_player_scene_uses_main_branch_two_pane_geometry() {
+        let json = r#"{
+            "width":800,"height":400,"contentTop":140,"contentBottom":16,
+            "contentLeft":10,"contentRight":20,
+            "topBar":{
+                "title":"Title","artist":"Artist",
+                "thumbLeft":38,"thumbTop":52,"thumbSize":68,"thumbRadius":14,
+                "textLeft":114,"textMaxWidth":560,
+                "titleTop":62,"titleFontSize":17,"titleLineHeight":22.1,"titleWeight":600,
+                "artistTop":84.1,"artistFontSize":15,"artistLineHeight":19.5,"artistAlpha":0.4,
+                "buttonCx":758,"buttonCy":86,"buttonRadius":14
+            },
+            "lines":[]
+        }"#;
+        let mut scene: LyricsScene = serde_json::from_str(json).expect("landscape scene");
+        let chrome = layout::resolve_player_chrome(&mut scene);
+        let bar = scene.top_bar.as_ref().expect("resolved player chrome");
+
+        assert!(chrome.landscape_player);
+        assert!((chrome.content_top - 24.0).abs() < 0.01);
+        assert!((chrome.content_left - 390.0).abs() < 0.01);
+        assert!((chrome.content_right - 92.0).abs() < 0.01);
+        assert!((bar.thumb_left - 110.0).abs() < 0.01);
+        assert!((bar.thumb_size - 208.0).abs() < 0.01);
+        assert!((chrome.thumb_border_width - 1.0).abs() < 0.01);
+        assert!(bar.title_top > bar.thumb_top + bar.thumb_size);
+    }
+
+    #[test]
+    fn portrait_player_scene_keeps_host_top_bar_geometry() {
+        let json = r#"{
+            "width":400,"height":800,"contentTop":140,"contentBottom":16,
+            "contentLeft":10,"contentRight":20,
+            "topBar":{
+                "title":"Title","artist":"Artist",
+                "thumbLeft":38,"thumbTop":52,"thumbSize":68,"thumbRadius":14,
+                "textLeft":114,"textMaxWidth":160,
+                "titleTop":62,"titleFontSize":17,"titleLineHeight":22.1,"titleWeight":600,
+                "artistTop":84.1,"artistFontSize":15,"artistLineHeight":19.5,"artistAlpha":0.4,
+                "buttonCx":358,"buttonCy":86,"buttonRadius":14
+            },
+            "lines":[]
+        }"#;
+        let mut scene: LyricsScene = serde_json::from_str(json).expect("portrait scene");
+        let chrome = layout::resolve_player_chrome(&mut scene);
+        let bar = scene.top_bar.as_ref().expect("portrait top bar");
+
+        assert!(!chrome.landscape_player);
+        assert!((chrome.content_top - 140.0).abs() < 0.01);
+        assert!((chrome.content_left - 10.0).abs() < 0.01);
+        assert!((chrome.content_right - 20.0).abs() < 0.01);
+        assert!((chrome.thumb_border_width - 0.0).abs() < 0.01);
+        assert!((bar.thumb_left - 38.0).abs() < 0.01);
+        assert!((bar.thumb_top - 52.0).abs() < 0.01);
+        assert!((bar.thumb_size - 68.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn landscape_player_hit_test_rejects_left_pane() {
+        let mut renderer = LyricsRenderer::new();
+        let mut config = test_config();
+        config.width = 400;
+        config.landscape_player = true;
+        config.content_left = 160.0;
+        config.content_right = 20.0;
+        renderer.scene = Some(PreparedScene {
+            config,
+            lines: vec![test_line(ClusterRole::Standalone, 1_000, 2_000, 50.0)],
+            content_height: 0.0,
+            top_bar: Some(test_top_bar()),
+        });
+        renderer.frame_layouts = vec![DynamicLineLayout {
+            top: 40.0,
+            height: 50.0,
+            text_visibility: 1.0,
+            interlude_visibility: 0.0,
+        }];
+
+        assert!(renderer.hit_test_top_bar_region(80.0, 60.0));
+        assert!(!renderer.hit_test_top_bar_region(200.0, 60.0));
+        assert_eq!(renderer.hit_test_line(80.0, 60.0, 1_000), -1);
+        assert_eq!(renderer.hit_test_line(200.0, 60.0, 1_000), 0);
     }
 
     #[test]
