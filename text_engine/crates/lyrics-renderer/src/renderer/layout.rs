@@ -4,92 +4,114 @@
 
 use super::*;
 
+const WIDE_MIN_ASPECT_RATIO: f32 = 1.3;
+const WIDE_MIN_WIDTH: f32 = 1024.0;
+const WIDE_TEXT_SCALE: f32 = 1.2;
+
 #[derive(Debug, Clone, Copy)]
 pub(super) struct ResolvedPlayerChrome {
     pub(super) content_top: f32,
     pub(super) content_bottom: f32,
     pub(super) content_left: f32,
     pub(super) content_right: f32,
+    pub(super) lyrics_clip_left: f32,
+    pub(super) lyrics_clip_right: f32,
     pub(super) landscape_player: bool,
     pub(super) thumb_border_width: f32,
 }
 
 /// Resolve the full-bleed player's chrome inside the renderer. Hosts always send
-/// the compact portrait top-bar geometry; when that scene is wider than it is tall,
-/// reshape the same artwork/title/artist/button into the main branch's two-pane
-/// player: cover + metadata on the left, lyrics on the right.
+/// the compact top-bar geometry. A scene matching LyricsBlossom's decompiled Wide
+/// condition is reshaped into its fully-expanded default layout (`mode != 1`).
 pub(super) fn resolve_player_chrome(scene: &mut LyricsScene) -> ResolvedPlayerChrome {
     let width = scene.width.unwrap_or(DEFAULT_WIDTH).max(DEFAULT_WIDTH) as f32;
     let height = scene.height.unwrap_or(DEFAULT_HEIGHT).max(DEFAULT_HEIGHT) as f32;
+    let safe_left = scene.content_left.unwrap_or(0.0).max(0.0);
+    let safe_right = scene.content_right.unwrap_or(0.0).max(0.0);
+    let aspect_ratio = width / height.max(1.0);
     let mut chrome = ResolvedPlayerChrome {
         content_top: scene.content_top.unwrap_or(0.0).max(0.0),
         content_bottom: scene.content_bottom.unwrap_or(0.0).max(0.0),
-        content_left: scene.content_left.unwrap_or(0.0).max(0.0),
-        content_right: scene.content_right.unwrap_or(0.0).max(0.0),
-        landscape_player: scene.top_bar.is_some() && width > height,
+        content_left: safe_left,
+        content_right: safe_right,
+        lyrics_clip_left: safe_left,
+        lyrics_clip_right: safe_right,
+        landscape_player: scene.top_bar.is_some()
+            && aspect_ratio >= WIDE_MIN_ASPECT_RATIO
+            && width >= WIDE_MIN_WIDTH,
         thumb_border_width: 0.0,
     };
     if !chrome.landscape_player {
         return chrome;
     }
 
-    let line_padding_x = scene.style.spacing.horizontal_padding.max(0.0);
     let Some(bar) = scene.top_bar.as_mut() else {
         return chrome;
     };
 
-    // Both Android and desktop build the compact input with a 68dp thumbnail.
-    // Recover the scene's px-per-dp scale from it so the renderer can reproduce
-    // the main branch's 100dp/72dp/28dp landscape spacing without a new wire field.
+    // Both Android and desktop build the compact input with a 68dp thumbnail, so
+    // it also carries the effective px-per-dp/render scale needed by the decompiled
+    // `95*s`, `16*s*1.2`, and `500*s*1.2` constants.
     let scale = (bar.thumb_size / 68.0).clamp(0.25, 8.0);
     let dp = |value: f32| value * scale;
     let system_top = (bar.thumb_top - dp(28.0)).max(0.0);
-    let safe_left = chrome.content_left;
-    let safe_right = chrome.content_right;
-    let safe_width = (width - safe_left - safe_right).max(1.0);
-    let pane_right = safe_left + safe_width * 0.4;
 
-    // The main branch gives the lyrics pane 72dp of outer padding on each side;
-    // retain it where possible, but shrink it on unusually narrow landscape
-    // surfaces so the renderer always leaves a positive text wrap width.
-    let right_pane_width = (width - safe_right - pane_right).max(1.0);
-    let max_outer_padding = ((right_pane_width - line_padding_x * 2.0 - 1.0) * 0.5).max(0.0);
-    let lyrics_outer_padding = dp(72.0).min(max_outer_padding);
+    // Decompiled default Wide viewport: [0.50W - 18, 0.96W]. Safe-area insets
+    // only tighten it on edge-to-edge Android surfaces.
+    let lyrics_clip_left = (width * 0.50 - 18.0).max(safe_left);
+    let lyrics_clip_right_edge = (width * 0.96)
+        .min(width - safe_right)
+        .max(lyrics_clip_left + 1.0)
+        .min(width);
+    let lyrics_viewport_width = (lyrics_clip_right_edge - lyrics_clip_left).max(1.0);
+
+    // Decompiled inner text frame: centered in the viewport, padded by 16*s*1.2,
+    // and capped at 500*s*1.2. SceneConfig's content insets exclude the renderer's
+    // own line padding so the resulting text origin/wrap width match this frame.
+    let inner_padding = dp(16.0) * WIDE_TEXT_SCALE;
+    let max_text_width = dp(500.0) * WIDE_TEXT_SCALE;
+    let text_width = (lyrics_viewport_width - inner_padding * 2.0)
+        .max(1.0)
+        .min(max_text_width);
+    let text_left = lyrics_clip_left + (lyrics_viewport_width - text_width) * 0.5;
+    let line_padding_x = scene.style.spacing.horizontal_padding.max(0.0);
+
     chrome.content_top = system_top;
-    chrome.content_left = pane_right + lyrics_outer_padding;
-    chrome.content_right = safe_right + lyrics_outer_padding;
+    chrome.content_left = (text_left - line_padding_x).max(0.0);
+    chrome.content_right =
+        (width - (text_left + text_width) - line_padding_x).max(0.0);
+    chrome.lyrics_clip_left = lyrics_clip_left;
+    chrome.lyrics_clip_right = (width - lyrics_clip_right_edge).max(0.0);
     chrome.thumb_border_width = dp(1.0);
 
-    // Left pane: the main branch uses 40% of the width, 100dp start padding, a
-    // square cover, 28dp gap, then a metadata row with the overflow control.
-    let preferred_cover_left = safe_left + dp(100.0);
-    let minimum_cover_margin = dp(28.0);
-    let base_cover_left =
-        preferred_cover_left.min((pane_right - minimum_cover_margin).max(safe_left));
-    let horizontal_cover_size = (pane_right - base_cover_left).max(1.0);
-    let cover_gap = dp(28.0);
+    // LyricsBlossom's Wide cover is 0.5H and leaves 0.05H before metadata. This
+    // renderer currently has only cover + metadata (not the original progress /
+    // transport / volume stack), so center that visible group as a unit. Keeping
+    // the old absolute 0.12H/0.67H anchors made short ultrawide windows hug the
+    // top-left and could pull metadata back over the cover via the 95*s reserve.
     let button_radius = bar.button_radius.max(dp(1.0));
     let text_block_height = bar.title_line_height + bar.artist_line_height;
-    let metadata_height = text_block_height.max(button_radius * 2.0);
-    let chrome_top = system_top + dp(28.0);
-    let chrome_bottom = (height - chrome.content_bottom - dp(28.0)).max(chrome_top + 1.0);
-    let available_height = (chrome_bottom - chrome_top).max(1.0);
-    let max_cover_size = (available_height - cover_gap - metadata_height).max(1.0);
-    let cover_size = horizontal_cover_size.min(max_cover_size);
-    let cover_left = base_cover_left + (horizontal_cover_size - cover_size) * 0.5;
-    let player_height = cover_size + cover_gap + metadata_height;
-    let cover_top = chrome_top + ((available_height - player_height) * 0.5).max(0.0);
-    let metadata_top = cover_top + cover_size + cover_gap;
+    let metadata_row_height = text_block_height.max(button_radius * 2.0);
+    let metadata_gap = height * 0.05;
+    let available_height = (height - system_top - chrome.content_bottom).max(1.0);
+    let left_pane_width = (lyrics_clip_left - safe_left).max(1.0);
+    let cover_size = (height * 0.50)
+        .min((available_height - metadata_gap - metadata_row_height).max(1.0))
+        .min(left_pane_width);
+    let group_height = cover_size + metadata_gap + metadata_row_height;
+    let cover_left = safe_left + (left_pane_width - cover_size) * 0.5;
+    let cover_top = system_top + ((available_height - group_height) * 0.5).max(0.0);
+    let metadata_row_top = cover_top + cover_size + metadata_gap;
 
     bar.thumb_left = cover_left;
     bar.thumb_top = cover_top;
     bar.thumb_size = cover_size;
     bar.thumb_radius = dp(12.0).min(cover_size * 0.5);
     bar.text_left = cover_left;
-    bar.title_top = metadata_top + (metadata_height - text_block_height) * 0.5;
+    bar.title_top = metadata_row_top + (metadata_row_height - text_block_height) * 0.5;
     bar.artist_top = bar.title_top + bar.title_line_height;
     bar.button_cx = cover_left + cover_size - button_radius;
-    bar.button_cy = metadata_top + metadata_height * 0.5;
+    bar.button_cy = metadata_row_top + metadata_row_height * 0.5;
     bar.text_max_width = (bar.button_cx - button_radius - dp(8.0) - bar.text_left).max(1.0);
 
     chrome
@@ -155,6 +177,8 @@ impl LyricsRenderer {
             content_bottom: chrome.content_bottom,
             content_left: chrome.content_left,
             content_right: chrome.content_right,
+            lyrics_clip_left: chrome.lyrics_clip_left,
+            lyrics_clip_right: chrome.lyrics_clip_right,
             // The focus line sits `focus_top_offset` below the content-band top, so
             // fold the top inset into the keep-alive anchor that scroll/layout use.
             keep_alive: spacing.focus_top_offset + chrome.content_top,
