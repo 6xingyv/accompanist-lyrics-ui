@@ -916,11 +916,10 @@ pub(super) fn awesome_glyph_effect_for_char(
     let spare_duration = (syllable.word_duration as f32
         - AWESOME_FAST_CHAR_THRESHOLD_MS * syllable.word_char_count as f32)
         .max(0.0);
-    let dip = (0.5 * spare_duration / 1000.0).clamp(0.0, 0.5);
     let swell_amount = (0.1 * spare_duration / 1000.0).clamp(0.0, 0.1);
 
     GlyphRenderEffect {
-        offset_y: AWESOME_LIFT_PX * dip_and_rise(1.0 - progress, dip, 1.0),
+        offset_y: AWESOME_LIFT_PX * syllable_lift_easing(1.0 - progress),
         scale: 1.0 + swell(progress, swell_amount),
         shadow_blur_radius: AWESOME_MAX_SHADOW_BLUR_PX * bounce(progress),
         scale_pivot: Some((syllable.word_pivot_x, syllable.word_pivot_y)),
@@ -1466,8 +1465,13 @@ fn cubic_bezier_derivative(t: f32, control1: f32, control2: f32) -> f32 {
         + 3.0 * t * t * (1.0 - control2)
 }
 
-pub(super) fn dip_and_rise(fraction: f32, dip: f32, rise: f32) -> f32 {
-    newton_interpolation_3(fraction, (0.0, 0.0), (0.5, -dip), (1.0, rise))
+/// Compose's `EaseIn` curve used by the per-syllable vertical lift.
+///
+/// The old implementation fitted a three-point Newton polynomial, which dipped
+/// below the baseline midway through a long word. A cubic Bézier is monotonic and
+/// gives the lift a predictable ease-in profile instead.
+pub(super) fn syllable_lift_easing(fraction: f32) -> f32 {
+    cubic_bezier_easing(fraction, 0.42, 0.0, 1.0, 1.0)
 }
 
 pub(super) fn swell(fraction: f32, amount: f32) -> f32 {

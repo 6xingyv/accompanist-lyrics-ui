@@ -31,8 +31,9 @@ const TEX_SIZE: i32 = 32;
 
 /// Ported `MeshShaders.FRAGMENT_SHADER`. `drawVertices` feeds the interpolated
 /// mesh UV (`v_t`) in as the shader coordinate, so the album rotate/scale, vignette
-/// and dither all key off it; the per-vertex mesh colour is multiplied in via
-/// `drawVertices(Modulate)`. The GL vertex-stage breathing is applied on the
+/// and dither all key off it; the deliberately uneven per-vertex mesh colour is
+/// multiplied in via `drawVertices(Modulate)`. The GL vertex-stage breathing is
+/// applied on the
 /// geometry (see [`MeshGradient::draw`]), not here. The result is returned OPAQUE:
 /// the reference disables depth-test/cull and blends, but a deformed mesh folds over
 /// itself, and blending those overlaps double-darkens the seams — an opaque result
@@ -44,10 +45,17 @@ uniform float uTexSize;
 uniform float uTime;
 uniform float uAmp;
 uniform float uAlpha;
+uniform float2 uResolution;
+
+float hash21(float2 p) {
+    p = fract(p * float2(0.1031, 0.1030));
+    p += dot(p, p.yx + 33.33);
+    return fract((p.x + p.y) * p.x);
+}
 
 half4 main(float2 uv) {
-    float vol = uAmp * 2.0;
-    float t = uTime + uAmp;
+    float vol = uAmp;
+    float t = uTime;
 
     // Rotate + scale the texture sample around the centre (GL fragment stage).
     float2 c = uv - 0.5;
@@ -55,7 +63,19 @@ half4 main(float2 uv) {
     float ca = cos(t * 2.0);
     float sa = sin(t * 2.0);
     float2 r = float2(ca * c.x - sa * c.y, sa * c.x + ca * c.y);
-    float2 tuv = r * s + 0.5;
+    // A slow Lissajous drift prevents rotation from repeatedly sampling the same
+    // circular path. Mirrored album tiling keeps the translated sample continuous.
+    float2 drift = float2(
+        sin(t * 0.71) + sin(t * 0.29 + 1.7),
+        cos(t * 0.53 + 0.4) + cos(t * 0.23 + 2.3)
+    ) * 0.025;
+    // Bend axis-aligned texture bands in two dimensions. This operates only on the
+    // album sampling domain; the original Hermite control/vertex colours stay intact.
+    float2 domainWarp = float2(
+        sin(uv.y * 11.0 + t * 0.17) + sin((uv.x + uv.y) * 7.0 - t * 0.11),
+        sin(uv.x * 13.0 - t * 0.13) + cos((uv.x - uv.y) * 9.0 + t * 0.19)
+    ) * 0.005;
+    float2 tuv = r * s + 0.5 + drift + domainWarp;
 
     float4 col = float4(album.eval(tuv * uTexSize));
 
@@ -63,22 +83,26 @@ half4 main(float2 uv) {
     float alphaFactor = uAlpha * clamp(1.0 - uAmp * 0.5, 0.5, 1.0);
     col.rgb *= alphaFactor;
 
-    // Hash-based dither to break up banding.
-    float2 hp = fract(uv * float2(123.34, 456.21));
-    hp += dot(hp, hp + 45.32);
-    float dither = (fract(hp.x * hp.y) - 0.5) * (1.0 / 255.0);
-    col.rgb += dither;
-
     // Vignette.
     float vig = smoothstep(0.8, 0.3, length(uv - 0.5));
     col.rgb *= (0.6 + 0.4 * vig);
+
+    // Stable, RGB-decorrelated triangular dither. A two-pixel cell survives the
+    // light post blur while remaining fine enough to hide 8-bit gradient bands.
+    float2 dp = floor(uv * max(uResolution, float2(1.0)) * 0.25);
+    float3 dither = float3(
+        hash21(dp + 11.7) - hash21(dp + 71.3),
+        hash21(dp + 29.1) - hash21(dp + 97.5),
+        hash21(dp + 47.9) - hash21(dp + 131.1)
+    ) * (1.0 / 255.0);
+    col.rgb += dither;
 
     return half4(col.rgb, 1.0);
 }
 "#;
 
 /// A GPU mesh-gradient built from one piece of artwork. The tessellation (base
-/// positions in `p*1.4` mesh space, UVs, per-vertex colours, triangle indices) is
+/// positions in `p*1.4` mesh space, UVs, per-vertex colours and triangle indices) is
 /// computed once; each frame the positions are re-breathed on the CPU (the GL
 /// vertex shader) and drawn with the per-fragment `RuntimeEffect`.
 pub struct MeshGradient {
@@ -152,8 +176,7 @@ impl MeshGradient {
         // Tessellate for a neutral phone-ish surface up front so the first frame has
         // geometry; `ensure_grid` re-tessellates once the real surface size is known.
         let (cols, rows) = desired_grid(1080.0, 1920.0);
-        let Some((base, texs, colors, indices)) = build_mesh_arrays(seed, cols, rows, &processed)
-        else {
+        let Some(mesh) = build_mesh_arrays(seed, cols, rows, &processed) else {
             log::warn!("[mesh] tessellation failed (grid {cols}x{rows})");
             return None;
         };
@@ -166,10 +189,10 @@ impl MeshGradient {
             seed,
             grid: (cols, rows),
             breath_amp: breath_amp_for(cols.max(rows)),
-            base,
-            texs,
-            colors,
-            indices,
+            base: mesh.base,
+            texs: mesh.texs,
+            colors: mesh.colors,
+            indices: mesh.indices,
         })
     }
 
@@ -188,13 +211,11 @@ impl MeshGradient {
         if (cols, rows) == self.grid {
             return;
         }
-        if let Some((base, texs, colors, indices)) =
-            build_mesh_arrays(self.seed, cols, rows, &self.processed)
-        {
-            self.base = base;
-            self.texs = texs;
-            self.colors = colors;
-            self.indices = indices;
+        if let Some(mesh) = build_mesh_arrays(self.seed, cols, rows, &self.processed) {
+            self.base = mesh.base;
+            self.texs = mesh.texs;
+            self.colors = mesh.colors;
+            self.indices = mesh.indices;
             self.grid = (cols, rows);
             self.breath_amp = breath_amp_for(cols.max(rows));
         }
@@ -211,10 +232,17 @@ impl MeshGradient {
             return;
         }
 
-        // Uniforms, packed tightly in declaration order (all scalar floats, so no
-        // vec alignment ambiguity): uTexSize, uTime, uAmp, uAlpha.
-        let mut uniforms = Vec::with_capacity(4 * 4);
-        for v in [TEX_SIZE as f32, time, amp, alpha.clamp(0.0, 1.0)] {
+        // Uniforms, packed tightly in declaration order: four scalar floats followed
+        // by the two-float resolution vector.
+        let mut uniforms = Vec::with_capacity(6 * 4);
+        for v in [
+            TEX_SIZE as f32,
+            time,
+            amp,
+            alpha.clamp(0.0, 1.0),
+            width,
+            height,
+        ] {
             uniforms.extend_from_slice(&v.to_le_bytes());
         }
         let Some(shader) = self.effect.make_shader(
@@ -250,8 +278,8 @@ impl MeshGradient {
         paint.set_anti_alias(false);
         paint.set_shader(shader);
 
-        // "稍稍模糊": a light blur over the whole background softens the gradient and
-        // hides any residual fold seams from the deforming mesh.
+        // Preserve the original soft mesh appearance. Dither uses four-pixel cells so
+        // enough of it survives this blur to break 8-bit bands without reading as grain.
         let sigma = (width.min(height) * 0.005).clamp(2.0, 12.0);
         let mut layer_paint = Paint::default();
         if let Some(filter) =
@@ -263,8 +291,8 @@ impl MeshGradient {
         // Positions are in `p*1.4` space (breathing already applied); the matrix only
         // does aspect correction + clip→pixel.
         canvas.concat(&mesh_to_pixel_matrix(width, height));
-        // Modulate = multiply: shader_output * per-vertex mesh colour, matching the
-        // GL `col.rgb *= v_c`.
+        // Modulate = multiply: shader_output * deliberately uneven per-vertex mesh
+        // colour, preserving the original gradient's local colour variation.
         canvas.draw_vertices(&vertices, BlendMode::Modulate, &paint);
         canvas.restore();
     }
@@ -421,9 +449,6 @@ impl Rng {
     fn range(&mut self, min: f32, max: f32) -> f32 {
         min + self.next_f32() * (max - min)
     }
-    fn next_int(&mut self, n: u32) -> u32 {
-        self.next_u32() % n
-    }
 }
 
 /// Control-point grid dimensions `(cols, rows)` for a surface. Portrait keeps the
@@ -484,7 +509,6 @@ fn generate_control_points(seed: u32, w: usize, h: usize) -> Preset {
             let bx = u * 2.0 - 1.0;
             let by = v * 2.0 - 1.0;
             let is_border = i == 0 || i == w - 1 || j == 0 || j == h - 1;
-
             let scale = 2.0;
             let nx = noise(u * scale + noise_offset_x, v * scale + noise_offset_y);
             let ny = noise(
@@ -507,10 +531,10 @@ fn generate_control_points(seed: u32, w: usize, h: usize) -> Preset {
             }
 
             let angle_noise = noise(u * 1.5 - noise_offset_x, v * 1.5 - noise_offset_y);
-            let angle = angle_noise * std::f32::consts::PI;
+            let angle = angle_noise * (std::f32::consts::PI * 5.0 / 12.0);
             let rot_degrees = angle.to_degrees();
             let ur = if is_border { 0.0 } else { rot_degrees };
-            let vr = if is_border { 0.0 } else { rot_degrees + 90.0 };
+            let vr = if is_border { 0.0 } else { rot_degrees };
             let up = if is_border {
                 cell
             } else {
@@ -716,11 +740,14 @@ fn color_point(u: f32, v: f32, r: &Mat4, g: &Mat4, b: &Mat4) -> [f32; 3] {
     [eval(r), eval(g), eval(b)]
 }
 
-/// Tessellate the patch grid into `(base_positions, texs, colors, indices)`. Base
-/// positions are the surface points scaled `×1.4` (mesh/clip space, before the
-/// per-frame breathing); UVs in [0, 1]; per-vertex colour Hermite-interpolated from
-/// the artwork. Ported from `BHPMesh.update` + `generateIndices`.
-type MeshArrays = (Vec<Point>, Vec<Point>, Vec<Color>, Vec<u16>);
+/// Tessellated geometry with the original Hermite-interpolated, deliberately uneven
+/// vertex colours.
+struct MeshArrays {
+    base: Vec<Point>,
+    texs: Vec<Point>,
+    colors: Vec<Color>,
+    indices: Vec<u16>,
+}
 
 fn tessellate(preset: &Preset, control_points: &[Vec<ControlPoint>]) -> Option<MeshArrays> {
     let patch_rows = preset.height.checked_sub(1)?;
@@ -748,7 +775,6 @@ fn tessellate(preset: &Preset, control_points: &[Vec<ControlPoint>]) -> Option<M
             c_b[j][i] = color_coefficients(p00, p01, p10, p11, 2);
         }
     }
-
     let vertex_cols = patch_cols * SUBDIVISIONS + 1;
     let vertex_rows = patch_rows * SUBDIVISIONS + 1;
     let num_vertices = vertex_cols * vertex_rows;
@@ -807,7 +833,12 @@ fn tessellate(preset: &Preset, control_points: &[Vec<ControlPoint>]) -> Option<M
         return None;
     }
 
-    Some((positions, texs, colors, indices))
+    Some(MeshArrays {
+        base: positions,
+        texs,
+        colors,
+        indices,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -831,7 +862,7 @@ fn process_bitmap(pixels: &[u32], width: usize, height: usize) -> Vec<u8> {
 
             let (mut h, mut s, mut l) = rgb_to_hsl(r, g, b);
             if s > 0.1 {
-                s = s.clamp(0.5, 1.0);
+                s = s.clamp(0.3, 1.0);
             }
             let (min_l, max_l) = (0.15f32, 0.70f32);
             l = min_l + l * (max_l - min_l);
@@ -908,11 +939,11 @@ mod tests {
     }
 
     #[test]
-    fn uniform_block_is_16_bytes() {
+    fn uniform_block_is_24_bytes() {
         let effect = RuntimeEffect::make_for_shader(MESH_SKSL, None).unwrap();
         assert_eq!(
             effect.uniform_size(),
-            16,
+            24,
             "packed uniform bytes must match the SkSL uniform block"
         );
     }
@@ -947,6 +978,120 @@ mod tests {
         let (cols, rows) = desired_grid(1080.0, 1920.0);
         assert_eq!(cols, rows);
         assert!(cols >= 4);
+    }
+
+    #[test]
+    fn hermite_control_colors_use_original_artwork_coordinates() {
+        let mut processed = vec![0u8; (TEX_SIZE * TEX_SIZE * 4) as usize];
+        for y in 0..TEX_SIZE {
+            for x in 0..TEX_SIZE {
+                let index = ((y * TEX_SIZE + x) * 4) as usize;
+                processed[index] = (x * 7) as u8;
+                processed[index + 1] = (y * 7) as u8;
+                processed[index + 2] = ((x + y) * 3) as u8;
+                processed[index + 3] = 255;
+            }
+        }
+        let preset = generate_control_points(42, 5, 5);
+        let controls = control_points_from_preset(&preset, &processed);
+        for raw in &preset.points {
+            let bx = (((raw.x + 1.0) * 0.5 * (TEX_SIZE - 1) as f32) as i32)
+                .clamp(0, TEX_SIZE - 1);
+            let by = (((raw.y + 1.0) * 0.5 * (TEX_SIZE - 1) as f32) as i32)
+                .clamp(0, TEX_SIZE - 1);
+            let index = ((by * TEX_SIZE + bx) * 4) as usize;
+            let expected = [
+                processed[index] as f32 / 255.0,
+                processed[index + 1] as f32 / 255.0,
+                processed[index + 2] as f32 / 255.0,
+            ];
+            assert_eq!(controls[raw.cy][raw.cx].color, expected);
+        }
+    }
+
+    #[test]
+    fn hermite_geometry_keeps_random_orthogonal_tangents() {
+        let preset = generate_control_points(42, 5, 5);
+        let processed = vec![128u8; (TEX_SIZE * TEX_SIZE * 4) as usize];
+        let controls = control_points_from_preset(&preset, &processed);
+        let interior = controls
+            .iter()
+            .skip(1)
+            .take(3)
+            .flat_map(|row| row.iter().skip(1).take(3))
+            .collect::<Vec<_>>();
+        assert!(interior.iter().any(|point| point.u_tangent[1].abs() > 0.01));
+        for point in interior {
+            let dot = point.u_tangent[0] * point.v_tangent[0]
+                + point.u_tangent[1] * point.v_tangent[1];
+            assert!(dot.abs() < 1.0e-5, "U/V tangents must remain orthogonal");
+        }
+    }
+
+    #[test]
+    fn generated_meshes_keep_vertex_color_variation_and_never_fold() {
+        let pixels = (0..32 * 32)
+            .map(|index| {
+                let x = (index % 32) as u32;
+                let y = (index / 32) as u32;
+                0xff00_0000 | (x * 8) << 16 | (y * 8) << 8 | ((x + y) * 4)
+            })
+            .collect::<Vec<_>>();
+        let processed = process_bitmap(&pixels, 32, 32);
+        for &(cols, rows) in &[(3, 5), (4, 4), (7, 7)] {
+            for seed in 0..128 {
+                let mesh = build_mesh_arrays(seed, cols, rows, &processed).expect("mesh");
+                assert_consistent_winding(&mesh.base, &mesh.indices, cols, rows, seed, -1.0);
+                for &time in &[0.0f32, 1.3, 4.7, 11.0] {
+                    let breath_t = time * 0.5;
+                    let amp = breath_amp_for(cols.max(rows));
+                    let positions = mesh
+                        .base
+                        .iter()
+                        .map(|p| {
+                            Point::new(
+                                p.x + (p.y * 3.0 + breath_t).sin() * amp,
+                                p.y + (p.x * 2.5 + breath_t * 1.2).cos() * amp,
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    assert_consistent_winding(&positions, &mesh.indices, cols, rows, seed, time);
+                }
+                assert!(
+                    mesh.colors.windows(2).any(|pair| pair[0] != pair[1]),
+                    "vertex colours must retain local variation"
+                );
+            }
+        }
+    }
+
+    fn assert_consistent_winding(
+        positions: &[Point],
+        indices: &[u16],
+        cols: usize,
+        rows: usize,
+        seed: u32,
+        time: f32,
+    ) {
+        let mut expected_sign = 0.0f32;
+        for triangle in indices.chunks_exact(3) {
+            let a = positions[triangle[0] as usize];
+            let b = positions[triangle[1] as usize];
+            let c = positions[triangle[2] as usize];
+            let area = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+            assert!(
+                area.abs() > 1.0e-7,
+                "degenerate triangle for {cols}x{rows}, seed {seed}, time {time}"
+            );
+            if expected_sign == 0.0 {
+                expected_sign = area.signum();
+            }
+            assert_eq!(
+                area.signum(),
+                expected_sign,
+                "folded triangle for {cols}x{rows}, seed {seed}, time {time}"
+            );
+        }
     }
 }
 

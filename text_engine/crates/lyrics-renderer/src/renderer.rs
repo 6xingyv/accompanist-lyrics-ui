@@ -30,7 +30,7 @@ use text_utils::{
 };
 
 #[cfg(test)]
-use draw::{awesome_glyph_effect_for_char, bounce, dip_and_rise, swell};
+use draw::{awesome_glyph_effect_for_char, bounce, swell, syllable_lift_easing};
 
 const DEFAULT_WIDTH: u32 = 1;
 const DEFAULT_HEIGHT: u32 = 1;
@@ -1164,25 +1164,27 @@ impl LyricsRenderer {
         canvas.clear(skia_safe::Color::BLACK);
 
         let now = Instant::now();
-        let dt = self
+        let frame_dt = self
             .last_mesh_frame_at
-            .map(|last| (now - last).as_secs_f32() * 0.2)
+            .map(|last| (now - last).as_secs_f32().clamp(0.0, 0.1))
             .unwrap_or(0.0);
+        let dt = frame_dt * 0.2;
         self.last_mesh_frame_at = Some(now);
 
-        // Reference pacing (MeshGradientSurface): smooth the loudness, then map to a
-        // time speed multiplier + amplitude. Louder audio speeds the flow and pulls
-        // the amplitude down (zooming the texture out).
+        // Smooth loudness with real-time attack/release constants. The old fixed
+        // per-frame factor changed with frame rate, and its amplitude could become
+        // negative; because amp also shifted shader phase, transients visibly shook
+        // the whole background.
         let raw_loudness = (crate::audio::current_metrics().loudness / 6.0).clamp(0.0, 1.0);
-        self.mesh_smoothed_loudness += (raw_loudness - self.mesh_smoothed_loudness) * 0.1;
-        let (amp, speed) = if self.background_reactive {
-            (
-                0.2 - self.mesh_smoothed_loudness / 2.0,
-                0.2 + self.mesh_smoothed_loudness,
-            )
-        } else {
-            (0.0, 0.2)
-        };
+        self.mesh_smoothed_loudness = smooth_mesh_loudness(
+            self.mesh_smoothed_loudness,
+            raw_loudness,
+            frame_dt,
+        );
+        let (amp, speed) = mesh_reactive_parameters(
+            self.mesh_smoothed_loudness,
+            self.background_reactive,
+        );
         if self.playback_active {
             self.mesh_time += dt * speed;
         }
@@ -2215,6 +2217,25 @@ fn phase_ms(start: Instant) -> f64 {
 fn ease_in_out(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
+}
+
+fn smooth_mesh_loudness(current: f32, target: f32, dt: f32) -> f32 {
+    let current = current.clamp(0.0, 1.0);
+    let target = target.clamp(0.0, 1.0);
+    let time_constant = if target > current { 0.24 } else { 0.70 };
+    let blend = 1.0 - (-dt.max(0.0) / time_constant).exp();
+    current + (target - current) * blend
+}
+
+fn mesh_reactive_parameters(loudness: f32, reactive: bool) -> (f32, f32) {
+    if !reactive {
+        return (0.0, 0.2);
+    }
+    let loudness = loudness.clamp(0.0, 1.0);
+    let shaped = loudness * loudness * (3.0 - 2.0 * loudness);
+    // Keep the zoom in a narrow, always-positive range and cap pacing at 2.5x the
+    // idle rate. Transients now change momentum rather than teleporting phase.
+    (0.07 - shaped * 0.04, 0.2 + shaped * 0.30)
 }
 
 /// The karaoke "unsung" multiplier, chosen so the unsung ("unplayed") text sits
@@ -3322,10 +3343,38 @@ mod tests {
     }
 
     #[test]
-    fn newton_easing_functions_match_compose_control_points() {
-        assert!((dip_and_rise(0.0, 0.4, 1.0) - 0.0).abs() < 0.0001);
-        assert!((dip_and_rise(0.5, 0.4, 1.0) + 0.4).abs() < 0.0001);
-        assert!((dip_and_rise(1.0, 0.4, 1.0) - 1.0).abs() < 0.0001);
+    fn mesh_reactivity_is_bounded_and_never_changes_phase_with_negative_amp() {
+        let quiet = mesh_reactive_parameters(0.0, true);
+        let loud = mesh_reactive_parameters(1.0, true);
+        assert_eq!(mesh_reactive_parameters(0.5, false), (0.0, 0.2));
+        assert!(quiet.0 >= 0.03 && quiet.0 <= 0.07);
+        assert!(loud.0 >= 0.03 && loud.0 <= 0.07);
+        assert!(loud.0 < quiet.0);
+        assert!(quiet.1 >= 0.2 && loud.1 <= 0.5);
+        assert!(loud.1 > quiet.1);
+    }
+
+    #[test]
+    fn mesh_loudness_filter_is_frame_rate_independent() {
+        let at_60_hz = (0..60).fold(0.0, |value, _| {
+            smooth_mesh_loudness(value, 1.0, 1.0 / 60.0)
+        });
+        let at_30_hz = (0..30).fold(0.0, |value, _| {
+            smooth_mesh_loudness(value, 1.0, 1.0 / 30.0)
+        });
+        assert!((at_60_hz - at_30_hz).abs() < 1.0e-5);
+
+        let released = smooth_mesh_loudness(at_60_hz, 0.0, 0.1);
+        let attacked = smooth_mesh_loudness(0.0, at_60_hz, 0.1);
+        assert!(at_60_hz - released < attacked);
+    }
+
+    #[test]
+    fn easing_functions_match_compose_control_points() {
+        assert!((syllable_lift_easing(0.0) - 0.0).abs() < 0.0001);
+        assert!(syllable_lift_easing(0.5) > 0.0);
+        assert!(syllable_lift_easing(0.5) < 0.5);
+        assert!((syllable_lift_easing(1.0) - 1.0).abs() < 0.0001);
 
         assert!((swell(0.0, 0.1) - 0.0).abs() < 0.0001);
         assert!((swell(0.5, 0.1) - 0.1).abs() < 0.0001);
@@ -3361,7 +3410,8 @@ mod tests {
         let end_effect = awesome_glyph_effect_for_char(0.0, 1_600, &syllable);
 
         assert!(start_effect.offset_y > 0.0);
-        assert!(mid_effect.offset_y < 0.0);
+        assert!(mid_effect.offset_y > 0.0);
+        assert!(mid_effect.offset_y < start_effect.offset_y);
         assert!(end_effect.offset_y.abs() < 0.0001);
     }
 }
