@@ -41,3 +41,8 @@ windows = { version = "0.62.2", features = [
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
 ] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+mpris = "2.1"
+ureq = { version = "3.3", default-features = false, features = ["rustls"] }
+url = "2.5"

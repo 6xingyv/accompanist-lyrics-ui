@@ -6,6 +6,8 @@ mod frame_timing;
 mod gpu;
 #[cfg(windows)]
 mod gpu_preference;
+#[cfg(target_os = "linux")]
+mod mpris_session;
 
 use frame_timing::{frame_timing_enabled, FrameSample, FrameTimingLogger};
 use gpu::DesktopGpuRenderer;
@@ -23,7 +25,9 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
+#[cfg(any(windows, test))]
+use std::time::{SystemTime, UNIX_EPOCH};
 use tao::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use tao::event::{ElementState, Event, MouseButton, MouseScrollDelta, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoop};
@@ -52,6 +56,7 @@ const SEEK_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 /// timeline snapshot to catch up without overwriting the optimistic clock.
 const SEEK_ACCEPTED_ACK_TIMEOUT: Duration = Duration::from_secs(15);
 /// Difference between the Windows (1601) and Unix (1970) epochs in 100 ns ticks.
+#[cfg(windows)]
 const WINDOWS_TO_UNIX_EPOCH_TICKS: i64 = 116_444_736_000_000_000;
 
 /// Logical (density-independent) caption bar height — matches a compact Win11 title bar.
@@ -2148,10 +2153,18 @@ fn spawn_smtc_seek_worker() -> (Sender<SeekRequest>, Receiver<SeekResult>) {
                     false
                 }
             };
-            #[cfg(not(windows))]
+            #[cfg(target_os = "linux")]
+            let accepted = match mpris_session::seek_position_ms(request.position_ms) {
+                Ok(()) => true,
+                Err(error) => {
+                    eprintln!("MPRIS seek to {}ms failed: {error}", request.position_ms);
+                    false
+                }
+            };
+            #[cfg(not(any(windows, target_os = "linux")))]
             let accepted = {
                 eprintln!(
-                    "SMTC seek to {}ms ignored: only available on Windows",
+                    "media-session seek to {}ms ignored: unsupported platform",
                     request.position_ms
                 );
                 false
@@ -2307,10 +2320,12 @@ fn current_playback_snapshot(
     })
 }
 
+#[cfg(any(windows, test))]
 fn tick_delta_ms(value_ticks: i64, origin_ticks: i64) -> i32 {
     (value_ticks.saturating_sub(origin_ticks) / 10_000).clamp(0, i32::MAX as i64) as i32
 }
 
+#[cfg(any(windows, test))]
 fn project_smtc_position_ms(
     position_ms: i32,
     sample_age_ms: i32,
@@ -2435,12 +2450,20 @@ fn decode_artwork(bytes: &[u8]) -> Option<Artwork> {
     })
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+fn current_playback_snapshot(
+    cached_media_key: &str,
+    cached_artwork: Option<Arc<Artwork>>,
+) -> Result<PlaybackSnapshot, String> {
+    mpris_session::current_playback_snapshot(cached_media_key, cached_artwork)
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 fn current_playback_snapshot(
     _cached_media_key: &str,
     _cached_artwork: Option<Arc<Artwork>>,
 ) -> Result<PlaybackSnapshot, String> {
-    Err("SMTC is only available on Windows".to_string())
+    Err("desktop media sessions are unsupported on this platform".to_string())
 }
 
 fn media_identity_key(snapshot: &PlaybackSnapshot) -> String {

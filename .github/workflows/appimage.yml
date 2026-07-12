@@ -1,0 +1,38 @@
+name: Build Linux AppImage
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  appimage-x86_64:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang cmake curl file libegl1-mesa-dev libfontconfig1-dev \
+            libdbus-1-dev libgl1-mesa-dev libwayland-dev libx11-dev libxcursor-dev \
+            libxi-dev libxinerama-dev libxkbcommon-dev libxrandr-dev \
+            ninja-build patchelf pkg-config
+
+      - name: Build AppImage
+        run: bash packaging/appimage/build-appimage.sh
+
+      - name: Upload AppImage
+        uses: actions/upload-artifact@v4
+        with:
+          name: accompanist-lyrics-appimage-x86_64
+          path: dist/*.AppImage
+          if-no-files-found: error

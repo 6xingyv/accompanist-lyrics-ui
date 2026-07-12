@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Keep the AppImage portable: the desktop binary bootstraps config.json + lyrics/
+# in its current directory. If the image lives in a read-only location, use the
+# ordinary per-user config directory instead.
+if [[ -n "${APPIMAGE:-}" ]]; then
+    portable_dir="$(dirname -- "$(readlink -f -- "$APPIMAGE")")"
+else
+    portable_dir="$PWD"
+fi
+
+if [[ -d "$portable_dir" && -w "$portable_dir" ]]; then
+    cd -- "$portable_dir"
+else
+    config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/accompanist-lyrics"
+    mkdir -p -- "$config_dir"
+    cd -- "$config_dir"
+fi
+
+exec "$APPDIR/usr/bin/desktop_lyrics" "$@"
