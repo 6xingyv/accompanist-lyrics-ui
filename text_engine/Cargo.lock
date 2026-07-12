@@ -1459,6 +1459,7 @@ dependencies = [
  "lyrics-parser",
  "lyrics-renderer",
  "raw-window-handle",
+ "serde",
  "serde_json",
  "skia-safe",
  "sysinfo",

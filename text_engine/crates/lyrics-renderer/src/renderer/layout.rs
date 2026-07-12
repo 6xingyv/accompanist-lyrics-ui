@@ -51,18 +51,25 @@ pub(super) fn resolve_keep_alive(
         .unwrap_or(spacing.focus_top_offset + chrome.content_top)
 }
 
-/// Resolve the full-bleed player's chrome inside the renderer. Hosts always send
-/// the compact top-bar geometry. A scene matching LyricsBlossom's decompiled Wide
-/// condition is reshaped into its fully-expanded default layout (`mode != 1`).
+/// Resolve landscape lyric scaling for every host, then optionally expand player
+/// chrome. Android scenes may omit top-bar geometry; desktop/player scenes that do
+/// provide it and match LyricsBlossom's decompiled Wide condition are reshaped into
+/// the fully-expanded default layout (`mode != 1`).
 pub(super) fn resolve_player_chrome(scene: &mut LyricsScene) -> ResolvedPlayerChrome {
     let width = scene.width.unwrap_or(DEFAULT_WIDTH).max(DEFAULT_WIDTH) as f32;
     let height = scene.height.unwrap_or(DEFAULT_HEIGHT).max(DEFAULT_HEIGHT) as f32;
     let safe_left = scene.content_left.unwrap_or(0.0).max(0.0);
     let safe_right = scene.content_right.unwrap_or(0.0).max(0.0);
     let aspect_ratio = width / height.max(1.0);
-    let landscape_player = scene.top_bar.is_some()
-        && aspect_ratio >= WIDE_MIN_ASPECT_RATIO
-        && width >= WIDE_MIN_WIDTH;
+    let layout_density = scene.layout_density.unwrap_or(1.0).clamp(0.25, 8.0);
+    let scale_basis_width = width / layout_density;
+    let scale_basis_height = height / layout_density;
+    // Lyrics scaling/focus belongs to the viewport, not to desktop/player chrome.
+    // Android intentionally may omit the in-surface top bar, but its Rust-rendered
+    // landscape lyrics must still use the same dynamic 1.0→1.4 scale. The top-bar
+    // condition remains only on the two-pane cover/metadata layout below.
+    let landscape_lyrics = aspect_ratio >= WIDE_MIN_ASPECT_RATIO && width >= WIDE_MIN_WIDTH;
+    let landscape_player = scene.top_bar.is_some() && landscape_lyrics;
     let mut chrome = ResolvedPlayerChrome {
         content_top: scene.content_top.unwrap_or(0.0).max(0.0),
         content_bottom: scene.content_bottom.unwrap_or(0.0).max(0.0),
@@ -71,12 +78,12 @@ pub(super) fn resolve_player_chrome(scene: &mut LyricsScene) -> ResolvedPlayerCh
         lyrics_clip_left: safe_left,
         lyrics_clip_right: safe_right,
         landscape_player,
-        lyrics_layout_scale: if landscape_player {
-            wide_lyrics_layout_scale(width, height)
+        lyrics_layout_scale: if landscape_lyrics {
+            wide_lyrics_layout_scale(scale_basis_width, scale_basis_height)
         } else {
             1.0
         },
-        focus_y: landscape_player.then_some(height * WIDE_FOCUS_Y_RATIO),
+        focus_y: landscape_lyrics.then_some(height * WIDE_FOCUS_Y_RATIO),
         thumb_border_width: 0.0,
     };
     if !chrome.landscape_player {
@@ -93,15 +100,27 @@ pub(super) fn resolve_player_chrome(scene: &mut LyricsScene) -> ResolvedPlayerCh
     let scale = (bar.thumb_size / 68.0).clamp(0.25, 8.0);
     let dp = |value: f32| value * scale;
     let system_top = (bar.thumb_top - dp(28.0)).max(0.0);
+    // Android renders the lyrics into an isolated, blurred layer. Its glyph ink,
+    // per-word scale and blur can extend past the nominal text frame; clipping at
+    // the decompiled viewport edge cuts that overflow into a hard vertical edge.
+    // Keep desktop geometry exact (layoutDensity omitted/1), while Android receives
+    // 24dp of transparent clip bleed on both sides. This does not change wrapping.
+    let clip_bleed = if layout_density > 1.01 { dp(24.0) } else { 0.0 };
 
-    // Decompiled default Wide viewport: [0.50W - 18, 0.96W]. Safe-area insets
-    // only tighten it on edge-to-edge Android surfaces.
-    let lyrics_clip_left = (width * 0.50 - 18.0).max(safe_left);
-    let lyrics_clip_right_edge = (width * 0.96)
+    // Decompiled default Wide *layout* viewport: [0.50W - 18, 0.96W]. Keep these
+    // nominal edges separate from the expanded Canvas clip below: using the bleed
+    // width for wrapping makes lines believe they have more room than the column and
+    // is exactly what causes the final glyphs to be truncated at the visible edge.
+    let lyrics_viewport_left = (width * 0.50 - 18.0).max(safe_left);
+    let lyrics_viewport_right_edge = (width * 0.96)
         .min(width - safe_right)
-        .max(lyrics_clip_left + 1.0)
+        .max(lyrics_viewport_left + 1.0)
         .min(width);
-    let lyrics_viewport_width = (lyrics_clip_right_edge - lyrics_clip_left).max(1.0);
+    let lyrics_viewport_width =
+        (lyrics_viewport_right_edge - lyrics_viewport_left).max(1.0);
+    let lyrics_clip_left = (lyrics_viewport_left - clip_bleed).max(safe_left);
+    let lyrics_clip_right_edge =
+        (lyrics_viewport_right_edge + clip_bleed).min(width - safe_right);
 
     // Decompiled inner text frame: centered in the viewport, padded by 16*s*1.2,
     // and capped at 500*s*1.2. SceneConfig's content insets exclude the renderer's
@@ -111,7 +130,7 @@ pub(super) fn resolve_player_chrome(scene: &mut LyricsScene) -> ResolvedPlayerCh
     let text_width = (lyrics_viewport_width - inner_padding * 2.0)
         .max(1.0)
         .min(max_text_width);
-    let text_left = lyrics_clip_left + (lyrics_viewport_width - text_width) * 0.5;
+    let text_left = lyrics_viewport_left + (lyrics_viewport_width - text_width) * 0.5;
     let line_padding_x =
         scene.style.spacing.horizontal_padding.max(0.0) * chrome.lyrics_layout_scale;
 

@@ -6,7 +6,7 @@
 //! in **Settings → System → Display → Graphics** (High performance / Power saving
 //! / Let Windows decide) before OpenGL is initialized.
 //!
-//! Override with env `ACCOMPANIST_GPU`:
+//! Configure with `gpu` in `config.json`, or override with env `ACCOMPANIST_GPU`:
 //! - `auto` / unset → Windows Graphics Settings (`UNSPECIFIED`)
 //! - `high` / `performance` → discrete / high-performance adapter
 //! - `low` / `power` / `saving` → integrated / minimum-power adapter
@@ -31,8 +31,8 @@ struct PreferredGpu {
 
 /// Apply Windows GPU preference **before** creating any OpenGL context / window
 /// surface that would lock the process onto the wrong adapter.
-pub fn apply_windows_gpu_preference() {
-    match try_apply() {
+pub fn apply_windows_gpu_preference(configured: crate::GpuPreference) {
+    match try_apply(configured) {
         Ok(desc) => {
             eprintln!("[gpu] Windows GPU preference applied: {desc}");
         }
@@ -45,7 +45,7 @@ pub fn apply_windows_gpu_preference() {
     }
 }
 
-fn try_apply() -> Result<String, String> {
+fn try_apply(configured: crate::GpuPreference) -> Result<String, String> {
     use windows::Win32::Foundation::HMODULE;
     use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0};
     use windows::Win32::Graphics::Direct3D11::{
@@ -58,7 +58,7 @@ fn try_apply() -> Result<String, String> {
         DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, DXGI_GPU_PREFERENCE_MINIMUM_POWER,
     };
 
-    let preference = preference_from_env();
+    let preference = preference_from_env(configured);
     let preference_label = match preference {
         p if p == DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE => "HIGH_PERFORMANCE",
         p if p == DXGI_GPU_PREFERENCE_MINIMUM_POWER => "MINIMUM_POWER",
@@ -144,21 +144,30 @@ fn try_apply() -> Result<String, String> {
     Ok(summary)
 }
 
-fn preference_from_env() -> windows::Win32::Graphics::Dxgi::DXGI_GPU_PREFERENCE {
+fn preference_from_env(
+    configured: crate::GpuPreference,
+) -> windows::Win32::Graphics::Dxgi::DXGI_GPU_PREFERENCE {
     use windows::Win32::Graphics::Dxgi::{
         DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, DXGI_GPU_PREFERENCE_MINIMUM_POWER,
         DXGI_GPU_PREFERENCE_UNSPECIFIED,
     };
-    match std::env::var("ACCOMPANIST_GPU")
-        .unwrap_or_default()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "high" | "performance" | "dgpu" | "discrete" => DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,
-        "low" | "power" | "saving" | "igpu" | "integrated" | "min" => {
+    let configured = match configured {
+        crate::GpuPreference::System => DXGI_GPU_PREFERENCE_UNSPECIFIED,
+        crate::GpuPreference::HighPerformance => DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,
+        crate::GpuPreference::MinimumPower => DXGI_GPU_PREFERENCE_MINIMUM_POWER,
+    };
+    let Ok(value) = std::env::var("ACCOMPANIST_GPU") else {
+        return configured;
+    };
+    match value.to_ascii_lowercase().as_str() {
+        "auto" | "system" => DXGI_GPU_PREFERENCE_UNSPECIFIED,
+        "high" | "performance" | "high_performance" | "dgpu" | "discrete" => {
+            DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE
+        }
+        "low" | "power" | "saving" | "minimum_power" | "igpu" | "integrated" | "min" => {
             DXGI_GPU_PREFERENCE_MINIMUM_POWER
         }
-        _ => DXGI_GPU_PREFERENCE_UNSPECIFIED,
+        _ => configured,
     }
 }
 

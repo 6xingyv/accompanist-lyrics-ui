@@ -139,6 +139,9 @@ internal data class BreathingDotsStyle(
 internal data class LyricsSceneWire(
     val width: Int,
     val height: Int,
+    /** Render pixels per layout dp. Rust divides the viewport by this only when
+     * calculating the landscape 1.0→1.4 lyric scale. */
+    val layoutDensity: Float = 1f,
     val locale: String,
     val contentTop: Float = 0f,
     val contentBottom: Float = 0f,
@@ -360,6 +363,7 @@ internal fun SyncedLyrics.toSceneJson(
     width: Int,
     height: Int,
     style: SceneStyle,
+    layoutDensity: Float = 1f,
     contentTop: Float = 0f,
     contentBottom: Float = 0f,
     contentLeft: Float = 0f,
@@ -370,6 +374,7 @@ internal fun SyncedLyrics.toSceneJson(
         LyricsSceneWire(
             width = width,
             height = height,
+            layoutDensity = layoutDensity.coerceAtLeast(0.25f),
             locale = detectNativeLyricsLocale(),
             contentTop = contentTop,
             contentBottom = contentBottom,

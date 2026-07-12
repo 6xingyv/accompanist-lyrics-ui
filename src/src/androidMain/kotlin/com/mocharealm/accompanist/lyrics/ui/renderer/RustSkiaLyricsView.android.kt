@@ -825,6 +825,11 @@ class RustSkiaLyricsView @JvmOverloads constructor(
                     sceneWidth,
                     sceneHeight,
                     sceneStyle.scaled(renderScale),
+                    // Scene dimensions and typography are in downscaled render px.
+                    // Passing density in the same space lets Rust evaluate its
+                    // landscape dynamic scale in dp, avoiding a second 1.4x boost
+                    // on high-density phones.
+                    layoutDensity = resources.displayMetrics.density * renderScale,
                     contentTop = resolvedContentTop,
                     contentBottom = contentBottomPx * renderScale,
                     contentLeft = contentLeftPx * renderScale,

@@ -12,10 +12,13 @@ use gpu::DesktopGpuRenderer;
 use lyrics_parser::parser::{auto_parser::AutoParser, lyrics_parser::LyricsParser};
 use lyrics_parser::SceneBuildParams;
 use lyrics_renderer::TextEngine;
+use serde::{Deserialize, Serialize};
 use skia_safe::{
     paint, Color, Color4f, Font, FontMgr, FontStyle, Paint, Point, Rect, TextBlob, Typeface,
 };
 use std::collections::VecDeque;
+use std::ffi::OsString;
+use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
@@ -29,6 +32,10 @@ use unicode_segmentation::UnicodeSegmentation;
 
 const DEFAULT_WIDTH: u32 = 420;
 const DEFAULT_HEIGHT: u32 = 520;
+const DEFAULT_MIN_WIDTH: u32 = 320;
+const DEFAULT_MIN_HEIGHT: u32 = 240;
+const DEFAULT_CONFIG_FILE: &str = "config.json";
+const DEFAULT_LYRICS_DIR: &str = "lyrics";
 const SMTC_POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// Used only when refresh-rate detection fails entirely.
 const DEFAULT_REFRESH_HZ: f64 = 60.0;
@@ -88,10 +95,57 @@ impl PartialEq for Artwork {
 
 impl Eq for Artwork {}
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum GpuPreference {
+    #[default]
+    System,
+    HighPerformance,
+    MinimumPower,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+struct WindowConfig {
+    width: u32,
+    height: u32,
+    min_width: u32,
+    min_height: u32,
+    always_on_top: bool,
+}
+
+impl Default for WindowConfig {
+    fn default() -> Self {
+        Self {
+            width: DEFAULT_WIDTH,
+            height: DEFAULT_HEIGHT,
+            min_width: DEFAULT_MIN_WIDTH,
+            min_height: DEFAULT_MIN_HEIGHT,
+            always_on_top: true,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
 struct AppConfig {
     lyrics_dir: PathBuf,
     recursive: bool,
+    gpu: GpuPreference,
+    frame_timing: bool,
+    window: WindowConfig,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            lyrics_dir: PathBuf::from(DEFAULT_LYRICS_DIR),
+            recursive: false,
+            gpu: GpuPreference::System,
+            frame_timing: false,
+            window: WindowConfig::default(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -107,12 +161,15 @@ enum CaptionHit {
 pub fn run() -> Result<(), String> {
     env_logger::try_init().ok();
 
+    // Configuration must be resolved before GPU initialization because the selected
+    // DXGI preference affects which adapter owns the later OpenGL context.
+    let config = AppConfig::from_env_args()?;
+
     // Must run before any window / WGL context so hybrid GPU drivers see the
     // OS-assigned adapter (Settings → Graphics) for this executable.
     #[cfg(windows)]
-    gpu_preference::apply_windows_gpu_preference();
+    gpu_preference::apply_windows_gpu_preference(config.gpu);
 
-    let config = AppConfig::from_env_args()?;
     let (playback_tx, playback_rx) = mpsc::channel();
     spawn_smtc_listener(playback_tx);
     let (seek_tx, seek_result_rx) = spawn_smtc_seek_worker();
@@ -132,19 +189,21 @@ pub fn run() -> Result<(), String> {
         WindowBuilder::new()
             .with_title("Accompanist Desktop Lyrics")
             .with_inner_size(LogicalSize::new(
-                DEFAULT_WIDTH as f64,
-                DEFAULT_HEIGHT as f64,
+                config.window.width.max(1) as f64,
+                config.window.height.max(1) as f64,
             ))
-            .with_min_inner_size(LogicalSize::new(320.0, 240.0))
+            .with_min_inner_size(LogicalSize::new(
+                config.window.min_width.max(1) as f64,
+                config.window.min_height.max(1) as f64,
+            ))
             .with_resizable(true)
             .with_decorations(false)
             .with_transparent(false)
-            .with_always_on_top(true)
+            .with_always_on_top(config.window.always_on_top)
             .build(&event_loop)
             .map_err(|error| format!("failed to create tao window: {error}"))?,
     );
-    // Default pinned; caption pin button can toggle this off.
-    let mut always_on_top = true;
+    let mut always_on_top = config.window.always_on_top;
 
     let mut renderer = DesktopGpuRenderer::new(&window)?;
     let vsync = renderer.vsync_enabled();
@@ -157,10 +216,10 @@ pub fn run() -> Result<(), String> {
         if vsync { "on" } else { "off" }
     );
 
-    let timing_enabled = frame_timing_enabled();
+    let timing_enabled = config.frame_timing || frame_timing_enabled();
     if timing_enabled {
         eprintln!(
-            "[frame] timing enabled (ACCOMPANIST_FRAME_TIMING); logging 1s averages to stderr"
+            "[frame] timing enabled; logging 1s averages to stderr"
         );
     }
 
@@ -546,6 +605,10 @@ impl DesktopLyricsApp {
     ) -> Self {
         let mut engine = TextEngine::new(2048, 2048);
         engine.load_system_fonts();
+        let initial_size = PhysicalSize::new(
+            config.window.width.max(1),
+            config.window.height.max(1),
+        );
 
         Self {
             config,
@@ -561,7 +624,7 @@ impl DesktopLyricsApp {
             current_lyrics: None,
             top_bar_title: String::new(),
             top_bar_artist: String::new(),
-            last_size: PhysicalSize::new(DEFAULT_WIDTH, DEFAULT_HEIGHT),
+            last_size: initial_size,
             density: density.max(0.5),
             cursor: PhysicalPosition::new(0.0, 0.0),
             cursor_inside: false,
@@ -1668,44 +1731,174 @@ impl PlaybackClock {
 
 impl AppConfig {
     fn from_env_args() -> Result<Self, String> {
-        let mut lyrics_dir = std::env::var_os("ACCOMPANIST_LYRICS_DIR").map(PathBuf::from);
-        let mut recursive = std::env::var_os("ACCOMPANIST_LYRICS_RECURSIVE")
-            .and_then(|value| value.into_string().ok())
-            .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+        let cwd = std::env::current_dir()
+            .map_err(|error| format!("failed to resolve current directory: {error}"))?;
+        let raw_args = std::env::args_os().skip(1).collect::<Vec<_>>();
+        let launched_without_args = raw_args.is_empty();
+        let mut config_path = cwd.join(DEFAULT_CONFIG_FILE);
+        let mut config_path_explicit = false;
+        let mut lyrics_override = None;
+        let mut recursive_override = None;
+        let mut gpu_override = None;
+        let mut frame_timing_override = None;
 
-        let mut args = std::env::args_os().skip(1);
+        let mut args = raw_args.into_iter();
         while let Some(arg) = args.next() {
             match arg.to_string_lossy().as_ref() {
+                "--config" => {
+                    let value = args.next().ok_or("--config requires a file path")?;
+                    config_path = resolve_from(&cwd, PathBuf::from(value));
+                    config_path_explicit = true;
+                }
                 "--lyrics-dir" => {
                     let value = args.next().ok_or("--lyrics-dir requires a folder path")?;
-                    lyrics_dir = Some(PathBuf::from(value));
+                    lyrics_override = Some(resolve_from(&cwd, PathBuf::from(value)));
                 }
-                "--recursive" => recursive = true,
+                "--recursive" => recursive_override = Some(true),
+                "--gpu" => {
+                    let value = args.next().ok_or("--gpu requires a mode")?;
+                    gpu_override = Some(parse_gpu_preference(&value)?);
+                }
+                "--frame-timing" => frame_timing_override = Some(true),
                 "--help" | "-h" => return Err(help_text()),
                 other => return Err(format!("unknown argument `{other}`\n{}", help_text())),
             }
         }
 
-        let lyrics_dir =
-            lyrics_dir.ok_or_else(|| format!("lyrics folder is required\n{}", help_text()))?;
-        if !lyrics_dir.is_dir() {
-            return Err(format!(
-                "lyrics folder does not exist: {}",
-                lyrics_dir.display()
-            ));
+        if launched_without_args && !config_path.exists() {
+            bootstrap_default_config(&cwd, &config_path)?;
+        }
+        if config_path_explicit && !config_path.is_file() {
+            return Err(format!("config file does not exist: {}", config_path.display()));
         }
 
-        Ok(Self {
-            lyrics_dir,
-            recursive,
-        })
+        let config_exists = config_path.is_file();
+        let mut config = if config_exists {
+            load_config(&config_path)?
+        } else {
+            AppConfig::default()
+        };
+        if config_exists && config.lyrics_dir.is_relative() {
+            let base = config_path.parent().unwrap_or(&cwd);
+            config.lyrics_dir = base.join(&config.lyrics_dir);
+        }
+
+        if let Some(path) = std::env::var_os("ACCOMPANIST_LYRICS_DIR") {
+            config.lyrics_dir = resolve_from(&cwd, PathBuf::from(path));
+        }
+        if let Some(value) = std::env::var_os("ACCOMPANIST_LYRICS_RECURSIVE") {
+            config.recursive = env_flag(&value);
+        }
+        if let Ok(value) = std::env::var("ACCOMPANIST_GPU") {
+            config.gpu = parse_gpu_preference(&OsString::from(value))?;
+        }
+        if let Some(value) = std::env::var_os("ACCOMPANIST_FRAME_TIMING") {
+            config.frame_timing = env_flag(&value);
+        }
+
+        if let Some(value) = lyrics_override {
+            config.lyrics_dir = value;
+        }
+        if let Some(value) = recursive_override {
+            config.recursive = value;
+        }
+        if let Some(value) = gpu_override {
+            config.gpu = value;
+        }
+        if let Some(value) = frame_timing_override {
+            config.frame_timing = value;
+        }
+
+        if launched_without_args {
+            fs::create_dir_all(&config.lyrics_dir).map_err(|error| {
+                format!(
+                    "failed to create lyrics folder {}: {error}",
+                    config.lyrics_dir.display()
+                )
+            })?;
+        } else if !config.lyrics_dir.is_dir() {
+            return Err(format!(
+                "lyrics folder does not exist: {}",
+                config.lyrics_dir.display()
+            ));
+        }
+        config.window.width = config.window.width.max(1);
+        config.window.height = config.window.height.max(1);
+        config.window.min_width = config.window.min_width.max(1);
+        config.window.min_height = config.window.min_height.max(1);
+        Ok(config)
+    }
+}
+
+fn load_config(path: &Path) -> Result<AppConfig, String> {
+    let bytes = fs::read(path)
+        .map_err(|error| format!("failed to read config {}: {error}", path.display()))?;
+    serde_json::from_slice(&bytes)
+        .map_err(|error| format!("failed to parse config {}: {error}", path.display()))
+}
+
+fn bootstrap_default_config(root: &Path, config_path: &Path) -> Result<(), String> {
+    let lyrics_dir = root.join(DEFAULT_LYRICS_DIR);
+    fs::create_dir_all(&lyrics_dir).map_err(|error| {
+        format!(
+            "failed to create default lyrics folder {}: {error}",
+            lyrics_dir.display()
+        )
+    })?;
+
+    let file = match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(config_path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(()),
+        Err(error) => {
+            return Err(format!(
+                "failed to create default config {}: {error}",
+                config_path.display()
+            ))
+        }
+    };
+    serde_json::to_writer_pretty(file, &AppConfig::default())
+        .map_err(|error| format!("failed to write config {}: {error}", config_path.display()))
+}
+
+fn resolve_from(base: &Path, path: PathBuf) -> PathBuf {
+    if path.is_absolute() {
+        path
+    } else {
+        base.join(path)
+    }
+}
+
+fn env_flag(value: &OsString) -> bool {
+    value.to_string_lossy().eq_ignore_ascii_case("true")
+        || value.to_string_lossy().eq_ignore_ascii_case("yes")
+        || value == "1"
+}
+
+fn parse_gpu_preference(value: &OsString) -> Result<GpuPreference, String> {
+    match value.to_string_lossy().to_ascii_lowercase().as_str() {
+        "auto" | "system" => Ok(GpuPreference::System),
+        "high" | "performance" | "high_performance" | "dgpu" | "discrete" => {
+            Ok(GpuPreference::HighPerformance)
+        }
+        "low" | "power" | "saving" | "minimum_power" | "igpu" | "integrated" | "min" => {
+            Ok(GpuPreference::MinimumPower)
+        }
+        other => Err(format!(
+            "unknown GPU mode `{other}`; expected system, high_performance, or minimum_power"
+        )),
     }
 }
 
 fn help_text() -> String {
-    "usage: cargo run -r -p lyrics-desktop --bin desktop_lyrics -- --lyrics-dir <folder> [--recursive]\n\
-     or set ACCOMPANIST_LYRICS_DIR=<folder>\n\
-     set ACCOMPANIST_FRAME_TIMING=1 to log 1s frame phase averages (record/flush/swap + engine)"
+    "usage: desktop_lyrics [--config <file>] [--lyrics-dir <folder>] [--recursive]\n\
+     [--gpu system|high_performance|minimum_power] [--frame-timing]\n\
+     without arguments, config.json and an empty lyrics folder are created in the current directory\n\
+     environment overrides: ACCOMPANIST_LYRICS_DIR, ACCOMPANIST_LYRICS_RECURSIVE,\n\
+     ACCOMPANIST_GPU, ACCOMPANIST_FRAME_TIMING"
         .to_string()
 }
 
@@ -2265,6 +2458,45 @@ fn media_identity_key_from_parts(artist: &str, title: &str, duration_ms: i32) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_config_serializes_every_desktop_setting() {
+        let value = serde_json::to_value(AppConfig::default()).unwrap();
+        assert_eq!(value["lyrics_dir"], DEFAULT_LYRICS_DIR);
+        assert_eq!(value["recursive"], false);
+        assert_eq!(value["gpu"], "system");
+        assert_eq!(value["frame_timing"], false);
+        assert_eq!(value["window"]["width"], DEFAULT_WIDTH);
+        assert_eq!(value["window"]["height"], DEFAULT_HEIGHT);
+        assert_eq!(value["window"]["min_width"], DEFAULT_MIN_WIDTH);
+        assert_eq!(value["window"]["min_height"], DEFAULT_MIN_HEIGHT);
+        assert_eq!(value["window"]["always_on_top"], true);
+    }
+
+    #[test]
+    fn bootstrap_creates_config_and_empty_lyrics_folder() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "accompanist-desktop-bootstrap-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).unwrap();
+        let config_path = root.join(DEFAULT_CONFIG_FILE);
+        bootstrap_default_config(&root, &config_path).unwrap();
+
+        let loaded = load_config(&config_path).unwrap();
+        assert_eq!(loaded, AppConfig::default());
+        let lyrics_dir = root.join(DEFAULT_LYRICS_DIR);
+        assert!(lyrics_dir.is_dir());
+        assert_eq!(fs::read_dir(&lyrics_dir).unwrap().count(), 0);
+
+        fs::remove_file(config_path).unwrap();
+        fs::remove_dir(lyrics_dir).unwrap();
+        fs::remove_dir(root).unwrap();
+    }
 
     #[test]
     fn normalizes_names_for_case_and_symbols() {

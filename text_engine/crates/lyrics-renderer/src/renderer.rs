@@ -158,6 +158,11 @@ const MAIN_LINE_FOCUS_EXIT_MS: f32 = 300.0;
 pub struct LyricsScene {
     pub width: Option<u32>,
     pub height: Option<u32>,
+    /// Render pixels per host layout unit. Android supplies density × renderScale so
+    /// viewport-driven lyric scaling is evaluated in dp instead of physical pixels;
+    /// desktop/legacy scenes omit it and retain a 1:1 basis.
+    #[serde(default, rename = "layoutDensity")]
+    pub layout_density: Option<f32>,
     pub locale: Option<String>,
     /// Vertical content insets (px) for the lyrics band on a full-bleed surface.
     #[serde(default, rename = "contentTop")]
@@ -2727,6 +2732,58 @@ mod tests {
         assert!((layout::wide_lyrics_layout_scale(1600.0, 1000.0) - 1.4).abs() < 0.001);
         assert!((layout::wide_lyrics_layout_scale(2400.0, 1080.0) - 1.4).abs() < 0.001);
         assert!((layout::wide_lyrics_layout_scale(2048.0, 512.0) - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn android_landscape_without_top_bar_uses_dynamic_scale_and_focus() {
+        let json = r#"{
+            "width":1312,"height":756,
+            "contentTop":24,"contentBottom":16,
+            "contentLeft":10,"contentRight":20,
+            "lines":[]
+        }"#;
+        let mut scene: LyricsScene = serde_json::from_str(json).expect("Android landscape scene");
+        let chrome = layout::resolve_player_chrome(&mut scene);
+        let visible_focus_y = layout::resolve_keep_alive(&chrome, &scene.style.spacing)
+            + scene.style.spacing.line_padding * chrome.lyrics_layout_scale;
+
+        assert!(!chrome.landscape_player, "no desktop two-pane chrome without top bar");
+        assert!((chrome.lyrics_layout_scale - 1.2).abs() < 0.001);
+        assert!((chrome.focus_y.expect("landscape focus") - 302.4).abs() < 0.01);
+        assert!((visible_focus_y - 302.4).abs() < 0.01);
+        assert!((chrome.content_left - 10.0).abs() < 0.01);
+        assert!((chrome.content_right - 20.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn android_phone_uses_dp_scale_basis_instead_of_physical_pixels() {
+        // Current ADB device: 2400×1080 @ 440dpi. Android caps the render target at
+        // 2.2 MP, yielding about 2211×995 and an effective render density of 2.533.
+        let json = r#"{
+            "width":2211,"height":995,"layoutDensity":2.533,
+            "topBar":{
+                "title":"Title","artist":"Artist",
+                "thumbLeft":71,"thumbTop":71,"thumbSize":172.244,"thumbRadius":35,
+                "textLeft":263,"textMaxWidth":1800,
+                "titleTop":96,"titleFontSize":43,"titleLineHeight":56,"titleWeight":600,
+                "artistTop":152,"artistFontSize":38,"artistLineHeight":49,"artistAlpha":0.4,
+                "buttonCx":2105,"buttonCy":157,"buttonRadius":35
+            },
+            "lines":[]
+        }"#;
+        let mut scene: LyricsScene = serde_json::from_str(json).expect("ADB landscape scene");
+        let chrome = layout::resolve_player_chrome(&mut scene);
+
+        assert!(chrome.landscape_player);
+        assert!((chrome.lyrics_layout_scale - 1.0).abs() < 0.001);
+        assert!((chrome.focus_y.expect("landscape focus") - 398.0).abs() < 0.01);
+        assert!(chrome.lyrics_clip_left < 2211.0 * 0.5 - 18.0);
+        assert!(chrome.lyrics_clip_right < 2211.0 * 0.04);
+        let line_padding = scene.style.spacing.horizontal_padding * chrome.lyrics_layout_scale;
+        let text_left = chrome.content_left + line_padding;
+        let text_right = 2211.0 - chrome.content_right - line_padding;
+        assert!(text_left >= 2211.0 * 0.5 - 18.0);
+        assert!(text_right <= 2211.0 * 0.96);
     }
 
     #[test]
