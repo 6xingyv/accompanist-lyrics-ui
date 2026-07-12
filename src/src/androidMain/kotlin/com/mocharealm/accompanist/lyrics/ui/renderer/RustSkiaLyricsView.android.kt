@@ -79,6 +79,10 @@ class RustSkiaLyricsView @JvmOverloads constructor(
     private var lastClockNanos: Long = 0L
     private var clockPrimed = false
     private var sceneDirty = true
+    // Coalesce a Compose AndroidView update into at most one scene rebuild.
+    private var stateUpdateDepth = 0
+    private var sceneRebuildPending = false
+    private var renderRequestPending = false
     private var renderSurface: Surface? = null
     // Initial style is just the default config mapped at this view's density; the
     // host overwrites it via setStyle before the first frame when one is supplied.
@@ -210,6 +214,24 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         this.onLinePressed = onLinePressed
     }
 
+    /** Apply one Compose state snapshot atomically, rebuilding the native scene once. */
+    internal fun applyStateUpdate(update: RustSkiaLyricsView.() -> Unit) {
+        stateUpdateDepth++
+        try {
+            update()
+        } finally {
+            stateUpdateDepth--
+            if (stateUpdateDepth == 0) {
+                val rebuild = sceneRebuildPending
+                val render = renderRequestPending
+                sceneRebuildPending = false
+                renderRequestPending = false
+                if (rebuild && width > 0 && height > 0) ensureScene(width, height)
+                if (rebuild || render) requestRender()
+            }
+        }
+    }
+
     fun setLyrics(lyrics: SyncedLyrics?) {
         if (this.lyrics === lyrics) return
         val oldLocale = this.lyrics?.detectNativeLyricsLocale()
@@ -257,6 +279,11 @@ class RustSkiaLyricsView @JvmOverloads constructor(
                 if (!engineClosed) engine.clearBackground()
                 requestRender()
             }
+            return
+        }
+        // The Compose host remembers this IntArray. Check identity before the
+        // O(pixel-count) hash so ordinary recompositions stay O(1).
+        if (backgroundPixels === pixels && width == backgroundWidth && height == backgroundHeight) {
             return
         }
         val seed = pixels.contentHashCode()
@@ -434,6 +461,11 @@ class RustSkiaLyricsView @JvmOverloads constructor(
      * the render thread to draw it.
      */
     private fun rebuildSceneAndRender() {
+        if (stateUpdateDepth > 0) {
+            sceneRebuildPending = true
+            renderRequestPending = true
+            return
+        }
         if (width > 0 && height > 0) ensureScene(width, height)
         requestRender()
     }
@@ -482,6 +514,10 @@ class RustSkiaLyricsView @JvmOverloads constructor(
      * callbacks create it).
      */
     private fun requestRender() {
+        if (stateUpdateDepth > 0) {
+            renderRequestPending = true
+            return
+        }
         val handler = renderHandler ?: return
         if (wakePending.compareAndSet(false, true)) {
             handler.post(wakeRunnable)

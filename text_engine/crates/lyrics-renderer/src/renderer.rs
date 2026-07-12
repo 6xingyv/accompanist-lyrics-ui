@@ -1006,6 +1006,16 @@ struct PreparedRow {
     min_x: f32,
     max_x: f32,
     glyphs: Vec<PreparedGlyph>,
+    syllable_segments: Vec<PreparedSyllableSegment>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PreparedSyllableSegment {
+    syllable_index: usize,
+    min_x: f32,
+    max_x: f32,
+    progress_start: f32,
+    progress_end: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -1054,6 +1064,8 @@ struct MeasuredSyllable {
     word_id: usize,
     content: String,
     use_awesome: bool,
+    allow_break_before: bool,
+    char_offset_in_syllable: usize,
     text: PreparedText,
     phonetic: Option<PreparedText>,
     width: f32,
@@ -2883,6 +2895,8 @@ mod tests {
                 word_id: 0,
                 content: "oversized".to_string(),
                 use_awesome: false,
+                allow_break_before: false,
+                char_offset_in_syllable: 0,
                 text: test_text(42.0),
                 phonetic: None,
                 width: 140.0,
@@ -2962,6 +2976,144 @@ mod tests {
         for (index, row) in text.rows.iter().enumerate() {
             assert!(row.width <= 150.5, "row overflowed: {row:?}");
             assert!((row.y - index as f32 * 28.0).abs() < 0.01);
+        }
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn oversized_syllable_wraps_inside_karaoke_layout() {
+        let mut renderer = LyricsRenderer::new();
+        renderer.font_system.db_mut().load_system_fonts();
+        if renderer.font_system.db().is_empty() {
+            return;
+        }
+
+        // Apple line-timed TTML (itunes:timing="Line") reaches the renderer as
+        // one karaoke syllable spanning the complete parent line, as in Lie - NF.
+        let json = r#"{
+            "width": 190,
+            "height": 220,
+            "style": {
+                "typography": {
+                    "normalFontSize": 20.0,
+                    "normalLineHeight": 28.0
+                },
+                "spacing": {
+                    "horizontalPadding": 10.0,
+                    "linePadding": 6.0,
+                    "focusTopOffset": 20.0
+                },
+                "blur": { "enabled": false },
+                "showTranslation": false,
+                "showPhonetic": false
+            },
+            "lines": [{
+                "kind": "karaoke",
+                "sourceIndex": 0,
+                "clusterIndex": 0,
+                "clusterRole": "main",
+                "start": 686,
+                "end": 5110,
+                "isAccompaniment": false,
+                "alignment": "start",
+                "translation": null,
+                "phonetic": null,
+                "syllables": [{
+                    "content": "I heard you told your friends that I'm just not your type",
+                    "start": 686,
+                    "end": 5110,
+                    "phonetic": null
+                }]
+            }, {
+                "kind": "karaoke",
+                "sourceIndex": 1,
+                "clusterIndex": 1,
+                "clusterRole": "main",
+                "start": 6000,
+                "end": 7000,
+                "isAccompaniment": false,
+                "alignment": "start",
+                "translation": null,
+                "phonetic": null,
+                "syllables": [{
+                    "content": "Ohh",
+                    "start": 6000,
+                    "end": 7000,
+                    "phonetic": null
+                }]
+            }, {
+                "kind": "karaoke",
+                "sourceIndex": 2,
+                "clusterIndex": 2,
+                "clusterRole": "main",
+                "start": 8000,
+                "end": 10000,
+                "isAccompaniment": false,
+                "alignment": "start",
+                "translation": null,
+                "phonetic": null,
+                "syllables": [{
+                    "content": "antidisestablishmentarianism",
+                    "start": 8000,
+                    "end": 10000,
+                    "phonetic": null
+                }]
+            }]
+        }"#;
+        let scene: LyricsScene = serde_json::from_str(json).unwrap();
+        let prepared = renderer.prepare_scene(scene).unwrap();
+        let line = prepared.lines.first().unwrap();
+        let PreparedLineKind::Karaoke {
+            text, syllables, ..
+        } = &line.kind
+        else {
+            panic!("oversized syllable should remain karaoke text");
+        };
+
+        assert_eq!(syllables.len(), 1, "source timing must remain one syllable");
+        assert!(
+            text.rows.len() > 1,
+            "expected wrapped rows, got {:?}",
+            text.rows
+        );
+        assert!((text.height - text.rows.len() as f32 * 28.0).abs() < 0.01);
+        for row in &text.rows {
+            assert!(row.width <= 170.5, "row overflowed: {row:?}");
+            assert!(
+                row.syllable_segments
+                    .iter()
+                    .all(|segment| segment.syllable_index == 0),
+                "wrapped fragments must retain the source syllable timing"
+            );
+        }
+        let segments = text
+            .rows
+            .iter()
+            .flat_map(|row| row.syllable_segments.iter())
+            .collect::<Vec<_>>();
+        assert_eq!(segments.first().map(|segment| segment.progress_start), Some(0.0));
+        assert_eq!(segments.last().map(|segment| segment.progress_end), Some(1.0));
+        assert!(segments.windows(2).all(|pair| {
+            (pair[0].progress_end - pair[1].progress_start).abs() < 0.001
+        }));
+
+        let PreparedLineKind::Karaoke { text: short, .. } = &prepared.lines[1].kind else {
+            panic!("short syllable should remain karaoke text");
+        };
+        assert_eq!(short.rows.len(), 1, "Ohh should not be split unnecessarily");
+
+        let PreparedLineKind::Karaoke {
+            text: unspaced, ..
+        } = &prepared.lines[2].kind
+        else {
+            panic!("unspaced syllable should remain karaoke text");
+        };
+        assert!(
+            unspaced.rows.len() > 1,
+            "oversized unspaced syllable should wrap at grapheme boundaries"
+        );
+        for row in &unspaced.rows {
+            assert!(row.width <= 170.5, "unspaced row overflowed: {row:?}");
         }
     }
 

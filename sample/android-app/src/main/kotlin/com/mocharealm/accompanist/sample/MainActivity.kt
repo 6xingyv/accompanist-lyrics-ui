@@ -22,12 +22,10 @@ class MainActivity : ComponentActivity() {
         startService(intent)
 
         enableEdgeToEdge(
-            navigationBarStyle = SystemBarStyle.auto(
-                Color.Transparent.toArgb(),
+            navigationBarStyle = SystemBarStyle.dark(
                 Color.Transparent.toArgb()
             ),
-            statusBarStyle = SystemBarStyle.auto(
-                Color.Transparent.toArgb(),
+            statusBarStyle = SystemBarStyle.dark(
                 Color.Transparent.toArgb()
             )
         )

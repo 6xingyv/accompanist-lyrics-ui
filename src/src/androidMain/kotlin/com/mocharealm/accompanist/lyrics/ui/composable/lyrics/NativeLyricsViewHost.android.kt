@@ -66,7 +66,9 @@ internal actual fun NativeLyricsViewHost(
 ) {
     val density = LocalDensity.current
     val fontResourceBytes = rememberFontResourceBytes(fontResource)
-    val style = config.toSceneStyle(density)
+    val style = remember(config, density.density, density.fontScale) {
+        config.toSceneStyle(density)
+    }
     // Convert the artwork to a downscaled pixel copy once per bitmap.
     val backgroundArt = remember(backgroundArtwork) { backgroundArtwork?.toBackgroundArt() }
     val layoutDirection = LocalLayoutDirection.current
@@ -96,8 +98,12 @@ internal actual fun NativeLyricsViewHost(
     }
 
     AndroidView(
-        factory = { context -> RustSkiaLyricsView(context).apply { applyAll() } },
-        update = { view -> view.applyAll() },
+        factory = { context ->
+            RustSkiaLyricsView(context).apply {
+                applyStateUpdate { applyAll() }
+            }
+        },
+        update = { view -> view.applyStateUpdate { applyAll() } },
         modifier = modifier.fillMaxSize()
     )
 }

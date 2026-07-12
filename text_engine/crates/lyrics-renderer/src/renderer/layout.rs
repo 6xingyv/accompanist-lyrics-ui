@@ -702,6 +702,15 @@ impl LyricsRenderer {
                 )
             })
             .collect::<Vec<_>>();
+        let measured = self.split_oversized_karaoke_syllables(
+            measured,
+            width,
+            font_size,
+            line_height,
+            phonetic_font_size,
+            phonetic_line_height,
+            space_width,
+        );
 
         let wrapped = self.calculate_balanced_lines(&measured, width, font_size, line_height);
         self.position_karaoke_wrapped_lines(
@@ -795,12 +804,117 @@ impl LyricsRenderer {
             word_id,
             content: content.to_string(),
             use_awesome,
+            allow_break_before: false,
+            char_offset_in_syllable: 0,
             first_baseline: text.first_baseline,
             height: text.height,
             text: draw_text,
             phonetic: phonetic_text,
             width,
         }
+    }
+
+    /// Break a syllable that is wider than the lyric column into render-only
+    /// fragments. Every fragment keeps the original syllable index/word id, so
+    /// timing and karaoke animation still come from the source syllable. We prefer
+    /// whitespace/punctuation boundaries and fall back to Unicode grapheme
+    /// boundaries for languages that do not use spaces.
+    pub(super) fn split_oversized_karaoke_syllables(
+        &mut self,
+        measured: Vec<MeasuredSyllable>,
+        available_width: f32,
+        font_size: f32,
+        line_height: f32,
+        phonetic_font_size: f32,
+        phonetic_line_height: f32,
+        space_width: f32,
+    ) -> Vec<MeasuredSyllable> {
+        let mut result = Vec::with_capacity(measured.len());
+        for layout in measured {
+            let grapheme_boundaries = layout
+                .content
+                .grapheme_indices(true)
+                .map(|(offset, grapheme)| offset + grapheme.len())
+                .collect::<Vec<_>>();
+            if layout.width <= available_width
+                || grapheme_boundaries.len() <= 1
+                // A phonetic annotation belongs to the complete syllable. Until
+                // annotations themselves have row-aware layout, keep that pair
+                // intact rather than duplicating or dropping the annotation.
+                || layout.phonetic.is_some()
+            {
+                result.push(layout);
+                continue;
+            }
+
+            let mut start = 0usize;
+            let mut first_fragment = true;
+            while start < layout.content.len() {
+                let mut last_fit = None;
+                let mut preferred_fit = None;
+
+                for &end in grapheme_boundaries.iter().filter(|&&end| end > start) {
+                    let content = &layout.content[start..end];
+                    let candidate = self.measure_karaoke_syllable(
+                        layout.index,
+                        layout.word_id,
+                        false,
+                        content,
+                        None,
+                        font_size,
+                        line_height,
+                        false,
+                        phonetic_font_size,
+                        phonetic_line_height,
+                        space_width,
+                    );
+                    if candidate.width <= available_width {
+                        last_fit = Some(end);
+                        if content.chars().next_back().is_some_and(|ch| {
+                            ch.is_whitespace() || is_punctuation_or_space(&ch.to_string())
+                        }) {
+                            preferred_fit = Some(end);
+                        }
+                    } else {
+                        // A single grapheme can itself be wider than the viewport;
+                        // it is the smallest safe unit and must remain intact.
+                        if last_fit.is_none() {
+                            last_fit = Some(end);
+                        }
+                        break;
+                    }
+                }
+
+                let chosen_end = if last_fit == Some(layout.content.len()) {
+                    last_fit
+                } else {
+                    preferred_fit.or(last_fit)
+                };
+                let Some(end) = chosen_end else {
+                    break;
+                };
+                let content = &layout.content[start..end];
+                let mut fragment = self.measure_karaoke_syllable(
+                    layout.index,
+                    layout.word_id,
+                    layout.use_awesome,
+                    content,
+                    None,
+                    font_size,
+                    line_height,
+                    false,
+                    phonetic_font_size,
+                    phonetic_line_height,
+                    space_width,
+                );
+                fragment.allow_break_before = !first_fragment;
+                fragment.char_offset_in_syllable = layout.content[..start].chars().count();
+                result.push(fragment);
+                first_fragment = false;
+                start = end;
+            }
+        }
+        result
     }
 
     pub(super) fn prepare_awesome_syllable_text(
@@ -839,6 +953,7 @@ impl LyricsRenderer {
                 min_x: 0.0,
                 max_x: x_offset,
                 glyphs,
+                syllable_segments: Vec::new(),
             }],
             height: line_height,
             first_baseline: first_baseline.unwrap_or(line_height),
@@ -881,7 +996,10 @@ impl LyricsRenderer {
         for i in 1..=n {
             let mut current_line_width = 0.0f32;
             for j in (1..=i).rev() {
-                if j > 1 && syllable_layouts[j - 2].word_id == syllable_layouts[j - 1].word_id {
+                if j > 1
+                    && syllable_layouts[j - 2].word_id == syllable_layouts[j - 1].word_id
+                    && !syllable_layouts[j - 1].allow_break_before
+                {
                     current_line_width += syllable_layouts[j - 1].width;
                     if current_line_width > available_width {
                         break;
@@ -954,7 +1072,7 @@ impl LyricsRenderer {
             let mut current_word_id = first.word_id;
             let mut current_word_group = Vec::new();
             for layout in syllable_layouts {
-                if layout.word_id != current_word_id {
+                if layout.word_id != current_word_id || layout.allow_break_before {
                     word_groups.push(current_word_group);
                     current_word_group = Vec::new();
                     current_word_id = layout.word_id;
@@ -1109,6 +1227,13 @@ impl LyricsRenderer {
         let mut rows = Vec::new();
         let mut first_baseline = None;
         let mut bounds_by_word = HashMap::<usize, (f32, f32, f32)>::new();
+        let mut total_width_by_syllable = HashMap::<usize, f32>::new();
+        for line in &wrapped_lines {
+            for layout in &line.syllables {
+                *total_width_by_syllable.entry(layout.index).or_insert(0.0) += layout.width;
+            }
+        }
+        let mut positioned_width_by_syllable = HashMap::<usize, f32>::new();
         let has_phonetic_in_block = wrapped_lines.iter().any(|line| {
             line.syllables
                 .iter()
@@ -1146,6 +1271,7 @@ impl LyricsRenderer {
             };
             let mut current_x = start_x;
             let mut row_glyphs = Vec::new();
+            let mut syllable_segments = Vec::<PreparedSyllableSegment>::new();
 
             for layout in wrapped_line.syllables {
                 let position_x = current_x;
@@ -1155,6 +1281,33 @@ impl LyricsRenderer {
                 if let Some(syllable) = syllables.get_mut(layout.index) {
                     syllable.layout_x = position_x;
                     syllable.layout_width = layout.width;
+                }
+                let segment_max_x = position_x + layout.width;
+                let total_syllable_width = total_width_by_syllable
+                    .get(&layout.index)
+                    .copied()
+                    .unwrap_or(layout.width)
+                    .max(1.0);
+                let positioned_width = positioned_width_by_syllable
+                    .entry(layout.index)
+                    .or_insert(0.0);
+                let progress_start = (*positioned_width / total_syllable_width).clamp(0.0, 1.0);
+                *positioned_width += layout.width;
+                let progress_end = (*positioned_width / total_syllable_width).clamp(0.0, 1.0);
+                if let Some(segment) = syllable_segments.last_mut().filter(|segment| {
+                    segment.syllable_index == layout.index
+                        && (segment.max_x - position_x).abs() < 0.5
+                }) {
+                    segment.max_x = segment_max_x;
+                    segment.progress_end = progress_end;
+                } else {
+                    syllable_segments.push(PreparedSyllableSegment {
+                        syllable_index: layout.index,
+                        min_x: position_x,
+                        max_x: segment_max_x,
+                        progress_start,
+                        progress_end,
+                    });
                 }
 
                 bounds_by_word
@@ -1174,6 +1327,7 @@ impl LyricsRenderer {
                         glyph.physical.x += shift_x;
                         glyph.physical.y += shift_y;
                         glyph.x += position_x;
+                        glyph.animation_char_index += layout.char_offset_in_syllable as f32;
                         row_glyphs.push(glyph);
                     }
                 }
@@ -1206,6 +1360,7 @@ impl LyricsRenderer {
                 min_x: start_x,
                 max_x: start_x + wrapped_line.total_width,
                 glyphs: row_glyphs,
+                syllable_segments,
             });
         }
 
@@ -1352,6 +1507,7 @@ impl LyricsRenderer {
                 min_x: 0.0,
                 max_x: run.line_w,
                 glyphs,
+                syllable_segments: Vec::new(),
             });
         }
 

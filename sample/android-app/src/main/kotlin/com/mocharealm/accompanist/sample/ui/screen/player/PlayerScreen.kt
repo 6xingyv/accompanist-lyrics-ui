@@ -7,46 +7,26 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
-import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.animateContentSize
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.MarqueeSpacing
-import androidx.compose.foundation.background
 import androidx.compose.foundation.basicMarquee
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.captionBar
-import androidx.compose.foundation.layout.captionBarPadding
 import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.union
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.statusBars
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.Icon
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -58,10 +38,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.CompositingStrategy
@@ -83,20 +61,13 @@ import com.mocharealm.accompanist.lyrics.core.model.synced.SyncedLine
 import com.mocharealm.accompanist.lyrics.ui.composable.lyrics.KaraokeLyricsView
 import com.mocharealm.accompanist.sample.Res
 import com.mocharealm.accompanist.sample.empty
-import com.mocharealm.accompanist.sample.ic_ellipsis
 import com.mocharealm.accompanist.sample.sf_pro
-import com.mocharealm.accompanist.sample.ui.adaptive.LocalWindowLayoutType
-import com.mocharealm.accompanist.sample.ui.adaptive.WindowLayoutType
 import com.mocharealm.accompanist.sample.ui.composable.ModalScaffold
-import com.mocharealm.accompanist.sample.ui.composable.background.FlowingLightBackground
 import com.mocharealm.accompanist.sample.ui.screen.share.ShareContext
 import com.mocharealm.accompanist.sample.ui.screen.share.ShareScreen
 import com.mocharealm.accompanist.sample.ui.screen.share.ShareViewModel
-import com.mocharealm.accompanist.sample.ui.theme.SFPro
-import com.mocharealm.gaze.capsule.ContinuousRoundedRectangle
 import kotlinx.coroutines.launch
 import org.jetbrains.compose.resources.imageResource
-import org.jetbrains.compose.resources.painterResource
 import org.koin.compose.viewmodel.koinViewModel
 import java.io.File
 
@@ -137,32 +108,12 @@ fun PlayerScreen(
                 ShareScreen(it, shareViewModel = shareViewModel)
             }
         ) {
-            when (LocalWindowLayoutType.current) {
-                WindowLayoutType.Phone -> {
-                    // Phone: a single full-bleed GPU surface renders the mesh-gradient
-                    // background AND the lyrics (audio-reactive); the top bar overlays
-                    // it. No separate Compose background layer.
-                    MobilePlayerScreen(
-                        currentPositionProvider, // 3. 传入 Provider
-                        playerViewModel,
-                        shareViewModel,
-                        uiState
-                    )
-                }
-
-                else -> {
-                    FlowingLightBackground(
-                        state = uiState.backgroundState,
-                        modifier = Modifier.fillMaxSize()
-                    )
-                    PadPlayerScreen(
-                        currentPositionProvider, // 3. 传入 Provider
-                        playerViewModel,
-                        shareViewModel,
-                        uiState
-                    )
-                }
-            }
+            NativePlayerScreen(
+                currentPositionProvider,
+                playerViewModel,
+                shareViewModel,
+                uiState
+            )
 
             if (uiState.showSelectionDialog) {
                 SongSelectionDialog(
@@ -183,7 +134,7 @@ fun PlayerScreen(
 }
 
 @Composable
-fun BoxScope.MobilePlayerScreen(
+fun NativePlayerScreen(
     animatedPosition: () -> Int,
     playerViewModel: PlayerViewModel,
     shareViewModel: ShareViewModel,
@@ -246,99 +197,6 @@ fun BoxScope.MobilePlayerScreen(
         onControlsClick = { playerViewModel.onOpenSongSelection() },
         modifier = Modifier.fillMaxSize()
     )
-}
-
-@Composable
-fun PadPlayerScreen(
-    animatedPosition: () -> Int,
-    playerViewModel: PlayerViewModel,
-    shareViewModel: ShareViewModel,
-    uiState: PlayerUiState
-) {
-    Row(
-        Modifier
-            .captionBarPadding()
-            .statusBarsPadding()
-            .fillMaxWidth()
-            .animateContentSize(),
-        horizontalArrangement = Arrangement.Center,
-    ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center,
-            modifier = Modifier
-                .fillMaxWidth(0.4f)
-                .fillMaxHeight()
-                .padding(start = 100.dp)
-                .padding(top = 28.dp)
-        ) {
-            Image(
-                uiState.backgroundState.bitmap ?: imageResource(Res.drawable.empty),
-                null,
-                Modifier
-                    .border(
-                        1.dp,
-                        Color.White.copy(0.2f),
-                        ContinuousRoundedRectangle(12.dp)
-                    )
-                    .clip(ContinuousRoundedRectangle(12.dp))
-                    .fillMaxWidth()
-                    .aspectRatio(1f)
-            )
-            Spacer(
-                Modifier
-                    .fillMaxWidth()
-                    .height(28.dp)
-            )
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                PlayerMetadata(
-                    uiState.currentMusicItem?.label ?: "Unknown Title",
-                    uiState.currentMusicItem?.artist ?: "Unknown"
-                )
-                PlayerControls(onOpenSongSelection = { playerViewModel.onOpenSongSelection() })
-            }
-
-        }
-        AnimatedVisibility(uiState.lyrics != null) {
-            val cover =
-                (uiState.backgroundState.bitmap
-                    ?: imageResource(Res.drawable.empty)).asAndroidBitmap()
-            PlayerLyrics(
-                lyrics = uiState.lyrics,
-                currentPosition = animatedPosition,
-                onSeekTo = { playerViewModel.seekTo(it) },
-                onShare = { line ->
-                    uiState.lyrics?.let { lyrics ->
-                        playerViewModel.onShareRequested()
-                        val context = ShareContext(
-                            lyrics = lyrics.copy(lines = lyrics.lines.map { line ->
-                                when (line) {
-                                    is KaraokeLine -> line
-                                    is SyncedLine -> line.toKaraokeLine()
-                                    else -> null
-                                }
-                            }.filterNotNull()),
-                            initialLine = line,
-                            backgroundState = uiState.backgroundState,
-                            title = uiState.currentMusicItem?.label ?: "Unknown Title",
-                            artist = uiState.currentMusicItem?.artist ?: "Unknown",
-                            cover = cover
-                        )
-                        shareViewModel.prepareForSharing(context)
-                        playerViewModel.onShareRequested()
-                    }
-                },
-                modifier = Modifier
-                    .padding(horizontal = 12.dp)
-                    .padding(start = 60.dp, end = 60.dp)
-                    .weight(1f)
-            )
-        }
-    }
 }
 
 @Composable
@@ -567,34 +425,6 @@ fun PlayerMetadata(
 }
 
 @Composable
-fun PlayerControls(
-    onOpenSongSelection: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    Row(
-        modifier = modifier.graphicsLayer { blendMode = BlendMode.Plus },
-        horizontalArrangement = Arrangement.spacedBy(16.dp)
-    ) {
-        Box(
-            Modifier
-                .clip(CircleShape)
-                .background(Color.White.copy(0.1f))
-                .clickable(onClick = onOpenSongSelection)
-                .padding(4.dp),
-        ) {
-            Icon(
-                painterResource(Res.drawable.ic_ellipsis),
-                null,
-                Modifier
-                    .size(20.dp)
-                    .align(Alignment.Center),
-                tint = Color.White
-            )
-        }
-    }
-}
-
-@Composable
 fun PlayerLyrics(
     lyrics: SyncedLyrics?,
     currentPosition: () -> Int,
@@ -610,18 +440,6 @@ fun PlayerLyrics(
     onControlsClick: (() -> Unit)? = null,
 ) {
     if (lyrics == null) return
-
-    // In full-bleed mode the surface renders (and composites) its own background, so
-    // it must NOT sit in an additive Compose layer. The overlay case (pad, over the
-    // blurred background) keeps the additive-plus glow.
-    val lyricsModifier = if (backgroundArtwork != null) {
-        modifier
-    } else {
-        modifier.graphicsLayer {
-            compositingStrategy = CompositingStrategy.Offscreen
-            blendMode = BlendMode.Plus
-        }
-    }
 
     KaraokeLyricsView(
         lyrics = lyrics,
@@ -639,7 +457,7 @@ fun PlayerLyrics(
                 onShare(it)
             }
         },
-        modifier = lyricsModifier,
+        modifier = modifier,
         fontResource = Res.font.sf_pro,
         backgroundArtwork = backgroundArtwork,
         contentPadding = contentPadding,

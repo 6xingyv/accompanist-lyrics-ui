@@ -948,32 +948,33 @@ fn active_edge_for_row(
     }
 
     let mut edge = if is_rtl { row_max_x } else { row_min_x };
-    let mut last_syllable_index = None;
-    for glyph in &row.glyphs {
-        if glyph.is_phonetic {
-            continue;
-        }
-        let Some(index) = glyph.syllable_index else {
+    for segment in &row.syllable_segments {
+        let Some(syllable) = syllables.get(segment.syllable_index) else {
             continue;
         };
-        if last_syllable_index == Some(index) {
-            continue;
-        }
-        last_syllable_index = Some(index);
-        let Some(syllable) = syllables.get(index) else {
-            continue;
-        };
-        let left = origin_x + syllable.layout_x;
-        let right = left + syllable.layout_width;
+        let left = origin_x + segment.min_x;
+        let right = origin_x + segment.max_x;
+        let segment_width = segment.max_x - segment.min_x;
         if current_time_ms >= syllable.end {
             edge = if is_rtl { left } else { right };
         } else if current_time_ms >= syllable.start {
             let duration = (syllable.end - syllable.start).max(1) as f32;
             let progress = ((current_time_ms - syllable.start) as f32 / duration).clamp(0.0, 1.0);
+            if progress >= segment.progress_end {
+                edge = if is_rtl { left } else { right };
+                continue;
+            }
+            if progress <= segment.progress_start {
+                edge = if is_rtl { right } else { left };
+                break;
+            }
+            let segment_progress = ((progress - segment.progress_start)
+                / (segment.progress_end - segment.progress_start).max(f32::EPSILON))
+            .clamp(0.0, 1.0);
             edge = if is_rtl {
-                right - syllable.layout_width * progress
+                right - segment_width * segment_progress
             } else {
-                left + syllable.layout_width * progress
+                left + segment_width * segment_progress
             };
             break;
         }
@@ -989,20 +990,18 @@ fn row_x_bounds(row: &PreparedRow, origin_x: f32) -> Option<(f32, f32)> {
 }
 
 fn row_first_time(row: &PreparedRow, syllables: &[PreparedSyllable]) -> i32 {
-    row.glyphs
+    row.syllable_segments
         .iter()
-        .filter(|glyph| !glyph.is_phonetic)
-        .filter_map(|glyph| glyph.syllable_index.and_then(|index| syllables.get(index)))
+        .filter_map(|segment| syllables.get(segment.syllable_index))
         .map(|syllable| syllable.start)
         .min()
         .unwrap_or(0)
 }
 
 fn row_last_time(row: &PreparedRow, syllables: &[PreparedSyllable]) -> i32 {
-    row.glyphs
+    row.syllable_segments
         .iter()
-        .filter(|glyph| !glyph.is_phonetic)
-        .filter_map(|glyph| glyph.syllable_index.and_then(|index| syllables.get(index)))
+        .filter_map(|segment| syllables.get(segment.syllable_index))
         .map(|syllable| syllable.end)
         .max()
         .unwrap_or(0)

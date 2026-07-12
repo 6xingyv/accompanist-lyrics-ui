@@ -795,12 +795,13 @@ pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeTextE
     if len < expected {
         return;
     }
-    let mut buf = vec![0i32; expected];
-    if env.get_int_array_region(pixels, 0, &mut buf).is_err() {
+    // jint and u32 are both 32-bit. Fill the final ARGB buffer directly instead
+    // of allocating jint storage and mapping it into a second Vec<u32>.
+    let mut argb = vec![0u32; expected];
+    let jint_view = std::slice::from_raw_parts_mut(argb.as_mut_ptr() as *mut i32, expected);
+    if env.get_int_array_region(pixels, 0, jint_view).is_err() {
         return;
     }
-    // ARGB_8888 ints → u32 (0xAARRGGBB).
-    let argb: Vec<u32> = buf.iter().map(|&v| v as u32).collect();
     with_engine_mut(handle, (), |engine| {
         engine.set_background_art(&argb, width as usize, height as usize, seed as u32);
     });
