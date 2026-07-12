@@ -6,9 +6,23 @@ use super::*;
 
 const WIDE_MIN_ASPECT_RATIO: f32 = 1.3;
 const WIDE_MIN_WIDTH: f32 = 1024.0;
+const WIDE_MAX_SCALE_WIDTH: f32 = 1600.0;
+const WIDE_MIN_SCALE_HEIGHT: f32 = 512.0;
+const WIDE_MAX_SCALE_HEIGHT: f32 = 1000.0;
 const WIDE_TEXT_SCALE: f32 = 1.2;
-const WIDE_LYRICS_LAYOUT_SCALE: f32 = 1.4;
+const WIDE_MAX_LYRICS_LAYOUT_SCALE: f32 = 1.4;
 const WIDE_FOCUS_Y_RATIO: f32 = 0.4;
+
+#[inline]
+pub(super) fn wide_lyrics_layout_scale(width: f32, height: f32) -> f32 {
+    let width_progress = ((width - WIDE_MIN_WIDTH) / (WIDE_MAX_SCALE_WIDTH - WIDE_MIN_WIDTH))
+        .clamp(0.0, 1.0);
+    let height_progress =
+        ((height - WIDE_MIN_SCALE_HEIGHT) / (WIDE_MAX_SCALE_HEIGHT - WIDE_MIN_SCALE_HEIGHT))
+            .clamp(0.0, 1.0);
+    let progress = width_progress.min(height_progress);
+    1.0 + progress * (WIDE_MAX_LYRICS_LAYOUT_SCALE - 1.0)
+}
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct ResolvedPlayerChrome {
@@ -58,7 +72,7 @@ pub(super) fn resolve_player_chrome(scene: &mut LyricsScene) -> ResolvedPlayerCh
         lyrics_clip_right: safe_right,
         landscape_player,
         lyrics_layout_scale: if landscape_player {
-            WIDE_LYRICS_LAYOUT_SCALE
+            wide_lyrics_layout_scale(width, height)
         } else {
             1.0
         },

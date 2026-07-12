@@ -2700,6 +2700,15 @@ mod tests {
     }
 
     #[test]
+    fn wide_lyrics_scale_grows_with_viewport_and_caps_at_one_point_four() {
+        assert!((layout::wide_lyrics_layout_scale(1024.0, 512.0) - 1.0).abs() < 0.001);
+        assert!((layout::wide_lyrics_layout_scale(1312.0, 756.0) - 1.2).abs() < 0.001);
+        assert!((layout::wide_lyrics_layout_scale(1600.0, 1000.0) - 1.4).abs() < 0.001);
+        assert!((layout::wide_lyrics_layout_scale(2400.0, 1080.0) - 1.4).abs() < 0.001);
+        assert!((layout::wide_lyrics_layout_scale(2048.0, 512.0) - 1.0).abs() < 0.001);
+    }
+
+    #[test]
     fn wide_player_scene_uses_decompiled_default_geometry() {
         let json = r#"{
             "width":1600,"height":1000,"contentTop":140,"contentBottom":16,
@@ -2757,7 +2766,7 @@ mod tests {
         let bar = scene.top_bar.as_ref().expect("short wide player chrome");
 
         assert!(chrome.landscape_player);
-        assert!((chrome.lyrics_layout_scale - 1.4).abs() < 0.01);
+        assert!((chrome.lyrics_layout_scale - 1.0).abs() < 0.01);
         assert!((chrome.focus_y.expect("short wide focus y") - 204.8).abs() < 0.01);
         assert!((visible_focus_y - 204.8).abs() < 0.01);
         assert!((bar.thumb_left - 375.0).abs() < 0.01);
