@@ -197,6 +197,13 @@ pub fn set_sample_rate(sample_rate: f32) {
     }
 }
 
+/// Feed loudness from a native audio engine that already owns decoded PCM.
+pub fn set_external_loudness(loudness: f32) {
+    if let Ok(mut state) = ANALYSIS_STATE.lock() {
+        state.loudness = loudness.max(0.0);
+    }
+}
+
 /// Latest analysis metrics (read on the render thread each frame).
 pub fn current_metrics() -> Metrics {
     ANALYSIS_STATE

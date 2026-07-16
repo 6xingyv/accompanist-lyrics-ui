@@ -7,12 +7,14 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.unit.dp
 import com.mocharealm.accompanist.lyrics.core.model.ISyncedLine
 import com.mocharealm.accompanist.lyrics.core.model.SyncedLyrics
+import kotlinx.coroutines.flow.Flow
 import org.jetbrains.compose.resources.FontResource
 
 @Composable
 internal expect fun NativeLyricsViewHost(
     lyrics: SyncedLyrics,
     currentPosition: () -> Int,
+    positionUpdates: Flow<Int>? = null,
     onLineClicked: (ISyncedLine) -> Unit,
     onLinePressed: (ISyncedLine) -> Unit,
     modifier: Modifier,
@@ -26,6 +28,8 @@ internal expect fun NativeLyricsViewHost(
     backgroundArtwork: ImageBitmap? = null,
     contentPadding: PaddingValues = PaddingValues(0.dp),
     isPlaying: Boolean = true,
+    isPlayingUpdates: Flow<Boolean>? = null,
+    useMusicFoundationClock: Boolean = false,
     backgroundReactive: Boolean = false,
     title: String? = null,
     artist: String? = null,

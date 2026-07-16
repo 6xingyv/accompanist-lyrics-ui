@@ -40,12 +40,17 @@ private const val CLOCK_RECONCILE_MS = 350.0
 private const val CLOCK_MAX_RATE = 2.5
 /** Clamp on a single frame's dt, so a stall doesn't lurch the clock. */
 private const val CLOCK_MAX_FRAME_MS = 64.0
+/** Keep the player surface bounded on high-refresh displays. */
+private const val TARGET_FRAME_INTERVAL_NANOS = 1_000_000_000L / 60L
+private const val FRAME_INTERVAL_TOLERANCE_NANOS = 1_000_000L
 
 class RustSkiaLyricsView @JvmOverloads constructor(
     context: Context,
     attrs: AttributeSet? = null,
     defStyleAttr: Int = 0
 ) : TextureView(context, attrs, defStyleAttr), TextureView.SurfaceTextureListener {
+    internal var retainNativeEngineOnDetach: Boolean = false
+
     private val engine = NativeTextEngine(2048, 2048).apply {
         // System fonts are now pulled in natively (NDK) inside configureFonts, so
         // we only hand over the user's primary font here.
@@ -105,6 +110,8 @@ class RustSkiaLyricsView @JvmOverloads constructor(
     private var backgroundReactive = false
     @Volatile
     private var isPlaying = false
+    @Volatile
+    private var useMusicFoundationClock = false
     // Content insets (view px). Vertical: `contentTopPx` is the SYSTEM top inset
     // (status + caption bar); the in-surface top bar (below) adds to it.
     // `contentBottomPx` is the navigation-bar inset. Horizontal: `contentLeftPx` /
@@ -134,10 +141,13 @@ class RustSkiaLyricsView @JvmOverloads constructor(
     // Render-thread-only state (never touched from the main thread).
     private var surfaceReady = false
     private var renderScheduled = false
+    private var lastPresentedFrameNanos = 0L
     // Coalesces main-thread wake-ups so a burst of setCurrentPosition / touch
     // events posts at most one Runnable to the render thread.
     private val wakePending = AtomicBoolean(false)
-    private val frameCallback = Choreographer.FrameCallback { doFrame() }
+    private val frameCallback = Choreographer.FrameCallback { frameTimeNanos ->
+        doFrame(frameTimeNanos)
+    }
     private val wakeRunnable = Runnable {
         wakePending.set(false)
         scheduleFrame()
@@ -200,7 +210,20 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         // of the heavy stutter whenever a FontResource was set. Reloading the font
         // (below) rebuilds the whole scene, so it must only happen when the font
         // actually changes.
-        if (configuredFontBytes === fontBytes && !engineClosed) return
+        if (!engineClosed) {
+            val configured = configuredFontBytes
+            if (configured === fontBytes) return
+            // The prewarmer and the eventual player composition can receive
+            // distinct ByteArray instances for the same resource. Compare only on
+            // that one identity miss; normal recompositions still take the O(1)
+            // branch above and never hash/scan the font repeatedly.
+            if (configured != null && fontBytes != null &&
+                configured.size == fontBytes.size && configured.contentEquals(fontBytes)
+            ) {
+                configuredFontBytes = fontBytes
+                return
+            }
+        }
 
         configuredFontBytes = fontBytes
         applyCurrentFontConfig()
@@ -414,6 +437,17 @@ class RustSkiaLyricsView @JvmOverloads constructor(
     }
 
     /**
+     * Let the render JNI read music-foundation's lock-free native clock directly.
+     * This is optional so lyrics-ui keeps working in hosts that do not bundle the
+     * playback engine.
+     */
+    fun setMusicFoundationClockEnabled(enabled: Boolean) {
+        if (useMusicFoundationClock == enabled) return
+        useMusicFoundationClock = enabled
+        requestRender()
+    }
+
+    /**
      * Render-thread clock tick: extrapolate the authoritative anchor to now, then ease
      * the smoothed [displayMs] toward it. A far jump (a real seek) snaps; otherwise the
      * rate is `base + gap/RECONCILE_MS` clamped to `[0, MAX_RATE]` — so when the anchor
@@ -527,8 +561,12 @@ class RustSkiaLyricsView @JvmOverloads constructor(
     /** Render thread only: schedule one frame on the next vsync (deduped). */
     private fun scheduleFrame() {
         if (renderScheduled || !surfaceReady) return
+        // Never mark a frame as scheduled unless a callback was actually posted.
+        // Choreographer is installed asynchronously on the render Looper; losing
+        // the first wake here would leave a newly attached surface parked forever.
+        val choreographer = renderChoreographer ?: return
         renderScheduled = true
-        renderChoreographer?.postFrameCallback(frameCallback)
+        choreographer.postFrameCallback(frameCallback)
     }
 
     /**
@@ -536,9 +574,18 @@ class RustSkiaLyricsView @JvmOverloads constructor(
      * the engine reports animation/scroll activity (return > 0). When it returns
      * 0 the loop parks until the main thread calls [requestRender] again.
      */
-    private fun doFrame() {
+    private fun doFrame(frameTimeNanos: Long) {
         renderScheduled = false
         if (!surfaceReady) return
+        val sinceLastPresent = frameTimeNanos - lastPresentedFrameNanos
+        if (
+            lastPresentedFrameNanos != 0L &&
+            sinceLastPresent < TARGET_FRAME_INTERVAL_NANOS - FRAME_INTERVAL_TOLERANCE_NANOS
+        ) {
+            scheduleFrame()
+            return
+        }
+        lastPresentedFrameNanos = frameTimeNanos
         applyPendingScrollOnRenderThread()
         // Arm the next vsync callback BEFORE the blocking present. eglSwapBuffers
         // (swapInterval 1) blocks the render thread until the next vsync, so posting
@@ -551,7 +598,11 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         scheduleFrame()
         val frameTimeMs = computeDisplayTimeMs()
         lastRenderedTimeMs = frameTimeMs
-        val result = engine.renderLyricsFrameToSurface(frameTimeMs)
+        val result = if (useMusicFoundationClock) {
+            engine.renderLyricsFrameToSurfaceFromMusicFoundation(frameTimeMs)
+        } else {
+            engine.renderLyricsFrameToSurface(frameTimeMs)
+        }
         if (result < 0) {
             // Surface lost — drop EGL. The Java Surface is released by the pending
             // onSurfaceTextureDestroyed handshake (or the next bind).
@@ -561,9 +612,11 @@ class RustSkiaLyricsView @JvmOverloads constructor(
             engine.clearRenderSurface()
             return
         }
-        if (result == 0) {
+        if (result == 0 && !(useMusicFoundationClock && isPlaying)) {
             // Engine idle — cancel the optimistically-armed callback and park until
-            // the next requestRender() wake (position tick / touch).
+            // the next requestRender() wake (position tick / touch). When the
+            // optional native clock is temporarily unavailable, the directly-pushed
+            // playback state keeps the fallback render-thread clock advancing.
             renderChoreographer?.removeFrameCallback(frameCallback)
             renderScheduled = false
         }
@@ -685,7 +738,17 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         super.onDetachedFromWindow()
         releaseRenderSurface()   // blocking EGL teardown on the render thread
         stopRenderThread()       // quitSafely + join → render thread is fully dead
-        engine.close()           // now safe on the main thread: no concurrent access
+        if (!retainNativeEngineOnDetach) closeNativeEngine()
+    }
+
+    internal fun disposeNativeEngineWhenDetached() {
+        retainNativeEngineOnDetach = false
+        if (!isAttachedToWindow) closeNativeEngine()
+    }
+
+    private fun closeNativeEngine() {
+        if (engineClosed) return
+        engine.close()           // safe after the render thread is fully stopped
         engineClosed = true
     }
 
@@ -707,7 +770,7 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         surfaceTexture.setDefaultBufferSize(frameWidth, frameHeight)
 
         val surface = Surface(surfaceTexture)
-        requestHighestRefreshRate(surface)
+        requestPlayerFrameRate(surface)
 
         // Acquire the native window here — this is the only step that needs a
         // JNIEnv, so it must stay on the main thread. Then hand the raw pointer to
@@ -726,6 +789,7 @@ class RustSkiaLyricsView @JvmOverloads constructor(
 
         val handler = ensureRenderThread()
         handler.post {
+            lastPresentedFrameNanos = 0L
             val ok = engine.setRenderSurfaceFromWindow(windowPtr, frameWidth, frameHeight)
             surfaceReady = ok
             if (ok) scheduleFrame()
@@ -735,18 +799,13 @@ class RustSkiaLyricsView @JvmOverloads constructor(
     }
 
     /**
-     * The lyrics animate continuously, so ask the system to run this surface at
-     * the display's highest refresh rate (e.g. 120Hz) instead of the default
-     * 60Hz. Hint only — the platform decides; it's a no-op on single-mode (60Hz)
-     * displays and on API < 30.
+     * Hint that this surface is intentionally capped at 60 FPS. The render loop
+     * also enforces the cap because the platform may choose a different mode.
      */
-    private fun requestHighestRefreshRate(surface: Surface) {
+    private fun requestPlayerFrameRate(surface: Surface) {
         if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.R) return
-        val maxRate = display?.supportedModes?.maxOfOrNull { it.refreshRate } ?: return
-        if (maxRate > 0f) {
-            runCatching {
-                surface.setFrameRate(maxRate, Surface.FRAME_RATE_COMPATIBILITY_DEFAULT)
-            }
+        runCatching {
+            surface.setFrameRate(60f, Surface.FRAME_RATE_COMPATIBILITY_DEFAULT)
         }
     }
 
@@ -764,6 +823,7 @@ class RustSkiaLyricsView @JvmOverloads constructor(
             handler.postAtFrontOfQueue {
                 surfaceReady = false
                 renderScheduled = false
+                lastPresentedFrameNanos = 0L
                 renderChoreographer?.removeFrameCallback(frameCallback)
                 engine.clearRenderSurface() // drops the EGL renderer (frees context + window)
                 latch.countDown()
@@ -820,7 +880,7 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         val sceneHeight = renderHeight.takeIf { it > 0 } ?: height
         if (sceneDirty) {
             val (topBarWire, resolvedContentTop) = resolveTopBar(sceneWidth)
-            engine.setLyricsScene(
+            engine.setLyricsSceneDirect(
                 sceneLyrics.toSceneJson(
                     sceneWidth,
                     sceneHeight,
@@ -849,8 +909,11 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         if (width <= 0 || height <= 0) return null
         if (!ensureScene(width, height)) return null
 
-        val lineIndex =
-            engine.hitTestLyricsLine(x * renderScale, y * renderScale, lastRenderedTimeMs)
+        // The native music-foundation clock is deliberately independent of the
+        // Kotlin fallback clock. Ask JNI for the time of its last drawn frame so
+        // hit-testing still matches the visible rows immediately after a seek.
+        val hitTestTimeMs = if (useMusicFoundationClock) -1 else lastRenderedTimeMs
+        val lineIndex = engine.hitTestLyricsLine(x * renderScale, y * renderScale, hitTestTimeMs)
         return lineIndex.takeIf { it in sceneLyrics.lines.indices }
     }
 

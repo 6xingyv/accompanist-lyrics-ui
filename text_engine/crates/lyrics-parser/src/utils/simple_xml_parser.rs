@@ -125,13 +125,21 @@ impl SimpleXmlParser {
 
 fn append_text(element: &mut MutableElement, raw_text: &str) {
     if raw_text.trim().is_empty() {
+        let inline_prefix = raw_text
+            .split(['\n', '\r'])
+            .next()
+            .unwrap_or_default();
+        let has_semantic_inline_space = inline_prefix.contains(' ') || inline_prefix.contains('\t');
         let is_layout_whitespace = raw_text.contains('\n') || raw_text.contains('\r');
-        if !is_layout_whitespace {
+        if !is_layout_whitespace || has_semantic_inline_space {
             element.children.push(XmlElement {
                 name: "#text".to_string(),
                 attributes: Vec::new(),
                 children: Vec::new(),
-                text: raw_text.to_string(),
+                // A newline after an explicit inline space is common in pretty
+                // printed Apple TTML. It is still the separator between words;
+                // normalize the formatting run to one visible space.
+                text: " ".to_string(),
             });
         }
         return;

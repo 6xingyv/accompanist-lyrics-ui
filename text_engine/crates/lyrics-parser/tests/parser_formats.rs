@@ -67,6 +67,18 @@ fn ttml_parser_reads_span_syllables() {
     assert_eq!(line.syllables[0].content, "Hel");
 }
 
+#[test]
+fn ttml_parser_preserves_inline_space_before_pretty_print_newline() {
+    let content = "<tt xmlns=\"http://www.w3.org/ns/ttml\"><body><div><p begin=\"00:00.000\" end=\"00:01.000\"><span begin=\"00:00.000\" end=\"00:00.500\">Get</span> \n    <span begin=\"00:00.500\" end=\"00:01.000\">around</span></p></div></body></tt>";
+    let lyrics = TtmlParser::default().parse(content);
+
+    let SyncedLineKind::MainKaraoke(line) = &lyrics.lines[0] else {
+        panic!("expected karaoke");
+    };
+    assert_eq!(line.syllables[0].content, "Get ");
+    assert_eq!(line.syllables[1].content, "around");
+}
+
 /// Port of lyrics-core `TTMLParserTest.testAlignmentFlipsOnPersonChangeWithGroupTransparent`.
 #[test]
 fn ttml_alignment_flips_on_person_change_with_group_transparent() {

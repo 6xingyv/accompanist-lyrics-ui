@@ -7,6 +7,7 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.unit.dp
 import com.mocharealm.accompanist.lyrics.core.model.ISyncedLine
 import com.mocharealm.accompanist.lyrics.core.model.SyncedLyrics
+import kotlinx.coroutines.flow.Flow
 import org.jetbrains.compose.resources.FontResource
 
 /**
@@ -30,6 +31,7 @@ import org.jetbrains.compose.resources.FontResource
 fun KaraokeLyricsView(
     lyrics: SyncedLyrics,
     currentPosition: () -> Int,
+    positionUpdates: Flow<Int>? = null,
     onLineClicked: (ISyncedLine) -> Unit,
     onLinePressed: (ISyncedLine) -> Unit,
     modifier: Modifier = Modifier,
@@ -38,6 +40,8 @@ fun KaraokeLyricsView(
     backgroundArtwork: ImageBitmap? = null,
     contentPadding: PaddingValues = PaddingValues(0.dp),
     isPlaying: Boolean = true,
+    isPlayingUpdates: Flow<Boolean>? = null,
+    useMusicFoundationClock: Boolean = false,
     backgroundReactive: Boolean = false,
     title: String? = null,
     artist: String? = null,
@@ -46,6 +50,7 @@ fun KaraokeLyricsView(
     NativeLyricsViewHost(
         lyrics = lyrics,
         currentPosition = currentPosition,
+        positionUpdates = positionUpdates,
         onLineClicked = onLineClicked,
         onLinePressed = onLinePressed,
         modifier = modifier,
@@ -54,6 +59,8 @@ fun KaraokeLyricsView(
         backgroundArtwork = backgroundArtwork,
         contentPadding = contentPadding,
         isPlaying = isPlaying,
+        isPlayingUpdates = isPlayingUpdates,
+        useMusicFoundationClock = useMusicFoundationClock,
         backgroundReactive = backgroundReactive,
         title = title,
         artist = artist,

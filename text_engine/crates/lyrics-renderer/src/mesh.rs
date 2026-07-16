@@ -280,13 +280,13 @@ impl MeshGradient {
 
         // Preserve the original soft mesh appearance. Dither uses four-pixel cells so
         // enough of it survives this blur to break 8-bit bands without reading as grain.
-        let sigma = (width.min(height) * 0.005).clamp(2.0, 12.0);
+        // let sigma = (width.min(height) * 0.0025).clamp(1.0, 2.0);
         let mut layer_paint = Paint::default();
-        if let Some(filter) =
-            image_filters::blur((sigma, sigma), None, None, CropRect::NO_CROP_RECT)
-        {
-            layer_paint.set_image_filter(filter);
-        }
+        // if let Some(filter) =
+        //     image_filters::blur((sigma, sigma), None, None, CropRect::NO_CROP_RECT)
+        // {
+        //     layer_paint.set_image_filter(filter);
+        // }
         canvas.save_layer(&SaveLayerRec::default().paint(&layer_paint));
         // Positions are in `p*1.4` space (breathing already applied); the matrix only
         // does aspect correction + clip→pixel.
@@ -318,8 +318,9 @@ fn mesh_to_pixel_matrix(width: f32, height: f32) -> Matrix {
 
 /// Max edge for the top-bar thumbnail image. Very large SMTC / media-session art
 /// (3k–4k) can fail Skia's `Image::from_raster_data` / GPU upload; the thumb is
-/// only drawn at ~68dp so 512px is plenty.
-const THUMBNAIL_MAX_EDGE: usize = 512;
+/// also becomes the large artwork in wide mode, so retain enough resolution for
+/// high-density displays while still bounding pathological media-session images.
+const THUMBNAIL_MAX_EDGE: usize = 1024;
 /// Some media sessions publish extremely small covers (even 1×1 placeholders).
 /// Upload a modestly upscaled copy so every backend can sample it as a thumbnail.
 const THUMBNAIL_MIN_EDGE: usize = 32;

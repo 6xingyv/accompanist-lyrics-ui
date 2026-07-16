@@ -6,6 +6,9 @@ import android.os.ParcelFileDescriptor
 import android.view.Surface
 import java.io.File
 import java.nio.ByteBuffer
+import java.nio.CharBuffer
+import java.nio.charset.StandardCharsets
+import kotlin.math.ceil
 
 actual class NativeTextEngine actual constructor(
     actual val atlasWidth: Int,
@@ -19,6 +22,7 @@ actual class NativeTextEngine actual constructor(
     }
 
     private var handle: Long = nativeCreate(atlasWidth, atlasHeight)
+    private var sceneUtf8Buffer: ByteBuffer = ByteBuffer.allocateDirect(64 * 1024)
 
     private var generationCounter: Int = 0
     actual internal val generation: Int
@@ -56,6 +60,21 @@ actual class NativeTextEngine actual constructor(
     actual fun setLyricsScene(sceneJson: String): String {
         ensureHandle()
         return nativeSetLyricsScene(handle, sceneJson)
+    }
+
+    /** Android renderer fast path: direct UTF-8 input and no unused JSON result. */
+    fun setLyricsSceneDirect(sceneJson: String): Boolean {
+        ensureHandle()
+        val encoder = StandardCharsets.UTF_8.newEncoder()
+        val required = ceil(sceneJson.length * encoder.maxBytesPerChar()).toInt().coerceAtLeast(4)
+        if (sceneUtf8Buffer.capacity() < required) {
+            sceneUtf8Buffer = ByteBuffer.allocateDirect(required.nextPowerOfTwo())
+        }
+        sceneUtf8Buffer.clear()
+        val result = encoder.encode(CharBuffer.wrap(sceneJson), sceneUtf8Buffer, true)
+        if (result.isError || encoder.flush(sceneUtf8Buffer).isError) return false
+        sceneUtf8Buffer.flip()
+        return nativeSetLyricsSceneDirect(handle, sceneUtf8Buffer, sceneUtf8Buffer.remaining())
     }
 
     actual fun getLyricsRendererMetrics(): String {
@@ -118,6 +137,16 @@ actual class NativeTextEngine actual constructor(
     fun renderLyricsFrameToSurface(currentTimeMs: Int): Int {
         ensureHandle()
         return nativeRenderLyricsFrameToSurface(handle, currentTimeMs)
+    }
+
+    /**
+     * Render with music-foundation's in-process native clock when available.
+     * The fallback keeps this renderer usable standalone and is used when the
+     * optional playback library is not part of the host app.
+     */
+    fun renderLyricsFrameToSurfaceFromMusicFoundation(fallbackTimeMs: Int): Int {
+        ensureHandle()
+        return nativeRenderLyricsFrameToSurfaceFromMusicFoundation(handle, fallbackTimeMs)
     }
 
     fun beginLyricsScroll() {
@@ -183,6 +212,16 @@ actual class NativeTextEngine actual constructor(
             handle = nativeCreate(atlasWidth, atlasHeight)
             generationCounter++
         }
+    }
+
+    private fun Int.nextPowerOfTwo(): Int {
+        var value = coerceAtLeast(1) - 1
+        value = value or (value shr 1)
+        value = value or (value shr 2)
+        value = value or (value shr 4)
+        value = value or (value shr 8)
+        value = value or (value shr 16)
+        return (value + 1).coerceAtLeast(1)
     }
 
     private fun loadPrimarySource(source: NativeFontSource): Boolean {
@@ -339,6 +378,11 @@ actual class NativeTextEngine actual constructor(
     private external fun nativeGetPendingUploads(handle: Long): String
     private external fun nativeGetAtlasSize(handle: Long): String
     private external fun nativeSetLyricsScene(handle: Long, sceneJson: String): String
+    private external fun nativeSetLyricsSceneDirect(
+        handle: Long,
+        sceneUtf8: ByteBuffer,
+        length: Int,
+    ): Boolean
     private external fun nativeGetLyricsRendererMetrics(handle: Long): String
     private external fun nativeProcessTextDirect(
         handle: Long,
@@ -372,6 +416,10 @@ actual class NativeTextEngine actual constructor(
     private external fun nativeRenderLyricsFrameToSurface(
         handle: Long,
         currentTimeMs: Int
+    ): Int
+    private external fun nativeRenderLyricsFrameToSurfaceFromMusicFoundation(
+        handle: Long,
+        fallbackTimeMs: Int,
     ): Int
 
     private external fun nativeBeginLyricsScroll(handle: Long)

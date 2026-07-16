@@ -1,7 +1,17 @@
-use jni::objects::{JByteBuffer, JObject, JString};
-use jni::sys::{jboolean, jbyteArray, jfloat, jint, jintArray, jlong};
+use jni::objects::{JByteBuffer, JObject, JString, ReleaseMode};
+use jni::sys::{jboolean, jbyteArray, jfloat, jint, jintArray, jlong, jobject};
 use jni::JNIEnv;
 use std::sync::Mutex;
+
+#[cfg(target_os = "android")]
+use std::sync::OnceLock;
+#[cfg(target_os = "android")]
+use std::time::{Duration, Instant};
+
+#[cfg(unix)]
+use std::io::Read;
+#[cfg(unix)]
+use std::os::fd::FromRawFd;
 
 #[cfg(target_os = "android")]
 use crate::android_gpu::AndroidGpuRenderer;
@@ -9,6 +19,14 @@ use lyrics_renderer::TextEngine;
 
 struct EngineState {
     engine: TextEngine,
+    /// Playback time used for the most recently submitted frame.  Android's
+    /// native music-foundation path owns the authoritative clock, so hit-tests
+    /// must use this rather than the Kotlin fallback clock.
+    last_rendered_time_ms: i32,
+    #[cfg(target_os = "android")]
+    background_reactive: bool,
+    #[cfg(target_os = "android")]
+    music_foundation_clock: MusicFoundationClock,
     #[cfg(target_os = "android")]
     gpu_renderer: Option<AndroidGpuRenderer>,
 }
@@ -17,6 +35,11 @@ impl EngineState {
     fn new(atlas_width: u32, atlas_height: u32) -> Self {
         Self {
             engine: TextEngine::new(atlas_width, atlas_height),
+            last_rendered_time_ms: 0,
+            #[cfg(target_os = "android")]
+            background_reactive: false,
+            #[cfg(target_os = "android")]
+            music_foundation_clock: MusicFoundationClock::default(),
             #[cfg(target_os = "android")]
             gpu_renderer: None,
         }
@@ -67,6 +90,170 @@ unsafe fn with_engine<R>(handle: jlong, fallback: R, f: impl FnOnce(&TextEngine)
         Ok(guard) => f(&guard.engine),
         Err(_) => fallback,
     }
+}
+
+// --- music-foundation native clock ------------------------------------------
+// music-foundation and text_engine are separate Android cdylibs. Resolve this
+// optional process-local C ABI once, then read the audio engine's atomics directly
+// from the lyrics render thread. This avoids AudioEngine.getPlaybackStatus() and
+// NativeTextEngine.setCurrentPosition() JNI round-trips for the lyrics clock.
+#[cfg(target_os = "android")]
+#[repr(C)]
+struct MfPlaybackClock {
+    position_ms: u64,
+    is_paused: u8,
+}
+
+/// The player publishes its frame counter from a lifecycle watcher (currently
+/// roughly 20 Hz). The render surface however runs at display cadence, so using
+/// those snapshots directly turns syllable progress into visible 50 ms steps.
+/// Keep a native monotonic anchor and only re-anchor for a real discontinuity.
+#[cfg(target_os = "android")]
+#[derive(Default)]
+struct MusicFoundationClock {
+    anchor_position_ms: f64,
+    anchor_at: Option<Instant>,
+    paused: bool,
+}
+
+#[cfg(target_os = "android")]
+impl MusicFoundationClock {
+    fn sample(&mut self, snapshot: &MfPlaybackClock) -> i32 {
+        let now = Instant::now();
+        let reported_position = snapshot.position_ms as f64;
+        let reported_paused = snapshot.is_paused != 0;
+
+        let Some(anchor_at) = self.anchor_at else {
+            self.anchor_position_ms = reported_position;
+            self.anchor_at = Some(now);
+            self.paused = reported_paused;
+            return reported_position.min(i32::MAX as f64) as i32;
+        };
+
+        let predicted_position = if self.paused {
+            self.anchor_position_ms
+        } else {
+            self.anchor_position_ms + now.duration_since(anchor_at).as_secs_f64() * 1000.0
+        };
+        let position_error = reported_position - predicted_position;
+        // music-foundation publishes a ~20 Hz audio-frame snapshot. Its normal
+        // publication lag stays below this threshold, whereas an adjacent-line
+        // tap can be a small *backward* seek. Treat both directions equally so
+        // an optimistic forward-only clock never ignores a nearby previous-line
+        // seek and leaves the scroll animation targeting the old line.
+        let is_seek_or_track_change = position_error.abs() > 120.0;
+
+        if reported_paused || self.paused || is_seek_or_track_change || position_error > 120.0 {
+            self.anchor_position_ms = reported_position;
+            self.anchor_at = Some(now);
+        }
+        self.paused = reported_paused;
+
+        let displayed_position = if reported_paused {
+            self.anchor_position_ms
+        } else {
+            self.anchor_position_ms
+                + now
+                    .duration_since(self.anchor_at.expect("clock anchor set"))
+                    .as_secs_f64()
+                    * 1000.0
+        };
+        displayed_position.clamp(0.0, i32::MAX as f64) as i32
+    }
+}
+
+#[cfg(target_os = "android")]
+type MfGetPlaybackClock = unsafe extern "C" fn(*mut MfPlaybackClock) -> bool;
+#[cfg(target_os = "android")]
+type MfGetAudioRms = unsafe extern "C" fn() -> f32;
+
+#[cfg(target_os = "android")]
+struct RetryingSymbol<T: Copy> {
+    value: OnceLock<T>,
+    retry_after: Mutex<Option<Instant>>,
+}
+
+#[cfg(target_os = "android")]
+impl<T: Copy> RetryingSymbol<T> {
+    const fn new() -> Self {
+        Self {
+            value: OnceLock::new(),
+            retry_after: Mutex::new(None),
+        }
+    }
+
+    fn get_or_try_init(&self, resolve: impl FnOnce() -> Option<T>) -> Option<T> {
+        if let Some(value) = self.value.get() {
+            return Some(*value);
+        }
+
+        let now = Instant::now();
+        {
+            let mut retry_after = self.retry_after.lock().ok()?;
+            if retry_after.is_some_and(|deadline| now < deadline) {
+                return None;
+            }
+            // Loading order differs between Android runtimes. A miss must not be
+            // cached forever, but retrying dlopen at render cadence is wasteful.
+            *retry_after = Some(now + Duration::from_secs(1));
+        }
+
+        let resolved = resolve()?;
+        let _ = self.value.set(resolved);
+        self.value.get().copied().or(Some(resolved))
+    }
+}
+
+#[cfg(target_os = "android")]
+static MF_GET_PLAYBACK_CLOCK: RetryingSymbol<MfGetPlaybackClock> = RetryingSymbol::new();
+#[cfg(target_os = "android")]
+static MF_GET_AUDIO_RMS: RetryingSymbol<MfGetAudioRms> = RetryingSymbol::new();
+
+#[cfg(target_os = "android")]
+fn resolve_mf_playback_clock() -> Option<MfGetPlaybackClock> {
+    let handle = unsafe { libc::dlopen(c"libjni_bridge.so".as_ptr(), libc::RTLD_NOW) };
+    if handle.is_null() {
+        return None;
+    }
+    let symbol = unsafe { libc::dlsym(handle, c"mf_get_playback_clock".as_ptr()) };
+    if symbol.is_null() {
+        unsafe { libc::dlclose(handle) };
+        return None;
+    }
+    // SAFETY: the exported music-foundation symbol has the exact C ABI declared
+    // above and `dlopen` keeps its owning library resident for this process.
+    Some(unsafe { std::mem::transmute::<*mut libc::c_void, MfGetPlaybackClock>(symbol) })
+}
+
+#[cfg(target_os = "android")]
+fn music_foundation_clock() -> Option<MfPlaybackClock> {
+    let get_clock = MF_GET_PLAYBACK_CLOCK.get_or_try_init(resolve_mf_playback_clock)?;
+    let mut clock = MfPlaybackClock {
+        position_ms: 0,
+        is_paused: 1,
+    };
+    if unsafe { get_clock(&mut clock) } {
+        Some(clock)
+    } else {
+        None
+    }
+}
+
+#[cfg(target_os = "android")]
+fn music_foundation_audio_rms() -> Option<f32> {
+    let get_rms = MF_GET_AUDIO_RMS.get_or_try_init(|| {
+        let handle = unsafe { libc::dlopen(c"libjni_bridge.so".as_ptr(), libc::RTLD_NOW) };
+        if handle.is_null() {
+            return None;
+        }
+        let symbol = unsafe { libc::dlsym(handle, c"mf_get_audio_rms".as_ptr()) };
+        if symbol.is_null() {
+            unsafe { libc::dlclose(handle) };
+            return None;
+        }
+        Some(unsafe { std::mem::transmute::<*mut libc::c_void, MfGetAudioRms>(symbol) })
+    })?;
+    Some(unsafe { get_rms() })
 }
 
 #[no_mangle]
@@ -341,6 +528,30 @@ pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeTextE
     });
     env.new_string(&json)
         .unwrap_or_else(|_| env.new_string("{}").unwrap())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeTextEngine_nativeSetLyricsSceneDirect(
+    env: JNIEnv,
+    _this: JObject,
+    handle: jlong,
+    scene_utf8: JByteBuffer,
+    length: jint,
+) -> jboolean {
+    if length <= 0 {
+        return 0;
+    }
+    let bytes = match env.get_direct_buffer_address(scene_utf8) {
+        Ok(bytes) if length as usize <= bytes.len() => &bytes[..length as usize],
+        _ => return 0,
+    };
+    let Ok(scene_json) = std::str::from_utf8(bytes) else {
+        return 0;
+    };
+    bool_to_jboolean(with_engine_mut(handle, false, |engine| {
+        let _ = engine.set_lyrics_scene_json(scene_json);
+        true
+    }))
 }
 
 #[no_mangle]
@@ -678,6 +889,7 @@ pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeTextE
             return -20;
         };
 
+        state.last_rendered_time_ms = current_time_ms;
         let mut render_result = 0;
         let present_result = gpu_renderer.draw_frame(|canvas| {
             render_result = state
@@ -687,6 +899,63 @@ pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeTextE
         state.gpu_renderer = Some(gpu_renderer);
         if let Err(error) = present_result {
             warn!("Failed to render Android GPU lyrics frame: {}", error);
+            return -21;
+        }
+        render_result
+    })
+}
+
+/// Render a frame against music-foundation's native playback atomics when that
+/// engine is present. `fallback_time_ms` keeps lyrics-ui usable as a standalone
+/// library (including the sample app) where no music-foundation cdylib is loaded.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeTextEngine_nativeRenderLyricsFrameToSurfaceFromMusicFoundation(
+    _env: JNIEnv,
+    _this: JObject,
+    handle: jlong,
+    fallback_time_ms: jint,
+) -> jint {
+    with_state_mut(handle, -1, |state| {
+        let Some(mut gpu_renderer) = state.gpu_renderer.take() else {
+            return -20;
+        };
+
+        let clock = music_foundation_clock();
+        let current_time_ms = if let Some(snapshot) = clock.as_ref() {
+            state.music_foundation_clock.sample(snapshot)
+        } else {
+            fallback_time_ms
+        };
+        state.last_rendered_time_ms = current_time_ms;
+        if let Some(snapshot) = clock {
+            state
+                .engine
+                .set_playback_state(snapshot.is_paused == 0, state.background_reactive);
+        }
+        if state.background_reactive {
+            if let Some(rms) = music_foundation_audio_rms() {
+                // music-foundation publishes a perceptual 0..1 visual envelope.
+                // The renderer's standalone FFT path stores loudness in a 0..6
+                // working range, so convert only once at this boundary.
+                let level = if rms.is_finite() {
+                    rms.clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                lyrics_renderer::audio::set_external_loudness(level * 6.0);
+            }
+        }
+
+        let mut render_result = 0;
+        let present_result = gpu_renderer.draw_frame(|canvas| {
+            render_result = state
+                .engine
+                .render_lyrics_frame_to_canvas(current_time_ms, canvas);
+        });
+        state.gpu_renderer = Some(gpu_renderer);
+        if let Err(error) = present_result {
+            warn!("Failed to render Android GPU lyrics surface: {}", error);
             return -21;
         }
         render_result
@@ -759,8 +1028,15 @@ pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeTextE
     y: jfloat,
     current_time_ms: jint,
 ) -> jint {
-    with_engine_mut(handle, -1, |engine| {
-        engine.hit_test_lyrics_line(x, y, current_time_ms)
+    with_state_mut(handle, -1, |state| {
+        // A negative value asks for the time of the last submitted frame. This
+        // keeps hit-testing and rendering on the same native music clock.
+        let time_ms = if current_time_ms < 0 {
+            state.last_rendered_time_ms
+        } else {
+            current_time_ms
+        };
+        state.engine.hit_test_lyrics_line(x, y, time_ms)
     })
 }
 
@@ -795,15 +1071,15 @@ pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeTextE
     if len < expected {
         return;
     }
-    // jint and u32 are both 32-bit. Fill the final ARGB buffer directly instead
-    // of allocating jint storage and mapping it into a second Vec<u32>.
-    let mut argb = vec![0u32; expected];
-    let jint_view = std::slice::from_raw_parts_mut(argb.as_mut_ptr() as *mut i32, expected);
-    if env.get_int_array_region(pixels, 0, jint_view).is_err() {
+    // Borrow/pin the Java pixels only for the synchronous mesh construction.
+    // MeshGradient consumes the slice before returning, so a permanent Rust copy
+    // at the JNI boundary is unnecessary. The VM may still choose to pin or copy.
+    let Ok(argb) = env.get_primitive_array_critical(pixels, ReleaseMode::NoCopyBack) else {
         return;
-    }
+    };
+    let pixels = std::slice::from_raw_parts(argb.as_ptr() as *const u32, expected);
     with_engine_mut(handle, (), |engine| {
-        engine.set_background_art(&argb, width as usize, height as usize, seed as u32);
+        engine.set_background_art(pixels, width as usize, height as usize, seed as u32);
     });
 }
 
@@ -826,8 +1102,16 @@ pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeTextE
     playing: jboolean,
     reactive: jboolean,
 ) {
-    with_engine_mut(handle, (), |engine| {
-        engine.set_playback_state(playing != 0, reactive != 0);
+    with_state_mut(handle, (), |state| {
+        #[cfg(target_os = "android")]
+        {
+            state.background_reactive = reactive != 0;
+            state
+                .engine
+                .set_playback_state(playing != 0, state.background_reactive);
+        }
+        #[cfg(not(target_os = "android"))]
+        state.engine.set_playback_state(playing != 0, reactive != 0);
     });
 }
 
@@ -875,4 +1159,103 @@ pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeAudio
     _class: JObject,
 ) {
     lyrics_renderer::audio::reset();
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeLyricsParser_nativeParseToWire(
+    env: JNIEnv,
+    _class: JObject,
+    content: JString,
+) -> jobject {
+    let Ok(content) = env.get_string(content) else {
+        return std::ptr::null_mut();
+    };
+    direct_buffer(&env, lyrics_parser::parse_wire(&content.to_string_lossy()))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeLyricsParser_nativeParseToPlainText(
+    env: JNIEnv,
+    _class: JObject,
+    content: JString,
+) -> jobject {
+    let Ok(content) = env.get_string(content) else {
+        return std::ptr::null_mut();
+    };
+    direct_buffer(
+        &env,
+        lyrics_parser::parse_plain_text(&content.to_string_lossy()).into_bytes(),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeLyricsParser_nativeParseFdToWire(
+    env: JNIEnv,
+    _class: JObject,
+    fd: jint,
+) -> jobject {
+    parse_fd(&env, fd, lyrics_parser::parse_wire)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeLyricsParser_nativeParseFdToPlainText(
+    env: JNIEnv,
+    _class: JObject,
+    fd: jint,
+) -> jobject {
+    parse_fd(&env, fd, |content| {
+        lyrics_parser::parse_plain_text(content).into_bytes()
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeLyricsParser_nativeReleaseBuffer(
+    env: JNIEnv,
+    _class: JObject,
+    buffer: JByteBuffer,
+) {
+    let Ok(bytes) = env.get_direct_buffer_address(buffer) else {
+        return;
+    };
+    if bytes.is_empty() {
+        return;
+    }
+    let slice = std::ptr::slice_from_raw_parts_mut(bytes.as_mut_ptr(), bytes.len());
+    drop(Box::from_raw(slice));
+}
+
+fn direct_buffer(env: &JNIEnv, bytes: Vec<u8>) -> jobject {
+    if bytes.is_empty() {
+        return std::ptr::null_mut();
+    }
+    let boxed = bytes.into_boxed_slice();
+    let raw = Box::into_raw(boxed);
+    match env.new_direct_byte_buffer(unsafe { &mut *raw }) {
+        Ok(buffer) => buffer.into_inner(),
+        Err(_) => {
+            unsafe { drop(Box::from_raw(raw)) };
+            std::ptr::null_mut()
+        }
+    }
+}
+
+#[cfg(unix)]
+fn parse_fd(env: &JNIEnv, fd: jint, parse: impl FnOnce(&str) -> Vec<u8>) -> jobject {
+    let duplicated_fd = unsafe { libc::dup(fd) };
+    if duplicated_fd < 0 {
+        return std::ptr::null_mut();
+    }
+    // Own only the duplicated descriptor. Dropping this File must never close the
+    // descriptor supplied by ParcelFileDescriptor on the Java side.
+    let mut file = unsafe { std::fs::File::from_raw_fd(duplicated_fd) };
+    let mut content = String::new();
+    if file.read_to_string(&mut content).is_err() {
+        return std::ptr::null_mut();
+    }
+    direct_buffer(env, parse(&content))
+}
+
+#[cfg(not(unix))]
+fn parse_fd(_env: &JNIEnv, _fd: jint, _parse: impl FnOnce(&str) -> Vec<u8>) -> jobject {
+    std::ptr::null_mut()
 }

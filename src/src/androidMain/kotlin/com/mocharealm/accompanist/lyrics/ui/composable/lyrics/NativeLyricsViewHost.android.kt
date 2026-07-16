@@ -1,15 +1,16 @@
 package com.mocharealm.accompanist.lyrics.ui.composable.lyrics
 
-import android.graphics.Bitmap
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.viewinterop.AndroidView
@@ -18,39 +19,14 @@ import com.mocharealm.accompanist.lyrics.core.model.SyncedLyrics
 import com.mocharealm.accompanist.lyrics.ui.renderer.RustSkiaLyricsView
 import com.mocharealm.accompanist.lyrics.ui.renderer.toSceneStyle
 import org.jetbrains.compose.resources.FontResource
-import kotlin.math.max
-
-/** Longest edge (px) of the artwork handed to the native mesh builder. It is
- * downscaled again to 32×32 inside the engine, so a small copy is plenty and keeps
- * the getPixels + JNI transfer cheap. */
-private const val BACKGROUND_ART_MAX_EDGE = 160
-
-private class BackgroundArt(val pixels: IntArray, val width: Int, val height: Int)
-
-private fun ImageBitmap.toBackgroundArt(): BackgroundArt {
-    val source = asAndroidBitmap()
-    val longest = max(source.width, source.height)
-    val scale = if (longest > BACKGROUND_ART_MAX_EDGE) {
-        BACKGROUND_ART_MAX_EDGE.toFloat() / longest
-    } else {
-        1f
-    }
-    val w = max(1, (source.width * scale).toInt())
-    val h = max(1, (source.height * scale).toInt())
-    val scaled = if (scale < 1f) {
-        Bitmap.createScaledBitmap(source, w, h, true)
-    } else {
-        source
-    }
-    val pixels = IntArray(scaled.width * scaled.height)
-    scaled.getPixels(pixels, 0, scaled.width, 0, 0, scaled.width, scaled.height)
-    return BackgroundArt(pixels, scaled.width, scaled.height)
-}
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.launch
 
 @Composable
 internal actual fun NativeLyricsViewHost(
     lyrics: SyncedLyrics,
     currentPosition: () -> Int,
+    positionUpdates: Flow<Int>?,
     onLineClicked: (ISyncedLine) -> Unit,
     onLinePressed: (ISyncedLine) -> Unit,
     modifier: Modifier,
@@ -59,18 +35,26 @@ internal actual fun NativeLyricsViewHost(
     backgroundArtwork: ImageBitmap?,
     contentPadding: PaddingValues,
     isPlaying: Boolean,
+    isPlayingUpdates: Flow<Boolean>?,
+    useMusicFoundationClock: Boolean,
     backgroundReactive: Boolean,
     title: String?,
     artist: String?,
     onControlsClick: (() -> Unit)?,
 ) {
+    val context = LocalContext.current
+    val nativeView = remember(context) { NativeLyricsViewPool.acquire(context) }
+    val scope = rememberCoroutineScope()
     val density = LocalDensity.current
     val fontResourceBytes = rememberFontResourceBytes(fontResource)
     val style = remember(config, density.density, density.fontScale) {
         config.toSceneStyle(density)
     }
-    // Convert the artwork to a downscaled pixel copy once per bitmap.
-    val backgroundArt = remember(backgroundArtwork) { backgroundArtwork?.toBackgroundArt() }
+    // Clef normally prepares this copy while loading the cover on Dispatchers.IO.
+    // Keep a fallback for other hosts that do not opt into explicit prewarming.
+    val backgroundArt = remember(backgroundArtwork) {
+        backgroundArtwork?.let(NativeLyricsArtworkPrewarmer::getOrPrepare)
+    }
     val layoutDirection = LocalLayoutDirection.current
     val contentTopPx = with(density) { contentPadding.calculateTopPadding().toPx() }
     val contentBottomPx = with(density) { contentPadding.calculateBottomPadding().toPx() }
@@ -78,32 +62,74 @@ internal actual fun NativeLyricsViewHost(
     val contentRightPx =
         with(density) { contentPadding.calculateRightPadding(layoutDirection).toPx() }
     val latestControlsClick by rememberUpdatedState(onControlsClick)
+    val latestLyrics by rememberUpdatedState(lyrics)
+    val latestLineClicked by rememberUpdatedState(onLineClicked)
+    val latestLinePressed by rememberUpdatedState(onLinePressed)
+    val nativeControlsClick = remember {
+        {
+            latestControlsClick?.invoke()
+            Unit
+        }
+    }
+    val nativeLineClicked = remember {
+        { index: Int ->
+            latestLyrics.lines.getOrNull(index)?.let { latestLineClicked(it) }
+            Unit
+        }
+    }
+    val nativeLinePressed = remember {
+        { index: Int ->
+            latestLyrics.lines.getOrNull(index)?.let { latestLinePressed(it) }
+            Unit
+        }
+    }
+
+    // Player position samples arrive independently of Compose. This keeps the
+    // native clock fresh for seeks and drift correction without re-running the
+    // AndroidView update block (and its configuration checks) every poll.
+    DisposableEffect(nativeView, positionUpdates) {
+        val positionJob = positionUpdates?.let { updates ->
+            scope.launch {
+                updates.collect { nativeView.setCurrentPosition(it) }
+            }
+        }
+        onDispose { positionJob?.cancel() }
+    }
+    DisposableEffect(nativeView, isPlayingUpdates, backgroundReactive) {
+        val playbackJob = isPlayingUpdates?.let { updates ->
+            scope.launch {
+                updates.collect { playing ->
+                    nativeView.setPlaybackState(playing, backgroundReactive)
+                }
+            }
+        }
+        onDispose { playbackJob?.cancel() }
+    }
 
     fun RustSkiaLyricsView.applyAll() {
         // Background art + insets + playback FIRST: a fresh view/engine picks them
         // up before the scene is built, and re-applies survive font reconfig.
         setBackgroundArt(backgroundArt?.pixels, backgroundArt?.width ?: 0, backgroundArt?.height ?: 0)
         setContentInsets(contentTopPx, contentBottomPx, contentLeftPx, contentRightPx)
+        setMusicFoundationClockEnabled(useMusicFoundationClock)
         setPlaybackState(isPlaying, backgroundReactive)
         setTopBar(title, artist)
-        setOnControlsClicked { latestControlsClick?.invoke() }
+        setOnControlsClicked(nativeControlsClick)
         configureFonts(fontResourceBytes)
         setStyle(style)
         setLyrics(lyrics)
         setCurrentPosition(currentPosition())
-        setLineInteractionCallbacks(
-            onLineClicked = { index -> lyrics.lines.getOrNull(index)?.let(onLineClicked) },
-            onLinePressed = { index -> lyrics.lines.getOrNull(index)?.let(onLinePressed) }
-        )
+        setLineInteractionCallbacks(nativeLineClicked, nativeLinePressed)
     }
 
     AndroidView(
         factory = { context ->
-            RustSkiaLyricsView(context).apply {
+            nativeView.apply {
                 applyStateUpdate { applyAll() }
             }
         },
         update = { view -> view.applyStateUpdate { applyAll() } },
+        onRelease = NativeLyricsViewPool::recycle,
         modifier = modifier.fillMaxSize()
     )
 }

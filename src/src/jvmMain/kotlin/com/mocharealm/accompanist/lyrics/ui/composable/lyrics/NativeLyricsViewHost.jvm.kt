@@ -11,12 +11,14 @@ import com.mocharealm.accompanist.lyrics.core.model.ISyncedLine
 import com.mocharealm.accompanist.lyrics.core.model.SyncedLyrics
 import com.mocharealm.accompanist.lyrics.ui.renderer.RustSkiaLyricsPanel
 import com.mocharealm.accompanist.lyrics.ui.renderer.toSceneStyle
+import kotlinx.coroutines.flow.Flow
 import org.jetbrains.compose.resources.FontResource
 
 @Composable
 internal actual fun NativeLyricsViewHost(
     lyrics: SyncedLyrics,
     currentPosition: () -> Int,
+    positionUpdates: Flow<Int>?,
     onLineClicked: (ISyncedLine) -> Unit,
     onLinePressed: (ISyncedLine) -> Unit,
     modifier: Modifier,
@@ -25,6 +27,8 @@ internal actual fun NativeLyricsViewHost(
     backgroundArtwork: ImageBitmap?,
     contentPadding: PaddingValues,
     isPlaying: Boolean,
+    isPlayingUpdates: Flow<Boolean>?,
+    useMusicFoundationClock: Boolean,
     backgroundReactive: Boolean,
     title: String?,
     artist: String?,
