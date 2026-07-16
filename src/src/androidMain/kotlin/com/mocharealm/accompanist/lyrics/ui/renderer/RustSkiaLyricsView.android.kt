@@ -22,6 +22,7 @@ import com.mocharealm.accompanist.lyrics.text.NativeTextEngine
 import androidx.compose.ui.unit.Density
 import com.mocharealm.accompanist.lyrics.ui.composable.lyrics.KaraokeLyricsConfig
 import com.mocharealm.accompanist.lyrics.ui.composable.lyrics.getFontSource
+import com.mocharealm.accompanist.lyrics.ui.diagnostics.LyricsUiDiagnostics
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -43,6 +44,10 @@ private const val CLOCK_MAX_FRAME_MS = 64.0
 /** Keep the player surface bounded on high-refresh displays. */
 private const val TARGET_FRAME_INTERVAL_NANOS = 1_000_000_000L / 60L
 private const val FRAME_INTERVAL_TOLERANCE_NANOS = 1_000_000L
+/** Some OEMs do not continuously dispatch vsync to a non-UI Looper. */
+private const val CHOREOGRAPHER_STALL_TIMEOUT_MS = 50L
+/** Recheck the native music-foundation clock without a Kotlin playback-state loop. */
+private const val NATIVE_CLOCK_IDLE_POLL_MS = 250L
 
 class RustSkiaLyricsView @JvmOverloads constructor(
     context: Context,
@@ -59,6 +64,13 @@ class RustSkiaLyricsView @JvmOverloads constructor(
                 primary = getFontSource(null, context),
                 fallbacks = emptyList()
             )
+        )
+    }
+
+    init {
+        LyricsUiDiagnostics.record(
+            "RustSkiaLyricsView",
+            "created sdk=${android.os.Build.VERSION.SDK_INT} manufacturer=${android.os.Build.MANUFACTURER} model=${android.os.Build.MODEL}",
         )
     }
 
@@ -142,12 +154,35 @@ class RustSkiaLyricsView @JvmOverloads constructor(
     private var surfaceReady = false
     private var renderScheduled = false
     private var lastPresentedFrameNanos = 0L
+    private var useHandlerFramePump = false
+    private var lastDiagnosticRenderKind = Int.MIN_VALUE
+    private var lastDiagnosticFrameLogNanos = 0L
     // Coalesces main-thread wake-ups so a burst of setCurrentPosition / touch
     // events posts at most one Runnable to the render thread.
     private val wakePending = AtomicBoolean(false)
-    private val frameCallback = Choreographer.FrameCallback { frameTimeNanos ->
+    private val frameCallback: Choreographer.FrameCallback = Choreographer.FrameCallback { frameTimeNanos ->
+        renderHandler?.removeCallbacks(choreographerWatchdog)
         doFrame(frameTimeNanos)
     }
+    private val handlerFrameRunnable: Runnable = Runnable {
+        doFrame(SystemClock.elapsedRealtimeNanos())
+    }
+    private val choreographerWatchdog: Runnable = Runnable {
+        if (!renderScheduled || !surfaceReady || useHandlerFramePump) return@Runnable
+        renderChoreographer?.removeFrameCallback(frameCallback)
+        renderScheduled = false
+        useHandlerFramePump = true
+        android.util.Log.w(
+            "RustSkiaLyricsView",
+            "render-thread Choreographer stalled; switching to Handler frame pump",
+        )
+        LyricsUiDiagnostics.record(
+            "frame-pump",
+            "Choreographer stalled after ${CHOREOGRAPHER_STALL_TIMEOUT_MS}ms; switching to Handler",
+        )
+        doFrame(SystemClock.elapsedRealtimeNanos())
+    }
+    private val nativeClockIdlePoll: Runnable = Runnable { scheduleFrame() }
     private val wakeRunnable = Runnable {
         wakePending.set(false)
         scheduleFrame()
@@ -420,6 +455,10 @@ class RustSkiaLyricsView @JvmOverloads constructor(
     /** Drive the background: `playing` gates the time flow, `reactive` the audio reactivity. */
     fun setPlaybackState(playing: Boolean, reactive: Boolean) {
         if (isPlaying == playing && backgroundReactive == reactive) return
+        LyricsUiDiagnostics.record(
+            "playback-input",
+            "playing=$playing reactive=$reactive nativeClock=$useMusicFoundationClock",
+        )
         if (isPlaying != playing) {
             // Fold the elapsed play time into the anchor before flipping play/pause,
             // so the clock resumes/freezes at the current position instead of a stale
@@ -444,6 +483,7 @@ class RustSkiaLyricsView @JvmOverloads constructor(
     fun setMusicFoundationClockEnabled(enabled: Boolean) {
         if (useMusicFoundationClock == enabled) return
         useMusicFoundationClock = enabled
+        LyricsUiDiagnostics.record("clock", "musicFoundationClockEnabled=$enabled")
         requestRender()
     }
 
@@ -505,18 +545,21 @@ class RustSkiaLyricsView @JvmOverloads constructor(
     }
 
     override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
+        LyricsUiDiagnostics.record("surface", "available ${width}x$height attached=$isAttachedToWindow")
         updateRenderTarget(width, height)
         sceneDirty = true
         bindRenderSurface(surface, width, height)
     }
 
     override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {
+        LyricsUiDiagnostics.record("surface", "sizeChanged ${width}x$height")
         updateRenderTarget(width, height)
         sceneDirty = true
         bindRenderSurface(surface, width, height)
     }
 
     override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
+        LyricsUiDiagnostics.record("surface", "destroyed")
         // Blocks until the render thread has torn down EGL and stopped touching the
         // surface, so returning true (which frees the SurfaceTexture) is safe.
         releaseRenderSurface()
@@ -561,12 +604,41 @@ class RustSkiaLyricsView @JvmOverloads constructor(
     /** Render thread only: schedule one frame on the next vsync (deduped). */
     private fun scheduleFrame() {
         if (renderScheduled || !surfaceReady) return
-        // Never mark a frame as scheduled unless a callback was actually posted.
-        // Choreographer is installed asynchronously on the render Looper; losing
-        // the first wake here would leave a newly attached surface parked forever.
-        val choreographer = renderChoreographer ?: return
+        val handler = renderHandler ?: return
+        handler.removeCallbacks(nativeClockIdlePoll)
+        if (useHandlerFramePump) {
+            renderScheduled = true
+            val now = SystemClock.elapsedRealtimeNanos()
+            val dueNanos = if (lastPresentedFrameNanos == 0L) {
+                now
+            } else {
+                lastPresentedFrameNanos + TARGET_FRAME_INTERVAL_NANOS
+            }
+            val delayMs = ((dueNanos - now).coerceAtLeast(0L) + 999_999L) / 1_000_000L
+            handler.postDelayed(handlerFrameRunnable, delayMs)
+            return
+        }
+
+        // Choreographer is installed asynchronously on the render Looper. If it is
+        // unavailable, immediately use the same Handler fallback as an OEM stall.
+        val choreographer = renderChoreographer
+        if (choreographer == null) {
+            useHandlerFramePump = true
+            scheduleFrame()
+            return
+        }
         renderScheduled = true
         choreographer.postFrameCallback(frameCallback)
+        handler.postDelayed(choreographerWatchdog, CHOREOGRAPHER_STALL_TIMEOUT_MS)
+    }
+
+    /** Render thread only: cancel either frame-pump implementation. */
+    private fun cancelScheduledFrame() {
+        renderChoreographer?.removeFrameCallback(frameCallback)
+        renderHandler?.removeCallbacks(choreographerWatchdog)
+        renderHandler?.removeCallbacks(handlerFrameRunnable)
+        renderHandler?.removeCallbacks(nativeClockIdlePoll)
+        renderScheduled = false
     }
 
     /**
@@ -575,6 +647,7 @@ class RustSkiaLyricsView @JvmOverloads constructor(
      * 0 the loop parks until the main thread calls [requestRender] again.
      */
     private fun doFrame(frameTimeNanos: Long) {
+        renderHandler?.removeCallbacks(choreographerWatchdog)
         renderScheduled = false
         if (!surfaceReady) return
         val sinceLastPresent = frameTimeNanos - lastPresentedFrameNanos
@@ -604,21 +677,41 @@ class RustSkiaLyricsView @JvmOverloads constructor(
             engine.renderLyricsFrameToSurface(frameTimeMs)
         }
         if (result < 0) {
+            LyricsUiDiagnostics.record(
+                "render",
+                "surface lost result=$result timeMs=$frameTimeMs handlerPump=$useHandlerFramePump",
+            )
             // Surface lost — drop EGL. The Java Surface is released by the pending
             // onSurfaceTextureDestroyed handshake (or the next bind).
             surfaceReady = false
-            renderChoreographer?.removeFrameCallback(frameCallback)
-            renderScheduled = false
+            cancelScheduledFrame()
             engine.clearRenderSurface()
             return
         }
-        if (result == 0 && !(useMusicFoundationClock && isPlaying)) {
-            // Engine idle — cancel the optimistically-armed callback and park until
-            // the next requestRender() wake (position tick / touch). When the
-            // optional native clock is temporarily unavailable, the directly-pushed
-            // playback state keeps the fallback render-thread clock advancing.
-            renderChoreographer?.removeFrameCallback(frameCallback)
-            renderScheduled = false
+        val renderKind = result.coerceIn(0, 1)
+        if (renderKind != lastDiagnosticRenderKind) {
+            lastDiagnosticRenderKind = renderKind
+            LyricsUiDiagnostics.record(
+                "render",
+                "activityChanged result=$result timeMs=$frameTimeMs nativeClock=$useMusicFoundationClock handlerPump=$useHandlerFramePump",
+            )
+        }
+        if (frameTimeNanos - lastDiagnosticFrameLogNanos >= 5_000_000_000L) {
+            lastDiagnosticFrameLogNanos = frameTimeNanos
+            LyricsUiDiagnostics.record(
+                "render",
+                "heartbeat result=$result timeMs=$frameTimeMs surfaceReady=$surfaceReady scheduled=$renderScheduled nativeClock=$useMusicFoundationClock handlerPump=$useHandlerFramePump",
+            )
+        }
+        if (result == 0) {
+            // Engine idle — cancel the optimistically-armed callback. A standalone
+            // renderer parks until requestRender(); the native music-foundation path
+            // polls slowly while paused/unavailable so playback can start the 60 FPS
+            // loop without a Kotlin playback-state round trip.
+            cancelScheduledFrame()
+            if (useMusicFoundationClock && surfaceReady) {
+                renderHandler?.postDelayed(nativeClockIdlePoll, NATIVE_CLOCK_IDLE_POLL_MS)
+            }
         }
         // result > 0: the callback armed above IS the next frame — keep it.
     }
@@ -767,6 +860,10 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         updateRenderTarget(width, height)
         val frameWidth = renderWidth.takeIf { it > 0 } ?: width
         val frameHeight = renderHeight.takeIf { it > 0 } ?: height
+        LyricsUiDiagnostics.record(
+            "surface",
+            "binding view=${width}x$height frame=${frameWidth}x$frameHeight scale=$renderScale",
+        )
         surfaceTexture.setDefaultBufferSize(frameWidth, frameHeight)
 
         val surface = Surface(surfaceTexture)
@@ -778,6 +875,7 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         // consumes windowPtr on both success and failure, so we never release it.
         val windowPtr = engine.acquireNativeWindow(surface)
         if (windowPtr == 0L) {
+            LyricsUiDiagnostics.record("surface", "acquireNativeWindow failed")
             surface.release()
             renderSurface = null
             return
@@ -790,8 +888,13 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         val handler = ensureRenderThread()
         handler.post {
             lastPresentedFrameNanos = 0L
+            useHandlerFramePump = false
             val ok = engine.setRenderSurfaceFromWindow(windowPtr, frameWidth, frameHeight)
             surfaceReady = ok
+            LyricsUiDiagnostics.record(
+                "surface",
+                "native surface bind ok=$ok frame=${frameWidth}x$frameHeight",
+            )
             if (ok) scheduleFrame()
             // On failure the window ref is already consumed; the stale Surface held
             // in renderSurface is released by the next releaseRenderSurface().
@@ -822,9 +925,9 @@ class RustSkiaLyricsView @JvmOverloads constructor(
             // the single-threaded Looper it still runs AFTER any in-flight doFrame.
             handler.postAtFrontOfQueue {
                 surfaceReady = false
-                renderScheduled = false
                 lastPresentedFrameNanos = 0L
-                renderChoreographer?.removeFrameCallback(frameCallback)
+                useHandlerFramePump = false
+                cancelScheduledFrame()
                 engine.clearRenderSurface() // drops the EGL renderer (frees context + window)
                 latch.countDown()
             }
@@ -919,6 +1022,26 @@ class RustSkiaLyricsView @JvmOverloads constructor(
 
     private fun applyCurrentFontConfig() {
         val fontBytes = configuredFontBytes
+        val shouldRebindSurface = isAvailable && width > 0 && height > 0
+
+        // NativeTextEngine.configureFonts() replaces the complete EngineState.
+        // In particular, that drops AndroidGpuRenderer on the calling thread. If
+        // a late Compose resource load changes the font after TextureView has
+        // attached, doing that here on the main thread violates EGL's thread
+        // affinity and leaves some Samsung drivers unable to create a second
+        // window surface. Always tear EGL down on the render thread first.
+        if (renderSurface != null || surfaceReady) {
+            LyricsUiDiagnostics.record(
+                "font",
+                "reconfigure: releasing active surface bytes=${fontBytes?.size ?: 0}",
+            )
+            releaseRenderSurface()
+        }
+
+        LyricsUiDiagnostics.record(
+            "font",
+            "applying bytes=${fontBytes?.size ?: 0} rebind=$shouldRebindSurface",
+        )
         // Only the user's primary font; system fonts come from the NDK pool that
         // configureFonts loads, and cosmic-text falls back by the scene's locale.
         engine.configureFonts(
@@ -936,7 +1059,7 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         // with the new font. configureFonts may have recreated the engine handle,
         // dropping the GPU renderer, so a rebind is required here.
         sceneDirty = true
-        if (isAvailable && width > 0 && height > 0) {
+        if (shouldRebindSurface) {
             surfaceTexture?.let { surfaceTexture ->
                 bindRenderSurface(surfaceTexture, width, height)
             }

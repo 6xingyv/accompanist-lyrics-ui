@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Accompanist Lyrics
+Comment=GPU-accelerated synchronized lyrics renderer
+Exec=desktop_lyrics
+Icon=accompanist-lyrics
+Terminal=false
+Categories=AudioVideo;Audio;Utility;
+StartupWMClass=desktop_lyrics
+X-AppImage-Name=Accompanist Lyrics

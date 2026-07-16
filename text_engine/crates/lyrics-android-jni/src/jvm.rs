@@ -1,8 +1,10 @@
 use jni::objects::{JByteBuffer, JObject, JString, ReleaseMode};
-use jni::sys::{jboolean, jbyteArray, jfloat, jint, jintArray, jlong, jobject};
+use jni::sys::{jboolean, jbyteArray, jfloat, jint, jintArray, jlong, jobject, jstring};
 use jni::JNIEnv;
 use std::sync::Mutex;
 
+#[cfg(target_os = "android")]
+use std::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 #[cfg(target_os = "android")]
 use std::sync::OnceLock;
 #[cfg(target_os = "android")]
@@ -208,9 +210,26 @@ impl<T: Copy> RetryingSymbol<T> {
 static MF_GET_PLAYBACK_CLOCK: RetryingSymbol<MfGetPlaybackClock> = RetryingSymbol::new();
 #[cfg(target_os = "android")]
 static MF_GET_AUDIO_RMS: RetryingSymbol<MfGetAudioRms> = RetryingSymbol::new();
+#[cfg(target_os = "android")]
+static MF_RESOLVE_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
+#[cfg(target_os = "android")]
+static MF_RESOLVE_SUCCESSES: AtomicU64 = AtomicU64::new(0);
+#[cfg(target_os = "android")]
+static MF_CLOCK_READ_CALLS: AtomicU64 = AtomicU64::new(0);
+#[cfg(target_os = "android")]
+static MF_CLOCK_READ_SUCCESSES: AtomicU64 = AtomicU64::new(0);
+#[cfg(target_os = "android")]
+static MF_CLOCK_LAST_POSITION_MS: AtomicU64 = AtomicU64::new(0);
+#[cfg(target_os = "android")]
+static MF_CLOCK_LAST_PAUSED: AtomicU32 = AtomicU32::new(1);
+#[cfg(target_os = "android")]
+static MF_RENDER_CALLS: AtomicU64 = AtomicU64::new(0);
+#[cfg(target_os = "android")]
+static MF_RENDER_LAST_RESULT: AtomicI32 = AtomicI32::new(0);
 
 #[cfg(target_os = "android")]
 fn resolve_mf_playback_clock() -> Option<MfGetPlaybackClock> {
+    MF_RESOLVE_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
     let handle = unsafe { libc::dlopen(c"libjni_bridge.so".as_ptr(), libc::RTLD_NOW) };
     if handle.is_null() {
         return None;
@@ -222,21 +241,41 @@ fn resolve_mf_playback_clock() -> Option<MfGetPlaybackClock> {
     }
     // SAFETY: the exported music-foundation symbol has the exact C ABI declared
     // above and `dlopen` keeps its owning library resident for this process.
+    MF_RESOLVE_SUCCESSES.fetch_add(1, Ordering::Relaxed);
     Some(unsafe { std::mem::transmute::<*mut libc::c_void, MfGetPlaybackClock>(symbol) })
 }
 
 #[cfg(target_os = "android")]
 fn music_foundation_clock() -> Option<MfPlaybackClock> {
+    MF_CLOCK_READ_CALLS.fetch_add(1, Ordering::Relaxed);
     let get_clock = MF_GET_PLAYBACK_CLOCK.get_or_try_init(resolve_mf_playback_clock)?;
     let mut clock = MfPlaybackClock {
         position_ms: 0,
         is_paused: 1,
     };
     if unsafe { get_clock(&mut clock) } {
+        MF_CLOCK_READ_SUCCESSES.fetch_add(1, Ordering::Relaxed);
+        MF_CLOCK_LAST_POSITION_MS.store(clock.position_ms, Ordering::Relaxed);
+        MF_CLOCK_LAST_PAUSED.store(u32::from(clock.is_paused), Ordering::Relaxed);
         Some(clock)
     } else {
         None
     }
+}
+
+#[cfg(target_os = "android")]
+fn renderer_diagnostics_snapshot() -> String {
+    format!(
+        "mf_symbol_resolve_attempts={}\nmf_symbol_resolve_successes={}\nmf_clock_read_calls={}\nmf_clock_read_successes={}\nmf_clock_last_position_ms={}\nmf_clock_last_paused={}\nmf_render_calls={}\nmf_render_last_result={}",
+        MF_RESOLVE_ATTEMPTS.load(Ordering::Relaxed),
+        MF_RESOLVE_SUCCESSES.load(Ordering::Relaxed),
+        MF_CLOCK_READ_CALLS.load(Ordering::Relaxed),
+        MF_CLOCK_READ_SUCCESSES.load(Ordering::Relaxed),
+        MF_CLOCK_LAST_POSITION_MS.load(Ordering::Relaxed),
+        MF_CLOCK_LAST_PAUSED.load(Ordering::Relaxed),
+        MF_RENDER_CALLS.load(Ordering::Relaxed),
+        MF_RENDER_LAST_RESULT.load(Ordering::Relaxed),
+    )
 }
 
 #[cfg(target_os = "android")]
@@ -916,6 +955,7 @@ pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeTextE
     handle: jlong,
     fallback_time_ms: jint,
 ) -> jint {
+    MF_RENDER_CALLS.fetch_add(1, Ordering::Relaxed);
     with_state_mut(handle, -1, |state| {
         let Some(mut gpu_renderer) = state.gpu_renderer.take() else {
             return -20;
@@ -958,8 +998,25 @@ pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeTextE
             warn!("Failed to render Android GPU lyrics surface: {}", error);
             return -21;
         }
+        MF_RENDER_LAST_RESULT.store(render_result, Ordering::Relaxed);
         render_result
     })
+}
+
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_ui_diagnostics_LyricsUiDiagnostics_nativeSnapshot(
+    env: JNIEnv,
+    _this: JObject,
+) -> jstring {
+    let snapshot = format!(
+        "{}\n\n-- buffered lyrics renderer logs --\n{}",
+        renderer_diagnostics_snapshot(),
+        crate::diagnostics_snapshot(),
+    );
+    env.new_string(snapshot)
+        .map(|value| value.into_inner())
+        .unwrap_or(std::ptr::null_mut())
 }
 
 #[no_mangle]
