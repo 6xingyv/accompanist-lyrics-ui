@@ -7,7 +7,8 @@
 
 use super::*;
 use skia_safe::{
-    ClipOp, Color4f, Contains, Font, Image, Paint, Path, PathBuilder, Point, Rect, SamplingOptions,
+    canvas::SaveLayerRec, ClipOp, Color4f, Contains, Font, Image, Paint, Path, PathBuilder, Point,
+    Rect, SamplingOptions,
 };
 
 const DESIGN_WIDTH: f32 = 393.0;
@@ -28,6 +29,7 @@ const INACTIVE_BG: Color4f = Color4f::new(0.847, 0.275, 0.451, 0.72);
 pub(crate) enum PlayerScreenInput {
     #[default]
     Lyrics,
+    Artwork,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -49,6 +51,8 @@ pub(super) struct PreparedPlayer {
     pub liked: bool,
     pub title: PreparedText,
     pub artist: PreparedText,
+    pub artwork_title: PreparedText,
+    pub artwork_artist: PreparedText,
     pub layout: PlayerLayout,
     icons: PlayerIcons,
 }
@@ -63,6 +67,7 @@ pub(super) struct PlayerLayout {
     pub progress_top: f32,
     pub transport_top: f32,
     pub nav_top: f32,
+    pub artwork_metadata_top: f32,
 }
 
 impl PlayerLayout {
@@ -73,6 +78,7 @@ impl PlayerLayout {
         let nav_top = (height - MODE_NAV_ROW * scale).max(body_top);
         let transport_top = (nav_top - TRANSPORT_ROW * scale).max(body_top);
         let progress_top = (transport_top - PROGRESS_ROW * scale).max(body_top);
+        let artwork_metadata_top = (progress_top - 96.0 * scale).max(header_top);
         Self {
             scale,
             width,
@@ -82,6 +88,7 @@ impl PlayerLayout {
             progress_top,
             transport_top,
             nav_top,
+            artwork_metadata_top,
         }
     }
 
@@ -106,10 +113,24 @@ impl PlayerLayout {
         Rect::from_xywh(x * self.scale, top, width * self.scale, height * self.scale)
     }
 
-    fn button_rect(self, button: PlayerButton) -> Rect {
+    fn button_rect(self, button: PlayerButton, screen: PlayerScreenInput) -> Rect {
         match button {
-            PlayerButton::Favorite => self.rect(277.0, 102.0, 48.0, 48.0),
-            PlayerButton::More => self.rect(321.0, 102.0, 48.0, 48.0),
+            PlayerButton::Favorite => {
+                let top = if screen == PlayerScreenInput::Artwork {
+                    self.artwork_metadata_top + 24.0 * self.scale
+                } else {
+                    102.0 * self.scale
+                };
+                self.bottom_rect(277.0, top, 48.0, 48.0)
+            }
+            PlayerButton::More => {
+                let top = if screen == PlayerScreenInput::Artwork {
+                    self.artwork_metadata_top + 24.0 * self.scale
+                } else {
+                    102.0 * self.scale
+                };
+                self.bottom_rect(321.0, top, 48.0, 48.0)
+            }
             PlayerButton::Previous => {
                 self.bottom_rect(69.5, self.transport_top + 35.0 * self.scale, 64.0, 72.0)
             }
@@ -128,6 +149,139 @@ impl PlayerLayout {
             PlayerButton::Queue => {
                 self.bottom_rect(281.0, self.nav_top + 13.0 * self.scale, 64.0, 56.0)
             }
+        }
+    }
+
+    fn compact_artwork_rect(self) -> Rect {
+        self.rect(32.0, 90.0, 72.0, 72.0)
+    }
+
+    fn full_artwork_rect(self) -> Rect {
+        let region_top = self.header_top;
+        let region_height = (self.artwork_metadata_top - region_top).max(1.0);
+        let size = (self.width - 48.0 * self.scale)
+            .min(region_height - 24.0 * self.scale)
+            .max(1.0);
+        Rect::from_xywh(
+            (self.width - size) * 0.5,
+            region_top + (region_height - size) * 0.5,
+            size,
+            size,
+        )
+    }
+}
+
+const SCREEN_TRANSITION_SECONDS: f32 = 0.42;
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct PlayerTransitionSample {
+    pub from: PlayerScreenInput,
+    pub to: PlayerScreenInput,
+    pub progress: f32,
+    pub active: bool,
+}
+
+impl PlayerTransitionSample {
+    pub(super) fn settled(screen: PlayerScreenInput) -> Self {
+        Self {
+            from: screen,
+            to: screen,
+            progress: 1.0,
+            active: false,
+        }
+    }
+
+    pub(super) fn content_transform(self, screen: PlayerScreenInput) -> (f32, f32) {
+        if !self.active {
+            return if screen == self.to {
+                (1.0, 1.0)
+            } else {
+                (0.0, 0.94)
+            };
+        }
+        if screen == self.from {
+            let progress = (self.progress / 0.58).clamp(0.0, 1.0);
+            let eased = ease_out_cubic(progress);
+            return (1.0 - eased, 1.0 - 0.06 * eased);
+        }
+        if screen == self.to {
+            let progress = ((self.progress - 0.30) / 0.70).clamp(0.0, 1.0);
+            let eased = smooth_step(progress);
+            return (eased, 0.94 + 0.06 * eased);
+        }
+        (0.0, 0.94)
+    }
+
+    pub(super) fn artwork_progress(self) -> f32 {
+        let progress = smooth_step(self.progress);
+        match (self.from, self.to) {
+            (PlayerScreenInput::Lyrics, PlayerScreenInput::Artwork) => progress,
+            (PlayerScreenInput::Artwork, PlayerScreenInput::Lyrics) => 1.0 - progress,
+            (_, PlayerScreenInput::Artwork) => 1.0,
+            _ => 0.0,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(super) struct PlayerTransitionState {
+    current: PlayerScreenInput,
+    from: PlayerScreenInput,
+    to: PlayerScreenInput,
+    started_at: Option<Instant>,
+}
+
+impl Default for PlayerTransitionState {
+    fn default() -> Self {
+        Self {
+            current: PlayerScreenInput::Lyrics,
+            from: PlayerScreenInput::Lyrics,
+            to: PlayerScreenInput::Lyrics,
+            started_at: None,
+        }
+    }
+}
+
+impl PlayerTransitionState {
+    pub(super) fn set_target(
+        &mut self,
+        previous: Option<PlayerScreenInput>,
+        target: Option<PlayerScreenInput>,
+    ) {
+        let Some(target) = target else {
+            self.started_at = None;
+            return;
+        };
+        let from = previous.unwrap_or(target);
+        if from == target {
+            self.current = target;
+            self.from = target;
+            self.to = target;
+            self.started_at = None;
+            return;
+        }
+        self.current = from;
+        self.from = from;
+        self.to = target;
+        self.started_at = Some(Instant::now());
+    }
+
+    pub(super) fn sample(&mut self, now: Instant) -> PlayerTransitionSample {
+        let Some(started_at) = self.started_at else {
+            return PlayerTransitionSample::settled(self.current);
+        };
+        let progress =
+            ((now - started_at).as_secs_f32() / SCREEN_TRANSITION_SECONDS).clamp(0.0, 1.0);
+        if progress >= 1.0 {
+            self.current = self.to;
+            self.started_at = None;
+            return PlayerTransitionSample::settled(self.current);
+        }
+        PlayerTransitionSample {
+            from: self.from,
+            to: self.to,
+            progress,
+            active: true,
         }
     }
 }
@@ -164,21 +318,37 @@ pub(super) struct PlayerInteractionState {
 }
 
 impl PlayerInteractionState {
-    pub(super) fn press(&mut self, layout: PlayerLayout, x: f32, y: f32) -> i32 {
-        let hit = BUTTONS
-            .into_iter()
-            .find(|button| layout.button_rect(*button).contains(Point::new(x, y)));
+    pub(super) fn press(
+        &mut self,
+        layout: PlayerLayout,
+        screen: PlayerScreenInput,
+        x: f32,
+        y: f32,
+    ) -> i32 {
+        let hit = BUTTONS.into_iter().find(|button| {
+            layout
+                .button_rect(*button, screen)
+                .contains(Point::new(x, y))
+        });
         self.pressed = hit;
         self.pressed_at = hit.map(|_| Instant::now());
         self.released = None;
         hit.map_or(0, |button| button as i32)
     }
 
-    pub(super) fn release(&mut self, layout: PlayerLayout, x: f32, y: f32) -> i32 {
+    pub(super) fn release(
+        &mut self,
+        layout: PlayerLayout,
+        screen: PlayerScreenInput,
+        x: f32,
+        y: f32,
+    ) -> i32 {
         let Some(button) = self.pressed else {
             return 0;
         };
-        let accepted = layout.button_rect(button).contains(Point::new(x, y));
+        let accepted = layout
+            .button_rect(button, screen)
+            .contains(Point::new(x, y));
         let scale = self.scale_for(button, Instant::now()).0;
         self.pressed = None;
         self.pressed_at = None;
@@ -295,6 +465,28 @@ impl LyricsRenderer {
             1_000_000.0,
             false,
         );
+        self.text_attrs = TextAttrs {
+            weight: 700,
+            italic: false,
+        };
+        let artwork_title = self.prepare_plain_text(
+            &input.title,
+            19.0 * layout.scale,
+            25.0 * layout.scale,
+            1_000_000.0,
+            false,
+        );
+        self.text_attrs = TextAttrs {
+            weight: 400,
+            italic: false,
+        };
+        let artwork_artist = self.prepare_plain_text(
+            &input.artist,
+            15.0 * layout.scale,
+            21.0 * layout.scale,
+            1_000_000.0,
+            false,
+        );
         self.text_attrs = saved;
         Some(PreparedPlayer {
             screen: input.screen,
@@ -303,6 +495,8 @@ impl LyricsRenderer {
             liked: input.liked,
             title,
             artist,
+            artwork_title,
+            artwork_artist,
             layout,
             icons: PlayerIcons::new(),
         })
@@ -313,18 +507,21 @@ pub(super) fn collect_player_font_usage(
     player: &PreparedPlayer,
     ids: &mut Vec<fontdb::ID>,
 ) -> usize {
-    collect_text_font_usage(&player.title, ids) + collect_text_font_usage(&player.artist, ids)
+    collect_text_font_usage(&player.title, ids)
+        + collect_text_font_usage(&player.artist, ids)
+        + collect_text_font_usage(&player.artwork_title, ids)
+        + collect_text_font_usage(&player.artwork_artist, ids)
 }
 
-pub(super) fn draw_player_lyrics(
+pub(super) fn draw_player(
     canvas: &skia_safe::Canvas,
     typefaces: &HashMap<fontdb::ID, Typeface>,
     thumbnail: Option<&Image>,
     player: &PreparedPlayer,
     interaction: &mut PlayerInteractionState,
+    transition: PlayerTransitionSample,
     current_time_ms: i32,
 ) -> bool {
-    debug_assert_eq!(player.screen, PlayerScreenInput::Lyrics);
     let layout = player.layout;
     let scale = layout.scale;
     let now = Instant::now();
@@ -341,34 +538,64 @@ pub(super) fn draw_player_lyrics(
         &paint,
     );
 
-    draw_compact_header(
+    let page_bounds = Rect::from_xywh(
+        0.0,
+        layout.header_top,
+        layout.width,
+        layout.progress_top - layout.header_top,
+    );
+    let (lyrics_alpha, lyrics_scale) = transition.content_transform(PlayerScreenInput::Lyrics);
+    if lyrics_alpha > 0.001 {
+        draw_content_layer(canvas, page_bounds, lyrics_alpha, lyrics_scale, |canvas| {
+            draw_compact_header(canvas, typefaces, player, interaction, now, &mut animating);
+        });
+    }
+    let (artwork_alpha, artwork_scale) = transition.content_transform(PlayerScreenInput::Artwork);
+    if artwork_alpha > 0.001 {
+        draw_content_layer(
+            canvas,
+            page_bounds,
+            artwork_alpha,
+            artwork_scale,
+            |canvas| {
+                draw_artwork_metadata(canvas, typefaces, player, interaction, now, &mut animating);
+            },
+        );
+    }
+
+    // One image participates in the transition. Its geometry is interpolated;
+    // compact and full cover copies are never cross-faded over one another.
+    let artwork_progress = transition.artwork_progress();
+    let shared_art = lerp_rect(
+        layout.compact_artwork_rect(),
+        layout.full_artwork_rect(),
+        artwork_progress,
+    );
+    let radius = lerp(12.0 * scale, 18.0 * scale, artwork_progress);
+    draw_artwork(canvas, thumbnail, shared_art, radius);
+
+    draw_progress(canvas, typefaces, player, current_time_ms);
+    draw_transport(canvas, player, interaction, now, &mut animating);
+    draw_mode_navigation(
         canvas,
-        typefaces,
-        thumbnail,
         player,
         interaction,
+        transition.to,
         now,
         &mut animating,
     );
-    draw_progress(canvas, typefaces, player, current_time_ms);
-    draw_transport(canvas, player, interaction, now, &mut animating);
-    draw_mode_navigation(canvas, player, interaction, now, &mut animating);
-    animating
+    animating || transition.active
 }
 
 fn draw_compact_header(
     canvas: &skia_safe::Canvas,
     typefaces: &HashMap<fontdb::ID, Typeface>,
-    thumbnail: Option<&Image>,
     player: &PreparedPlayer,
     interaction: &mut PlayerInteractionState,
     now: Instant,
     animating: &mut bool,
 ) {
     let s = player.layout.scale;
-    let art = Rect::from_xywh(32.0 * s, 90.0 * s, 72.0 * s, 72.0 * s);
-    draw_artwork(canvas, thumbnail, art, 12.0 * s);
-
     canvas.save();
     canvas.clip_rect(
         Rect::from_xywh(116.0 * s, 90.0 * s, 157.0 * s, 72.0 * s),
@@ -417,6 +644,71 @@ fn draw_compact_header(
         Point::new(345.0 * s, 126.0 * s),
         32.0 * s,
         20.0 * s,
+        more_scale,
+        false,
+    );
+}
+
+fn draw_artwork_metadata(
+    canvas: &skia_safe::Canvas,
+    typefaces: &HashMap<fontdb::ID, Typeface>,
+    player: &PreparedPlayer,
+    interaction: &mut PlayerInteractionState,
+    now: Instant,
+    animating: &mut bool,
+) {
+    let layout = player.layout;
+    let scale = layout.scale;
+    let top = layout.artwork_metadata_top;
+    canvas.save();
+    canvas.clip_rect(
+        Rect::from_xywh(32.0 * scale, top + 8.0 * scale, 241.0 * scale, 72.0 * scale),
+        ClipOp::Intersect,
+        true,
+    );
+    draw_prepared_text_skia(
+        canvas,
+        typefaces,
+        &player.artwork_title,
+        32.0 * scale,
+        top + 24.0 * scale,
+        (255, 255, 255, 255),
+        1.0,
+        0.0,
+        None,
+    );
+    draw_prepared_text_skia(
+        canvas,
+        typefaces,
+        &player.artwork_artist,
+        32.0 * scale,
+        top + 51.0 * scale,
+        (255, 139, 196, 255),
+        0.78,
+        0.0,
+        None,
+    );
+    canvas.restore();
+
+    let (favorite_scale, favorite_animating) = interaction.scale_for(PlayerButton::Favorite, now);
+    let (more_scale, more_animating) = interaction.scale_for(PlayerButton::More, now);
+    *animating |= favorite_animating || more_animating;
+    let center_y = top + 48.0 * scale;
+    draw_action_button(
+        canvas,
+        &player.icons.star,
+        Point::new(301.0 * scale, center_y),
+        32.0 * scale,
+        20.0 * scale,
+        favorite_scale,
+        player.liked,
+    );
+    draw_action_button(
+        canvas,
+        &player.icons.ellipsis,
+        Point::new(345.0 * scale, center_y),
+        32.0 * scale,
+        20.0 * scale,
         more_scale,
         false,
     );
@@ -539,35 +831,37 @@ fn draw_mode_navigation(
     canvas: &skia_safe::Canvas,
     player: &PreparedPlayer,
     interaction: &mut PlayerInteractionState,
+    selected_screen: PlayerScreenInput,
     now: Instant,
     animating: &mut bool,
 ) {
     let l = player.layout;
     let s = l.scale;
     let y = l.nav_top + 45.0 * s;
-    for (button, icon, x, active, icon_size) in [
+    for (button, icon, x, screen, icon_size) in [
         (
             PlayerButton::Lyrics,
             &player.icons.lyrics,
             80.0,
-            true,
+            Some(PlayerScreenInput::Lyrics),
             (18.0, 18.0),
         ),
         (
             PlayerButton::Output,
             &player.icons.lyrics,
             196.5,
-            false,
+            Some(PlayerScreenInput::Artwork),
             (18.0, 18.0),
         ),
         (
             PlayerButton::Queue,
             &player.icons.list,
             313.0,
-            false,
+            None,
             (18.0, 15.0),
         ),
     ] {
+        let active = screen == Some(selected_screen);
         let (button_scale, is_animating) = interaction.scale_for(button, now);
         *animating |= is_animating;
         canvas.save();
@@ -599,8 +893,46 @@ fn draw_mode_navigation(
         canvas,
         Point::new(196.5 * s, y),
         18.0 * s * output_scale,
-        WHITE,
+        if selected_screen == PlayerScreenInput::Artwork {
+            ACTIVE_FG
+        } else {
+            WHITE
+        },
     );
+}
+
+fn draw_content_layer(
+    canvas: &skia_safe::Canvas,
+    bounds: Rect,
+    alpha: f32,
+    scale: f32,
+    draw: impl FnOnce(&skia_safe::Canvas),
+) {
+    let mut paint = Paint::default();
+    paint.set_alpha_f(alpha.clamp(0.0, 1.0));
+    canvas.save_layer(&SaveLayerRec::default().bounds(&bounds).paint(&paint));
+    let center = Point::new(
+        (bounds.left + bounds.right) * 0.5,
+        (bounds.top + bounds.bottom) * 0.5,
+    );
+    canvas.translate(center);
+    canvas.scale((scale, scale));
+    canvas.translate((-center.x, -center.y));
+    draw(canvas);
+    canvas.restore();
+}
+
+fn lerp(from: f32, to: f32, progress: f32) -> f32 {
+    from + (to - from) * progress.clamp(0.0, 1.0)
+}
+
+fn lerp_rect(from: Rect, to: Rect, progress: f32) -> Rect {
+    Rect::new(
+        lerp(from.left, to.left, progress),
+        lerp(from.top, to.top, progress),
+        lerp(from.right, to.right, progress),
+        lerp(from.bottom, to.bottom, progress),
+    )
 }
 
 fn draw_action_button(
@@ -754,6 +1086,11 @@ fn ease_out_cubic(value: f32) -> f32 {
     1.0 - (1.0 - value).powi(3)
 }
 
+fn smooth_step(value: f32) -> f32 {
+    let value = value.clamp(0.0, 1.0);
+    value * value * (3.0 - 2.0 * value)
+}
+
 fn ease_out_back(value: f32) -> f32 {
     let c1 = 1.70158;
     let c3 = c1 + 1.0;
@@ -785,6 +1122,14 @@ mod tests {
     }
 
     #[test]
+    fn artwork_geometry_matches_penpot_reference() {
+        let layout = PlayerLayout::resolve(393.0, 852.0);
+        assert_eq!(layout.artwork_metadata_top, 464.0);
+        let artwork = layout.full_artwork_rect();
+        assert_eq!(artwork, Rect::from_xywh(24.0, 99.5, 345.0, 345.0));
+    }
+
+    #[test]
     fn flexible_body_absorbs_extra_height() {
         let short = PlayerLayout::resolve(393.0, 852.0);
         let tall = PlayerLayout::resolve(393.0, 932.0);
@@ -797,16 +1142,49 @@ mod tests {
         let layout = PlayerLayout::resolve(393.0, 852.0);
         let mut state = PlayerInteractionState::default();
         assert_eq!(
-            state.press(layout, 101.5, 691.0),
+            state.press(layout, PlayerScreenInput::Lyrics, 101.5, 691.0),
             PlayerButton::Previous as i32
         );
         state.cancel();
         assert_eq!(
-            state.press(layout, 196.5, 691.0),
+            state.press(layout, PlayerScreenInput::Lyrics, 196.5, 691.0),
             PlayerButton::PlayPause as i32
         );
         state.cancel();
-        assert_eq!(state.press(layout, 291.5, 691.0), PlayerButton::Next as i32);
+        assert_eq!(
+            state.press(layout, PlayerScreenInput::Lyrics, 291.5, 691.0),
+            PlayerButton::Next as i32
+        );
+    }
+
+    #[test]
+    fn page_transition_shrinks_out_and_grows_in() {
+        let start = PlayerTransitionSample {
+            from: PlayerScreenInput::Lyrics,
+            to: PlayerScreenInput::Artwork,
+            progress: 0.0,
+            active: true,
+        };
+        assert_eq!(
+            start.content_transform(PlayerScreenInput::Lyrics),
+            (1.0, 1.0)
+        );
+        assert_eq!(
+            start.content_transform(PlayerScreenInput::Artwork),
+            (0.0, 0.94)
+        );
+        assert_eq!(start.artwork_progress(), 0.0);
+
+        let end = PlayerTransitionSample::settled(PlayerScreenInput::Artwork);
+        assert_eq!(
+            end.content_transform(PlayerScreenInput::Lyrics),
+            (0.0, 0.94)
+        );
+        assert_eq!(
+            end.content_transform(PlayerScreenInput::Artwork),
+            (1.0, 1.0)
+        );
+        assert_eq!(end.artwork_progress(), 1.0);
     }
 
     #[test]
@@ -824,5 +1202,13 @@ mod tests {
         assert_eq!(player.screen, PlayerScreenInput::Lyrics);
         assert_eq!(player.duration_ms, 243_000);
         assert!(player.is_playing);
+    }
+
+    #[test]
+    fn player_wire_deserializes_artwork_screen() {
+        let player: PlayerInput =
+            serde_json::from_str(r#"{"screen":"artwork","title":"Jupiter","artist":"Coldplay"}"#)
+                .unwrap();
+        assert_eq!(player.screen, PlayerScreenInput::Artwork);
     }
 }

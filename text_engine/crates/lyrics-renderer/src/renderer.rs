@@ -24,7 +24,9 @@ use draw::{
 };
 use font_fallback::{cjk_family_priority, new_font_system};
 use fonts::*;
-use player::{PlayerInput, PlayerInteractionState, PreparedPlayer};
+use player::{
+    PlayerInput, PlayerInteractionState, PlayerTransitionState, PreparedPlayer,
+};
 use scroll::{ManualScrollState, SpringLineState};
 use text_utils::{
     contains_han, has_trailing_whitespace, is_blank_text, is_punctuation_or_space,
@@ -611,6 +613,7 @@ pub struct LyricsRenderer {
     last_frame_timing: EngineFrameTiming,
     /// Native player pointer state and button press/release animation.
     player_interaction: PlayerInteractionState,
+    player_transition: PlayerTransitionState,
 }
 
 #[derive(Debug, Clone)]
@@ -1139,6 +1142,7 @@ impl LyricsRenderer {
             background_alpha: 0.0,
             last_frame_timing: EngineFrameTiming::default(),
             player_interaction: PlayerInteractionState::default(),
+            player_transition: PlayerTransitionState::default(),
         }
     }
 
@@ -1234,6 +1238,14 @@ impl LyricsRenderer {
     pub fn set_scene_json(&mut self, json: &str) -> Result<RendererMetrics, String> {
         let scene: LyricsScene = serde_json::from_str(json).map_err(|error| error.to_string())?;
         let prepared = self.prepare_scene(scene)?;
+        let previous_screen = self
+            .scene
+            .as_ref()
+            .and_then(|scene| scene.player.as_ref())
+            .map(|player| player.screen);
+        let target_screen = prepared.player.as_ref().map(|player| player.screen);
+        self.player_transition
+            .set_target(previous_screen, target_screen);
         let metrics = RendererMetrics {
             width: prepared.config.width,
             height: prepared.config.height,
@@ -1304,6 +1316,7 @@ impl LyricsRenderer {
         let typeface_stats = self.ensure_skia_typefaces_for_scene();
         timing.typefaces_ms = phase_ms(phase);
         let should_log_debug = self.should_log_render_debug(current_time_ms);
+        let player_transition = self.player_transition.sample(Instant::now());
 
         let phase = Instant::now();
         let (
@@ -1474,21 +1487,36 @@ impl LyricsRenderer {
                 || content_bottom > 0.0
                 || lyrics_clip_left > 0.0
                 || lyrics_clip_right > 0.0;
-        let isolate_lyrics = self.background_enabled;
+        let player_scene = scene.player.is_some();
+        let (player_lyrics_alpha, player_lyrics_scale) = if player_scene {
+            player_transition.content_transform(player::PlayerScreenInput::Lyrics)
+        } else {
+            (1.0, 1.0)
+        };
+        let isolate_lyrics = self.background_enabled || player_scene;
         if isolate_lyrics {
             let bounds = skia_safe::Rect::new(band_left, band_top, band_right, band_bottom);
-            // Composite the lyrics layer additively (`Plus`) over the mesh
-            // background — the GPU-path equivalent of the old Compose
-            // `graphicsLayer { blendMode = Plus }`, so the text screens/glows over
-            // the artwork instead of flatly covering it.
+            // The player transition needs an isolated lyrics layer even without a
+            // mesh so the whole page can fade/scale as one unit. With a mesh, keep
+            // the existing additive composition used by the lyrics renderer.
             let mut layer_paint = skia_safe::Paint::default();
-            layer_paint.set_blend_mode(skia_safe::BlendMode::Plus);
+            if self.background_enabled {
+                layer_paint.set_blend_mode(skia_safe::BlendMode::Plus);
+            }
+            layer_paint.set_alpha_f(player_lyrics_alpha);
             canvas.save_layer(
                 &skia_safe::canvas::SaveLayerRec::default()
                     .bounds(&bounds)
                     .paint(&layer_paint),
             );
             canvas.clip_rect(bounds, skia_safe::ClipOp::Intersect, false);
+            if player_scene {
+                let center_x = (band_left + band_right) * 0.5;
+                let center_y = (band_top + band_bottom) * 0.5;
+                canvas.translate((center_x, center_y));
+                canvas.scale((player_lyrics_scale, player_lyrics_scale));
+                canvas.translate((-center_x, -center_y));
+            }
         } else if inset_lyrics {
             canvas.save();
             canvas.clip_rect(
@@ -1499,6 +1527,9 @@ impl LyricsRenderer {
         }
 
         for (line_index, line) in scene.lines.iter().enumerate() {
+            if player_lyrics_alpha <= 0.001 {
+                break;
+            }
             let Some(dynamic_layout) = dynamic_layouts.get(line_index) else {
                 continue;
             };
@@ -1741,14 +1772,16 @@ impl LyricsRenderer {
         // band collapses to the whole surface when no insets are set.
         let band_height = (band_bottom - band_top).max(1.0);
         let inner_keep_alive = (keep_alive - band_top).max(0.0);
-        apply_vertical_fade_skia_band(
-            canvas,
-            width,
-            band_top,
-            band_bottom,
-            inner_keep_alive * 0.7,
-            band_height * 0.12,
-        );
+        if player_lyrics_alpha > 0.001 {
+            apply_vertical_fade_skia_band(
+                canvas,
+                width,
+                band_top,
+                band_bottom,
+                inner_keep_alive * 0.7,
+                band_height * 0.12,
+            );
+        }
 
         if isolate_lyrics || inset_lyrics {
             canvas.restore();
@@ -1770,12 +1803,13 @@ impl LyricsRenderer {
             );
         }
         let player_animating = if let Some(player) = &scene.player {
-            player::draw_player_lyrics(
+            player::draw_player(
                 canvas,
                 &self.skia_typefaces,
                 self.mesh_gradient.as_ref().map(|mesh| mesh.thumbnail()),
                 player,
                 &mut self.player_interaction,
+                player_transition,
                 current_time_ms,
             )
         } else {
@@ -1840,30 +1874,30 @@ impl LyricsRenderer {
     /// Begin a native-player button gesture and return its stable action code.
     /// Zero means the point does not hit player chrome.
     pub fn player_pointer_down(&mut self, x: f32, y: f32) -> i32 {
-        let Some(layout) = self
+        let Some((layout, screen)) = self
             .scene
             .as_ref()
             .and_then(|scene| scene.player.as_ref())
-            .map(|player| player.layout)
+            .map(|player| (player.layout, player.screen))
         else {
             return 0;
         };
-        self.player_interaction.press(layout, x, y)
+        self.player_interaction.press(layout, screen, x, y)
     }
 
     /// Finish a native-player button gesture. The action is emitted only when
     /// release remains inside the button that accepted the press.
     pub fn player_pointer_up(&mut self, x: f32, y: f32) -> i32 {
-        let Some(layout) = self
+        let Some((layout, screen)) = self
             .scene
             .as_ref()
             .and_then(|scene| scene.player.as_ref())
-            .map(|player| player.layout)
+            .map(|player| (player.layout, player.screen))
         else {
             self.player_interaction.cancel();
             return 0;
         };
-        self.player_interaction.release(layout, x, y)
+        self.player_interaction.release(layout, screen, x, y)
     }
 
     pub fn cancel_player_pointer(&mut self) {

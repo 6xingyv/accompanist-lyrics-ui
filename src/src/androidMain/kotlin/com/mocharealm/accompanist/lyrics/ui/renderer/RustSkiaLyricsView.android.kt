@@ -401,10 +401,14 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         durationMs: Int = 0,
         playing: Boolean = false,
         liked: Boolean = false,
+        screen: String = "lyrics",
     ) {
+        require(screen == "lyrics" || screen == "artwork") {
+            "screen must be lyrics or artwork"
+        }
         val next = title?.let {
             PlayerWire(
-                screen = "lyrics",
+                screen = screen,
                 title = it,
                 artist = artist,
                 durationMs = durationMs,
