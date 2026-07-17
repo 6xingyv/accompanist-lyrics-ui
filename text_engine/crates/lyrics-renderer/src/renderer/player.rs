@@ -288,6 +288,9 @@ impl PlayerTransitionState {
             self.started_at = None;
             return;
         };
+        if self.started_at.is_some() && target == self.to {
+            return;
+        }
         let from = previous.unwrap_or(target);
         if from == target {
             self.current = target;
@@ -1515,6 +1518,25 @@ mod tests {
         };
         assert!(artwork_to_queue.artwork_progress() > 0.0);
         assert!(artwork_to_queue.artwork_progress() < 1.0);
+    }
+
+    #[test]
+    fn rebuilding_the_same_target_does_not_cancel_an_active_transition() {
+        let mut transition = PlayerTransitionState::default();
+        transition.set_target(
+            Some(PlayerScreenInput::Lyrics),
+            Some(PlayerScreenInput::Artwork),
+        );
+        let started_at = transition.started_at;
+
+        transition.set_target(
+            Some(PlayerScreenInput::Artwork),
+            Some(PlayerScreenInput::Artwork),
+        );
+
+        assert_eq!(transition.started_at, started_at);
+        assert_eq!(transition.from, PlayerScreenInput::Lyrics);
+        assert_eq!(transition.to, PlayerScreenInput::Artwork);
     }
 
     #[test]
