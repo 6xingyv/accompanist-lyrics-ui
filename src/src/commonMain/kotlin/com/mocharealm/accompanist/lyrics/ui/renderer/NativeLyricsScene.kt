@@ -148,8 +148,22 @@ internal data class LyricsSceneWire(
     val contentLeft: Float = 0f,
     val contentRight: Float = 0f,
     val topBar: TopBarWire? = null,
+    val player: PlayerWire? = null,
     val style: SceneStyle,
     val lines: List<LyricsLineWire>,
+)
+
+/** Complete Rust-rendered portrait player chrome. Screen values intentionally
+ * match the Rust serde enum; additional screens are added without moving any
+ * playback UI back into Compose. */
+@Serializable
+internal data class PlayerWire(
+    val screen: String = "lyrics",
+    val title: String,
+    val artist: String,
+    val durationMs: Int,
+    val isPlaying: Boolean,
+    val liked: Boolean = false,
 )
 
 /** The player top bar rendered inside the surface: album thumbnail + title/artist +
@@ -369,6 +383,7 @@ internal fun SyncedLyrics.toSceneJson(
     contentLeft: Float = 0f,
     contentRight: Float = 0f,
     topBar: TopBarWire? = null,
+    player: PlayerWire? = null,
 ): String =
     lyricsSceneJson.encodeToString(
         LyricsSceneWire(
@@ -381,6 +396,7 @@ internal fun SyncedLyrics.toSceneJson(
             contentLeft = contentLeft,
             contentRight = contentRight,
             topBar = topBar,
+            player = player,
             style = style,
             lines = toSceneLines(),
         )

@@ -178,6 +178,18 @@ actual class NativeTextEngine actual constructor(
         return handle != 0L && nativeHitTestTopBar(handle, x, y)
     }
 
+    fun playerPointerDown(x: Float, y: Float): Int {
+        return if (handle != 0L) nativePlayerPointerDown(handle, x, y) else 0
+    }
+
+    fun playerPointerUp(x: Float, y: Float): Int {
+        return if (handle != 0L) nativePlayerPointerUp(handle, x, y) else 0
+    }
+
+    fun cancelPlayerPointer() {
+        if (handle != 0L) nativeCancelPlayerPointer(handle)
+    }
+
     /**
      * Install album artwork (ARGB_8888 pixels, `width`×`height`) for the GPU
      * mesh-gradient background and enable the full-bleed background mode. `seed`
@@ -436,6 +448,9 @@ actual class NativeTextEngine actual constructor(
     ): Int
 
     private external fun nativeHitTestTopBar(handle: Long, x: Float, y: Float): Boolean
+    private external fun nativePlayerPointerDown(handle: Long, x: Float, y: Float): Int
+    private external fun nativePlayerPointerUp(handle: Long, x: Float, y: Float): Int
+    private external fun nativeCancelPlayerPointer(handle: Long)
 
     private external fun nativeSetBackgroundArt(
         handle: Long,

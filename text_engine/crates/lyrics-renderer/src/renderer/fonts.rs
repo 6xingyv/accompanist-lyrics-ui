@@ -376,6 +376,9 @@ impl LyricsRenderer {
             scene_glyphs += collect_text_font_usage(&top_bar.title, &mut scene_font_ids);
             scene_glyphs += collect_text_font_usage(&top_bar.artist, &mut scene_font_ids);
         }
+        if let Some(player) = &scene.player {
+            scene_glyphs += player::collect_player_font_usage(player, &mut scene_font_ids);
+        }
 
         let missing_ids: Vec<fontdb::ID> = scene_font_ids
             .iter()

@@ -1111,6 +1111,37 @@ pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeTextE
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeTextEngine_nativePlayerPointerDown(
+    _env: JNIEnv,
+    _this: JObject,
+    handle: jlong,
+    x: jfloat,
+    y: jfloat,
+) -> jint {
+    with_engine_mut(handle, 0, |engine| engine.player_pointer_down(x, y))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeTextEngine_nativePlayerPointerUp(
+    _env: JNIEnv,
+    _this: JObject,
+    handle: jlong,
+    x: jfloat,
+    y: jfloat,
+) -> jint {
+    with_engine_mut(handle, 0, |engine| engine.player_pointer_up(x, y))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeTextEngine_nativeCancelPlayerPointer(
+    _env: JNIEnv,
+    _this: JObject,
+    handle: jlong,
+) {
+    with_engine_mut(handle, (), |engine| engine.cancel_player_pointer());
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeTextEngine_nativeSetBackgroundArt(
     env: JNIEnv,
     _this: JObject,

@@ -13,6 +13,7 @@ mod draw;
 mod font_fallback;
 mod fonts;
 mod layout;
+mod player;
 mod scroll;
 mod text_utils;
 
@@ -23,6 +24,7 @@ use draw::{
 };
 use font_fallback::{cjk_family_priority, new_font_system};
 use fonts::*;
+use player::{PlayerInput, PlayerInteractionState, PreparedPlayer};
 use scroll::{ManualScrollState, SpringLineState};
 use text_utils::{
     contains_han, has_trailing_whitespace, is_blank_text, is_punctuation_or_space,
@@ -180,6 +182,10 @@ pub struct LyricsScene {
     /// background artwork already installed via `set_background_art`.
     #[serde(default, rename = "topBar")]
     pub top_bar: Option<TopBarInput>,
+    /// Optional full portrait player chrome. When present, Rust owns the complete
+    /// player surface and constrains the lyric list to its flexible middle row.
+    #[serde(default)]
+    pub player: Option<PlayerInput>,
     #[serde(default)]
     pub style: SceneStyleInput,
     #[serde(default)]
@@ -603,6 +609,8 @@ pub struct LyricsRenderer {
     background_alpha: f32,
     /// Timing of the most recent `render_frame_to_canvas` call.
     last_frame_timing: EngineFrameTiming,
+    /// Native player pointer state and button press/release animation.
+    player_interaction: PlayerInteractionState,
 }
 
 #[derive(Debug, Clone)]
@@ -648,6 +656,8 @@ struct PreparedScene {
     content_height: f32,
     /// Player top bar (thumbnail + title/artist + ⋯ button), if the host supplied one.
     top_bar: Option<PreparedTopBar>,
+    /// Complete native portrait player, mutually exclusive with the legacy top bar.
+    player: Option<PreparedPlayer>,
 }
 
 /// Resolved top-bar geometry (render px) + shaped title/artist text.
@@ -1128,6 +1138,7 @@ impl LyricsRenderer {
             last_mesh_frame_at: None,
             background_alpha: 0.0,
             last_frame_timing: EngineFrameTiming::default(),
+            player_interaction: PlayerInteractionState::default(),
         }
     }
 
@@ -1758,6 +1769,18 @@ impl LyricsRenderer {
                 current_time_ms,
             );
         }
+        let player_animating = if let Some(player) = &scene.player {
+            player::draw_player_lyrics(
+                canvas,
+                &self.skia_typefaces,
+                self.mesh_gradient.as_ref().map(|mesh| mesh.thumbnail()),
+                player,
+                &mut self.player_interaction,
+                current_time_ms,
+            )
+        } else {
+            false
+        };
         timing.top_bar_ms = phase_ms(phase);
         timing.total_ms = phase_ms(frame_start);
         self.last_frame_timing = timing;
@@ -1806,11 +1829,45 @@ impl LyricsRenderer {
             || self.playback_active
             || background_animating
             || focus_scale_animating
+            || player_animating
         {
             1
         } else {
             0
         }
+    }
+
+    /// Begin a native-player button gesture and return its stable action code.
+    /// Zero means the point does not hit player chrome.
+    pub fn player_pointer_down(&mut self, x: f32, y: f32) -> i32 {
+        let Some(layout) = self
+            .scene
+            .as_ref()
+            .and_then(|scene| scene.player.as_ref())
+            .map(|player| player.layout)
+        else {
+            return 0;
+        };
+        self.player_interaction.press(layout, x, y)
+    }
+
+    /// Finish a native-player button gesture. The action is emitted only when
+    /// release remains inside the button that accepted the press.
+    pub fn player_pointer_up(&mut self, x: f32, y: f32) -> i32 {
+        let Some(layout) = self
+            .scene
+            .as_ref()
+            .and_then(|scene| scene.player.as_ref())
+            .map(|player| player.layout)
+        else {
+            self.player_interaction.cancel();
+            return 0;
+        };
+        self.player_interaction.release(layout, x, y)
+    }
+
+    pub fn cancel_player_pointer(&mut self) {
+        self.player_interaction.cancel();
     }
 
     /// Whether `(x, y)` (render px) falls on the top bar's 48dp ⋯ target.
@@ -2398,6 +2455,7 @@ mod tests {
             ],
             content_height: 0.0,
             top_bar: None,
+            player: None,
         };
 
         // A line deep in the gapless run is its own group, not swallowed by the
@@ -2429,6 +2487,7 @@ mod tests {
             ],
             content_height: 0.0,
             top_bar: None,
+            player: None,
         };
 
         // At t=1000 only line 0 is focused, but line 1 begins before it ends, so
@@ -2452,6 +2511,7 @@ mod tests {
             ],
             content_height: 0.0,
             top_bar: None,
+            player: None,
         };
 
         // Every line overlaps the next, so without a cap the whole run chains into
@@ -2640,6 +2700,7 @@ mod tests {
             lines: vec![],
             content_height: 0.0,
             top_bar: None,
+            player: None,
         };
         assert!(narrow_scene.blur_radius_for_screen_y(far, 0.0) > 0.0);
 
@@ -2650,6 +2711,7 @@ mod tests {
             lines: vec![],
             content_height: 0.0,
             top_bar: None,
+            player: None,
         };
         assert_eq!(wide_scene.blur_radius_for_screen_y(far, 0.0), 0.0);
     }
@@ -2661,6 +2723,7 @@ mod tests {
             lines: vec![test_line(ClusterRole::Standalone, 1_000, 2_000, 50.0)],
             content_height: 0.0,
             top_bar: None,
+            player: None,
         };
         let line = &scene.lines[0];
 
@@ -2688,6 +2751,7 @@ mod tests {
             lines: vec![test_line(ClusterRole::Standalone, 1_000, 2_000, 50.0)],
             content_height: 0.0,
             top_bar: None,
+            player: None,
         });
 
         let hit = renderer.hit_test_line(20.0, 40.0, 1_000);
@@ -2712,6 +2776,7 @@ mod tests {
             lines: vec![test_line(ClusterRole::Standalone, 1_000, 2_000, 50.0)],
             content_height: 0.0,
             top_bar: Some(test_top_bar()),
+            player: None,
         });
         renderer.frame_layouts = vec![DynamicLineLayout {
             top: 40.0,
@@ -2924,6 +2989,7 @@ mod tests {
             lines: vec![test_line(ClusterRole::Standalone, 1_000, 2_000, 50.0)],
             content_height: 0.0,
             top_bar: Some(test_top_bar()),
+            player: None,
         });
         renderer.frame_layouts = vec![DynamicLineLayout {
             top: 40.0,
@@ -2949,6 +3015,7 @@ mod tests {
             lines: vec![],
             content_height: 0.0,
             top_bar: Some(test_top_bar()),
+            player: None,
         });
 
         assert!(renderer.hit_test_top_bar_button(323.0, 77.0));
@@ -3265,6 +3332,7 @@ mod tests {
             ],
             content_height: 0.0,
             top_bar: None,
+            player: None,
         };
 
         // Collapsed before it starts, and still collapsed at the instant it starts
@@ -3298,6 +3366,7 @@ mod tests {
             lines: vec![test_line(ClusterRole::Main, 1_000, 2_000, 50.0), after],
             content_height: 0.0,
             top_bar: None,
+            player: None,
         };
 
         // Collapsed before the main appears.
@@ -3330,6 +3399,7 @@ mod tests {
             lines,
             content_height: 0.0,
             top_bar: None,
+            player: None,
         });
 
         let content: Vec<DynamicLineLayout> = (0..6)

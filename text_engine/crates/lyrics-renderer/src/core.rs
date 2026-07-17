@@ -371,6 +371,22 @@ impl TextEngine {
         self.renderer.hit_test_top_bar_region(x, y)
     }
 
+    /// Start a Rust-rendered player button gesture. Returns a stable action code;
+    /// zero means no player control was hit.
+    pub fn player_pointer_down(&mut self, x: f32, y: f32) -> i32 {
+        self.renderer.player_pointer_down(x, y)
+    }
+
+    /// Complete a player button gesture. The action is returned only when the
+    /// pointer is released over the same control that accepted the press.
+    pub fn player_pointer_up(&mut self, x: f32, y: f32) -> i32 {
+        self.renderer.player_pointer_up(x, y)
+    }
+
+    pub fn cancel_player_pointer(&mut self) {
+        self.renderer.cancel_player_pointer();
+    }
+
     pub fn begin_lyrics_scroll(&mut self) {
         self.renderer.begin_manual_scroll();
     }

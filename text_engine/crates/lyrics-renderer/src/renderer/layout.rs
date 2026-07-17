@@ -181,6 +181,22 @@ impl LyricsRenderer {
         let locale = scene.locale.as_deref().unwrap_or("en-US");
         self.set_locale(locale);
 
+        // The portrait player is one native flex scene. Fixed chrome rows scale
+        // from the 393pt reference width and the lyric viewport receives whatever
+        // height remains between the compact header and bottom controls.
+        if scene.player.is_some() {
+            let width = scene.width.unwrap_or(DEFAULT_WIDTH).max(DEFAULT_WIDTH) as f32;
+            let height = scene.height.unwrap_or(DEFAULT_HEIGHT).max(DEFAULT_HEIGHT) as f32;
+            let player_layout = player::PlayerLayout::resolve(width, height);
+            scene.top_bar = None;
+            scene.content_top = Some(player_layout.lyrics_content_top());
+            scene.content_bottom = Some(player_layout.lyrics_content_bottom());
+            scene.content_left = Some(0.0);
+            scene.content_right = Some(0.0);
+            scene.style.spacing.horizontal_padding = 32.0 * player_layout.scale;
+            scene.style.spacing.focus_top_offset = 48.0 * player_layout.scale;
+        }
+
         let chrome = resolve_player_chrome(&mut scene);
 
         // All style defaults now live in the wire `*Input` structs' `Default`
@@ -584,12 +600,18 @@ impl LyricsRenderer {
         }
 
         let top_bar = self.prepare_top_bar(scene.top_bar.as_ref(), chrome.thumb_border_width);
+        let player = self.prepare_player(
+            scene.player.as_ref(),
+            config.width as f32,
+            config.height as f32,
+        );
 
         Ok(PreparedScene {
             config,
             lines,
             content_height: cursor_y + config.keep_alive,
             top_bar,
+            player,
         })
     }
 

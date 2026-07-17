@@ -139,6 +139,8 @@ class RustSkiaLyricsView @JvmOverloads constructor(
     private var topBarTitle: String? = null
     private var topBarArtist: String? = null
     private var onControlsClicked: (() -> Unit)? = null
+    private var playerWire: PlayerWire? = null
+    private var onPlayerAction: ((Int) -> Unit)? = null
 
     // --- Dedicated render thread ---------------------------------------------
     // The EGL context is created, used (draw + blocking eglSwapBuffers), and
@@ -389,6 +391,37 @@ class RustSkiaLyricsView @JvmOverloads constructor(
     /** Callback for a tap on the top bar's ⋯ button. */
     fun setOnControlsClicked(callback: (() -> Unit)?) {
         onControlsClicked = callback
+    }
+
+    /** Enable the complete Rust-rendered portrait player. Passing a null title
+     * returns to the legacy lyrics-only surface. */
+    fun setPlayerChrome(
+        title: String?,
+        artist: String = "",
+        durationMs: Int = 0,
+        playing: Boolean = false,
+        liked: Boolean = false,
+    ) {
+        val next = title?.let {
+            PlayerWire(
+                screen = "lyrics",
+                title = it,
+                artist = artist,
+                durationMs = durationMs,
+                isPlaying = playing,
+                liked = liked,
+            )
+        }
+        if (playerWire == next) return
+        playerWire = next
+        sceneDirty = true
+        rebuildSceneAndRender()
+    }
+
+    /** Stable native action codes: favorite=1, more=2, previous=3,
+     * play/pause=4, next=5, lyrics=6, output=7, queue=8. */
+    fun setOnPlayerAction(callback: ((Int) -> Unit)?) {
+        onPlayerAction = callback
     }
 
     /**
@@ -758,6 +791,11 @@ class RustSkiaLyricsView @JvmOverloads constructor(
                 lastTouchY = event.y
                 velocityTracker?.recycle()
                 velocityTracker = VelocityTracker.obtain().also { it.addMovement(event) }
+                if (playerWire != null) {
+                    val x = event.x * renderScale
+                    val y = event.y * renderScale
+                    postPlayerCommand { engine.playerPointerDown(x, y) }
+                }
                 gestureDetector.onTouchEvent(event)
                 return true
             }
@@ -776,6 +814,7 @@ class RustSkiaLyricsView @JvmOverloads constructor(
                 if (!isDragging && abs(y - downY) > touchSlop) {
                     isDragging = true
                     lastTouchY = y
+                    if (playerWire != null) postPlayerCommand { engine.cancelPlayerPointer() }
                     postScrollCommand { engine.beginLyricsScroll() }
                     cancelTapDetection(event)
                     return true
@@ -800,6 +839,17 @@ class RustSkiaLyricsView @JvmOverloads constructor(
                 if (wasDragging) {
                     finishManualDrag()
                 } else {
+                    if (playerWire != null) {
+                        val x = event.x * renderScale
+                        val y = event.y * renderScale
+                        postPlayerCommand {
+                            val action = engine.playerPointerUp(x, y)
+                            if (action != 0) post {
+                                performClick()
+                                onPlayerAction?.invoke(action)
+                            }
+                        }
+                    }
                     recycleTouchState()
                     parent?.requestDisallowInterceptTouchEvent(false)
                     return gestureDetector.onTouchEvent(event) || super.onTouchEvent(event)
@@ -809,6 +859,7 @@ class RustSkiaLyricsView @JvmOverloads constructor(
             }
 
             MotionEvent.ACTION_CANCEL -> {
+                if (playerWire != null) postPlayerCommand { engine.cancelPlayerPointer() }
                 postScrollCommand {
                     applyPendingScrollOnRenderThread()
                     engine.cancelLyricsScroll()
@@ -832,6 +883,12 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         releaseRenderSurface()   // blocking EGL teardown on the render thread
         stopRenderThread()       // quitSafely + join → render thread is fully dead
         if (!retainNativeEngineOnDetach) closeNativeEngine()
+    }
+
+    private fun postPlayerCommand(command: () -> Unit) {
+        val handler = renderHandler
+        if (handler != null) handler.post(command) else command()
+        requestRender()
     }
 
     internal fun disposeNativeEngineWhenDetached() {
@@ -982,7 +1039,11 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         val sceneWidth = renderWidth.takeIf { it > 0 } ?: width
         val sceneHeight = renderHeight.takeIf { it > 0 } ?: height
         if (sceneDirty) {
-            val (topBarWire, resolvedContentTop) = resolveTopBar(sceneWidth)
+            val (topBarWire, resolvedContentTop) = if (playerWire == null) {
+                resolveTopBar(sceneWidth)
+            } else {
+                null to 0f
+            }
             engine.setLyricsSceneDirect(
                 sceneLyrics.toSceneJson(
                     sceneWidth,
@@ -998,6 +1059,7 @@ class RustSkiaLyricsView @JvmOverloads constructor(
                     contentLeft = contentLeftPx * renderScale,
                     contentRight = contentRightPx * renderScale,
                     topBar = topBarWire,
+                    player = playerWire,
                 )
             )
             sceneDirty = false
