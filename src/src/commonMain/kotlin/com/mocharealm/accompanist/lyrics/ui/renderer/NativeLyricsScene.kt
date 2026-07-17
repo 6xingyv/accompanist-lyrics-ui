@@ -164,6 +164,16 @@ internal data class PlayerWire(
     val durationMs: Int,
     val isPlaying: Boolean,
     val liked: Boolean = false,
+    val queueTitle: String = "",
+    val queueSource: String = "",
+    val queueFilter: String = "upNext",
+    val queueItems: List<PlayerQueueItemWire> = emptyList(),
+)
+
+@Serializable
+internal data class PlayerQueueItemWire(
+    val title: String,
+    val artist: String,
 )
 
 /** The player top bar rendered inside the surface: album thumbnail + title/artist +

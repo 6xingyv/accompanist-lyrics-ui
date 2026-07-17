@@ -402,9 +402,16 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         playing: Boolean = false,
         liked: Boolean = false,
         screen: String = "lyrics",
+        queueTitle: String = "",
+        queueSource: String = "",
+        queueFilter: String = "upNext",
+        queueItems: List<Pair<String, String>> = emptyList(),
     ) {
-        require(screen == "lyrics" || screen == "artwork") {
-            "screen must be lyrics or artwork"
+        require(screen == "lyrics" || screen == "artwork" || screen == "queue") {
+            "screen must be lyrics, artwork, or queue"
+        }
+        require(queueFilter in setOf("upNext", "shuffle", "repeatOne", "album")) {
+            "queueFilter must be upNext, shuffle, repeatOne, or album"
         }
         val next = title?.let {
             PlayerWire(
@@ -414,6 +421,12 @@ class RustSkiaLyricsView @JvmOverloads constructor(
                 durationMs = durationMs,
                 isPlaying = playing,
                 liked = liked,
+                queueTitle = queueTitle,
+                queueSource = queueSource,
+                queueFilter = queueFilter,
+                queueItems = queueItems.map { (itemTitle, itemArtist) ->
+                    PlayerQueueItemWire(title = itemTitle, artist = itemArtist)
+                },
             )
         }
         if (playerWire == next) return
@@ -423,7 +436,7 @@ class RustSkiaLyricsView @JvmOverloads constructor(
     }
 
     /** Stable native action codes: favorite=1, more=2, previous=3,
-     * play/pause=4, next=5, lyrics=6, output=7, queue=8. */
+     * play/pause=4, next=5, lyrics=6, output=7, queue=8; queue filters=9..12. */
     fun setOnPlayerAction(callback: ((Int) -> Unit)?) {
         onPlayerAction = callback
     }
