@@ -104,6 +104,8 @@ unsafe fn with_engine<R>(handle: jlong, fallback: R, f: impl FnOnce(&TextEngine)
 struct MfPlaybackClock {
     position_ms: u64,
     is_paused: u8,
+    /// Appended field — must match music-foundation `MfPlaybackClock`.
+    duration_ms: u64,
 }
 
 /// The player publishes its frame counter from a lifecycle watcher (currently
@@ -154,11 +156,12 @@ impl MusicFoundationClock {
         let displayed_position = if reported_paused {
             self.anchor_position_ms
         } else {
-            self.anchor_position_ms
-                + now
-                    .duration_since(self.anchor_at.expect("clock anchor set"))
-                    .as_secs_f64()
-                    * 1000.0
+            // saturating: never panic if Instant ever goes backwards on a device
+            let elapsed_ms = self
+                .anchor_at
+                .map(|anchor| now.saturating_duration_since(anchor).as_secs_f64() * 1000.0)
+                .unwrap_or(0.0);
+            self.anchor_position_ms + elapsed_ms
         };
         displayed_position.clamp(0.0, i32::MAX as f64) as i32
     }
@@ -252,6 +255,7 @@ fn music_foundation_clock() -> Option<MfPlaybackClock> {
     let mut clock = MfPlaybackClock {
         position_ms: 0,
         is_paused: 1,
+        duration_ms: 0,
     };
     if unsafe { get_clock(&mut clock) } {
         MF_CLOCK_READ_SUCCESSES.fetch_add(1, Ordering::Relaxed);
@@ -588,8 +592,21 @@ pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeTextE
         return 0;
     };
     bool_to_jboolean(with_engine_mut(handle, false, |engine| {
-        let _ = engine.set_lyrics_scene_json(scene_json);
-        true
+        // Scene rebuilds on track change re-shape player chrome text. A panic
+        // here would otherwise abort the whole process on Android.
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            engine.set_lyrics_scene_json(scene_json)
+        })) {
+            Ok(json) if json.contains("\"error\"") => {
+                warn!("set_lyrics_scene_json failed: {json}");
+                false
+            }
+            Ok(_) => true,
+            Err(_) => {
+                warn!("set_lyrics_scene_json paniced");
+                false
+            }
+        }
     }))
 }
 
@@ -969,9 +986,16 @@ pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeTextE
         };
         state.last_rendered_time_ms = current_time_ms;
         if let Some(snapshot) = clock {
+            let playing = snapshot.is_paused == 0;
+            let duration_ms = snapshot.duration_ms.min(i32::MAX as u64) as i32;
+            // Mesh reactivity + portrait transport chrome both read this sample
+            // so Kotlin never pushes isPlaying/duration for the native player.
             state
                 .engine
-                .set_playback_state(snapshot.is_paused == 0, state.background_reactive);
+                .set_playback_state(playing, state.background_reactive);
+            state
+                .engine
+                .set_player_live_playback(playing, duration_ms);
         }
         if state.background_reactive {
             if let Some(rms) = music_foundation_audio_rms() {
@@ -989,9 +1013,21 @@ pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeTextE
 
         let mut render_result = 0;
         let present_result = gpu_renderer.draw_frame(|canvas| {
-            render_result = state
-                .engine
-                .render_lyrics_frame_to_canvas(current_time_ms, canvas);
+            // Never let a Rust panic tear down the process mid-frame. Track
+            // transitions (clear art / empty lyrics / next title) have hit
+            // panics deep in the draw path that surface as SIGABRT on Android.
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                state
+                    .engine
+                    .render_lyrics_frame_to_canvas(current_time_ms, canvas)
+            }));
+            render_result = match result {
+                Ok(code) => code,
+                Err(_) => {
+                    warn!("lyrics render paniced; skipping frame");
+                    -22
+                }
+            };
         });
         state.gpu_renderer = Some(gpu_renderer);
         if let Err(error) = present_result {

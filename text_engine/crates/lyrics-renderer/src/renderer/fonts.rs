@@ -36,9 +36,8 @@ pub(super) fn with_skia_font_mgr<R>(f: impl FnOnce(&FontMgr) -> R) -> R {
             *cell.borrow_mut() = Some(FontMgr::new());
         }
         let font_mgr = cell.borrow();
-        f(font_mgr
-            .as_ref()
-            .expect("thread-local Skia FontMgr must be initialized"))
+        let font_mgr = font_mgr.as_ref().cloned().unwrap_or_else(FontMgr::new);
+        f(&font_mgr)
     })
 }
 

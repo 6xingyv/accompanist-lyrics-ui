@@ -295,10 +295,20 @@ class RustSkiaLyricsView @JvmOverloads constructor(
     fun setLyrics(lyrics: SyncedLyrics?) {
         if (this.lyrics === lyrics) return
         val oldLocale = this.lyrics?.detectNativeLyricsLocale()
+        val newLocale = lyrics?.detectNativeLyricsLocale()
         this.lyrics = lyrics
         resetManualScroll()
         sceneDirty = true
-        if (oldLocale != lyrics?.detectNativeLyricsLocale()) {
+        // Empty / null lyrics always detect as en-US. Reconfiguring fonts on that
+        // transient state (track change: clear → EmptyLyrics → real lyrics) tears
+        // down EGL and recreates the native engine mid-playback, which has been
+        // observed as SIGABRT on the lyrics-render thread when the next song starts.
+        // Only rebind fonts when non-empty lyrics actually change locale.
+        val shouldReconfigureFonts = lyrics != null &&
+            lyrics.lines.isNotEmpty() &&
+            oldLocale != null &&
+            oldLocale != newLocale
+        if (shouldReconfigureFonts) {
             applyCurrentFontConfig()
         } else {
             rebuildSceneAndRender()
@@ -401,7 +411,7 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         durationMs: Int = 0,
         playing: Boolean = false,
         liked: Boolean = false,
-        screen: String = "lyrics",
+        screen: String = "artwork",
         queueTitle: String = "",
         queueSource: String = "",
         queueFilter: String = "upNext",

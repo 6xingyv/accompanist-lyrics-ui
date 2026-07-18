@@ -116,7 +116,7 @@ impl LyricsRenderer {
     ) {
         let now = Instant::now();
         if self.pending_lyric_click_seek.is_some_and(|pending| {
-            now.duration_since(pending.recorded_at)
+            now.saturating_duration_since(pending.recorded_at)
                 > Duration::from_millis(LYRIC_CLICK_SEEK_PENDING_MS)
         }) {
             self.pending_lyric_click_seek = None;
@@ -160,7 +160,7 @@ impl LyricsRenderer {
         let now = Instant::now();
         let dt = self
             .last_manual_scroll_frame_at
-            .map(|last| now.duration_since(last).as_secs_f32())
+            .map(|last| now.saturating_duration_since(last).as_secs_f32())
             .unwrap_or(0.0)
             .clamp(0.001, LINE_LAYOUT_MAX_DT);
         self.last_manual_scroll_frame_at = Some(now);
@@ -445,7 +445,7 @@ impl LyricsRenderer {
 
         let dt = self
             .last_spring_frame_at
-            .map(|last| now.duration_since(last).as_secs_f32())
+            .map(|last| now.saturating_duration_since(last).as_secs_f32())
             .unwrap_or(0.0)
             .clamp(0.001, LINE_LAYOUT_MAX_DT);
         self.last_spring_frame_at = Some(now);

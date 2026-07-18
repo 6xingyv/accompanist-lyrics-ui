@@ -7,8 +7,8 @@
 
 use super::*;
 use skia_safe::{
-    canvas::SaveLayerRec, ClipOp, Color4f, Contains, Font, Image, Paint, Path, PathBuilder, Point,
-    Rect, SamplingOptions,
+    canvas::SaveLayerRec, BlendMode, ClipOp, Color4f, Contains, Font, Image, Paint, Path,
+    PathBuilder, Point, Rect, SamplingOptions,
 };
 
 const DESIGN_WIDTH: f32 = 393.0;
@@ -19,16 +19,30 @@ const PROGRESS_ROW: f32 = 60.0;
 const TRANSPORT_ROW: f32 = 142.0;
 const MODE_NAV_ROW: f32 = 90.0;
 
+// Player chrome is pure white + Plus over the mesh (not the mock's pink fills).
+// Alphas sampled from design exports (status bar ignored — system-drawn):
+//   - title / progress played: solid #FFFFFF → 1.0
+//   - secondary text (artist, time labels): ~0.60 effective opacity
+//   - mode/filter chips: unselected ~0.40, selected ~0.60
+//   - progress track: ~0.50
+//   - drag handle: ~0.40
 const WHITE: Color4f = Color4f::new(1.0, 1.0, 1.0, 1.0);
-const ACTIVE_BG: Color4f = Color4f::new(0.949, 0.608, 0.761, 1.0);
-const ACTIVE_FG: Color4f = Color4f::new(0.722, 0.169, 0.353, 1.0);
-const INACTIVE_BG: Color4f = Color4f::new(0.847, 0.275, 0.451, 0.72);
+const WHITE_HANDLE: Color4f = Color4f::new(1.0, 1.0, 1.0, 0.40);
+const WHITE_BTN: Color4f = Color4f::new(1.0, 1.0, 1.0, 0.40);
+const WHITE_BTN_ACTIVE: Color4f = Color4f::new(1.0, 1.0, 1.0, 0.60);
+const WHITE_SECONDARY: Color4f = Color4f::new(1.0, 1.0, 1.0, 0.60);
+const WHITE_TRACK: Color4f = Color4f::new(1.0, 1.0, 1.0, 0.50);
+const WHITE_FILL: Color4f = Color4f::new(1.0, 1.0, 1.0, 1.0);
+const ARTWORK_PLACEHOLDER: Color4f = Color4f::new(1.0, 1.0, 1.0, 0.12);
+const TEXT_PRIMARY_ALPHA: f32 = 1.0;
+const TEXT_SECONDARY_ALPHA: f32 = 0.60;
 
 #[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum PlayerScreenInput {
-    #[default]
     Lyrics,
+    /// Resting full-artwork page. Mode-nav chips are unselected here.
+    #[default]
     Artwork,
     Queue,
 }
@@ -270,9 +284,9 @@ pub(super) struct PlayerTransitionState {
 impl Default for PlayerTransitionState {
     fn default() -> Self {
         Self {
-            current: PlayerScreenInput::Lyrics,
-            from: PlayerScreenInput::Lyrics,
-            to: PlayerScreenInput::Lyrics,
+            current: PlayerScreenInput::Artwork,
+            from: PlayerScreenInput::Artwork,
+            to: PlayerScreenInput::Artwork,
             started_at: None,
         }
     }
@@ -309,8 +323,11 @@ impl PlayerTransitionState {
         let Some(started_at) = self.started_at else {
             return PlayerTransitionSample::settled(self.current);
         };
-        let progress =
-            ((now - started_at).as_secs_f32() / SCREEN_TRANSITION_SECONDS).clamp(0.0, 1.0);
+        let progress = (now
+            .saturating_duration_since(started_at)
+            .as_secs_f32()
+            / SCREEN_TRANSITION_SECONDS)
+            .clamp(0.0, 1.0);
         if progress >= 1.0 {
             self.current = self.to;
             self.started_at = None;
@@ -430,13 +447,16 @@ impl PlayerInteractionState {
         if self.pressed == Some(button) {
             let elapsed = self
                 .pressed_at
-                .map_or(1.0, |at| (now - at).as_secs_f32() / 0.08)
+                .map_or(1.0, |at| {
+                    now.saturating_duration_since(at).as_secs_f32() / 0.08
+                })
                 .clamp(0.0, 1.0);
             return (1.0 - 0.1 * ease_out_cubic(elapsed), elapsed < 1.0);
         }
         if let Some((released, at, from)) = self.released {
             if released == button {
-                let elapsed = ((now - at).as_secs_f32() / 0.18).clamp(0.0, 1.0);
+                let elapsed = (now.saturating_duration_since(at).as_secs_f32() / 0.18)
+                    .clamp(0.0, 1.0);
                 if elapsed >= 1.0 {
                     self.released = None;
                     return (1.0, false);
@@ -472,7 +492,9 @@ struct SvgIcon {
 impl SvgIcon {
     fn new(data: &str, view_width: f32, view_height: f32) -> Self {
         Self {
-            path: Path::from_svg(data).expect("embedded SF Symbol path must parse"),
+            // Never panic on icon parse: a missing glyph is preferable to
+            // taking down the player when a scene is rebuilt at track change.
+            path: Path::from_svg(data).unwrap_or_default(),
             view_width,
             view_height,
         }
@@ -659,16 +681,17 @@ pub(super) fn draw_player(
     let now = Instant::now();
     let mut animating = false;
 
-    // Empty system inset, then the Penpot drag handle row.
-    let mut paint = Paint::default();
-    paint.set_anti_alias(true);
-    paint.set_color4f(Color4f::new(1.0, 0.545, 0.769, 0.85), None);
-    canvas.draw_round_rect(
-        Rect::from_xywh(166.5 * scale, 59.5 * scale, 60.0 * scale, 5.0 * scale),
-        2.5 * scale,
-        2.5 * scale,
-        &paint,
-    );
+    // Drag handle — soft white pill (Plus).
+    {
+        let mut paint = plus_paint();
+        paint.set_color4f(WHITE_HANDLE, None);
+        canvas.draw_round_rect(
+            Rect::from_xywh(166.5 * scale, 59.5 * scale, 60.0 * scale, 5.0 * scale),
+            2.5 * scale,
+            2.5 * scale,
+            &paint,
+        );
+    }
 
     let page_bounds = Rect::from_xywh(
         0.0,
@@ -711,6 +734,7 @@ pub(super) fn draw_player(
 
     // One image participates in the transition. Its geometry is interpolated;
     // compact and full cover copies are never cross-faded over one another.
+    // Normal blend (not Plus) so the cover keeps true colour.
     let artwork_progress = transition.artwork_progress();
     let shared_art = lerp_rect(
         layout.compact_artwork_rect(),
@@ -733,6 +757,40 @@ pub(super) fn draw_player(
     animating || transition.active
 }
 
+/// Anti-aliased paint with additive (Plus) blend for white chrome over the mesh.
+fn plus_paint() -> Paint {
+    let mut paint = Paint::default();
+    paint.set_anti_alias(true);
+    paint.set_blend_mode(BlendMode::Plus);
+    paint
+}
+
+/// Draw prepared text through a Plus layer so white metadata matches Compose.
+fn draw_plus_text(
+    canvas: &skia_safe::Canvas,
+    typefaces: &HashMap<fontdb::ID, Typeface>,
+    text: &PreparedText,
+    origin_x: f32,
+    origin_y: f32,
+    alpha: f32,
+) {
+    let mut layer = Paint::default();
+    layer.set_blend_mode(BlendMode::Plus);
+    canvas.save_layer(&SaveLayerRec::default().paint(&layer));
+    draw_prepared_text_skia(
+        canvas,
+        typefaces,
+        text,
+        origin_x,
+        origin_y,
+        (255, 255, 255, 255),
+        alpha,
+        0.0,
+        None,
+    );
+    canvas.restore();
+}
+
 fn draw_compact_header(
     canvas: &skia_safe::Canvas,
     typefaces: &HashMap<fontdb::ID, Typeface>,
@@ -748,27 +806,21 @@ fn draw_compact_header(
         ClipOp::Intersect,
         true,
     );
-    draw_prepared_text_skia(
+    draw_plus_text(
         canvas,
         typefaces,
         &player.title,
         116.0 * s,
         102.5 * s,
-        (255, 255, 255, 255),
-        1.0,
-        0.0,
-        None,
+        TEXT_PRIMARY_ALPHA,
     );
-    draw_prepared_text_skia(
+    draw_plus_text(
         canvas,
         typefaces,
         &player.artist,
         116.0 * s,
         128.5 * s,
-        (255, 139, 196, 255),
-        0.85,
-        0.0,
-        None,
+        TEXT_SECONDARY_ALPHA,
     );
     canvas.restore();
 
@@ -812,27 +864,21 @@ fn draw_artwork_metadata(
         ClipOp::Intersect,
         true,
     );
-    draw_prepared_text_skia(
+    draw_plus_text(
         canvas,
         typefaces,
         &player.artwork_title,
         32.0 * scale,
         top + 24.0 * scale,
-        (255, 255, 255, 255),
-        1.0,
-        0.0,
-        None,
+        TEXT_PRIMARY_ALPHA,
     );
-    draw_prepared_text_skia(
+    draw_plus_text(
         canvas,
         typefaces,
         &player.artwork_artist,
         32.0 * scale,
         top + 51.0 * scale,
-        (255, 139, 196, 255),
-        0.78,
-        0.0,
-        None,
+        TEXT_SECONDARY_ALPHA,
     );
     canvas.restore();
 
@@ -911,9 +957,8 @@ fn draw_queue_page(
         canvas.scale((button_scale, button_scale));
         canvas.translate((-center.x, -center.y));
         let selected = player.queue_filter == filter;
-        let mut paint = Paint::default();
-        paint.set_anti_alias(true);
-        paint.set_color4f(if selected { ACTIVE_BG } else { INACTIVE_BG }, None);
+        let mut paint = plus_paint();
+        paint.set_color4f(if selected { WHITE_BTN_ACTIVE } else { WHITE_BTN }, None);
         canvas.draw_round_rect(
             Rect::from_xywh(
                 (x - 36.0) * scale,
@@ -931,7 +976,7 @@ fn draw_queue_page(
             center,
             icon_size.0 * scale,
             icon_size.1 * scale,
-            if selected { ACTIVE_FG } else { WHITE },
+            if selected { WHITE_BTN_ACTIVE } else { WHITE_BTN },
             1.0,
         );
         canvas.restore();
@@ -948,27 +993,21 @@ fn draw_queue_page(
         ClipOp::Intersect,
         true,
     );
-    draw_prepared_text_skia(
+    draw_plus_text(
         canvas,
         typefaces,
         &player.queue_title,
         32.0 * scale,
         234.0 * scale,
-        (255, 255, 255, 255),
-        1.0,
-        0.0,
-        None,
+        TEXT_PRIMARY_ALPHA,
     );
-    draw_prepared_text_skia(
+    draw_plus_text(
         canvas,
         typefaces,
         &player.queue_source,
         32.0 * scale,
         260.0 * scale,
-        (255, 139, 196, 255),
-        0.78,
-        0.0,
-        None,
+        TEXT_SECONDARY_ALPHA,
     );
 
     for (index, item) in player.queue_items.iter().enumerate() {
@@ -988,27 +1027,21 @@ fn draw_queue_page(
             ClipOp::Intersect,
             true,
         );
-        draw_prepared_text_skia(
+        draw_plus_text(
             canvas,
             typefaces,
             &item.title,
             92.0 * scale,
             top + 8.0 * scale,
-            (255, 255, 255, 255),
-            0.96,
-            0.0,
-            None,
+            TEXT_PRIMARY_ALPHA,
         );
-        draw_prepared_text_skia(
+        draw_plus_text(
             canvas,
             typefaces,
             &item.artist,
             92.0 * scale,
             top + 30.0 * scale,
-            (255, 255, 255, 255),
-            0.58,
-            0.0,
-            None,
+            TEXT_SECONDARY_ALPHA,
         );
         canvas.restore();
         draw_reorder_handle(canvas, Point::new(349.0 * scale, top + 28.0 * scale), scale);
@@ -1017,9 +1050,8 @@ fn draw_queue_page(
 }
 
 fn draw_reorder_handle(canvas: &skia_safe::Canvas, center: Point, scale: f32) {
-    let mut paint = Paint::default();
-    paint.set_anti_alias(true);
-    paint.set_color4f(Color4f::new(1.0, 1.0, 1.0, 0.55), None);
+    let mut paint = plus_paint();
+    paint.set_color4f(WHITE_SECONDARY, None);
     for offset in [-4.0, 0.0, 4.0] {
         canvas.draw_round_rect(
             Rect::from_xywh(
@@ -1051,16 +1083,15 @@ fn draw_progress(
     } else {
         0.0
     };
-    let mut paint = Paint::default();
-    paint.set_anti_alias(true);
-    paint.set_color4f(Color4f::new(1.0, 1.0, 1.0, 0.28), None);
+    let mut paint = plus_paint();
+    paint.set_color4f(WHITE_TRACK, None);
     canvas.draw_round_rect(
         Rect::from_xywh(left, top, width, 4.0 * s),
         2.0 * s,
         2.0 * s,
         &paint,
     );
-    paint.set_color4f(Color4f::new(1.0, 1.0, 1.0, 0.92), None);
+    paint.set_color4f(WHITE_FILL, None);
     canvas.draw_round_rect(
         Rect::from_xywh(left, top, width * ratio, 4.0 * s),
         2.0 * s,
@@ -1080,7 +1111,7 @@ fn draw_progress(
         left,
         l.progress_top + 28.0 * s,
         11.0 * s,
-        0.65,
+        TEXT_SECONDARY_ALPHA,
         false,
     );
     draw_runtime_label(
@@ -1090,7 +1121,7 @@ fn draw_progress(
         left + width,
         l.progress_top + 28.0 * s,
         11.0 * s,
-        0.65,
+        TEXT_SECONDARY_ALPHA,
         true,
     );
 }
@@ -1159,30 +1190,25 @@ fn draw_mode_navigation(
     let l = player.layout;
     let s = l.scale;
     let y = l.nav_top + 45.0 * s;
-    for (button, icon, x, screen, icon_size) in [
+    // Only Lyrics and Queue carry a selected chip. Artwork is the resting page
+    // with every chip inactive; Output is never a selected destination.
+    for (button, icon, x, active_on, icon_size) in [
         (
             PlayerButton::Lyrics,
             &player.icons.lyrics,
             80.0,
-            Some(PlayerScreenInput::Lyrics),
-            (18.0, 18.0),
-        ),
-        (
-            PlayerButton::Output,
-            &player.icons.lyrics,
-            196.5,
-            Some(PlayerScreenInput::Artwork),
+            PlayerScreenInput::Lyrics,
             (18.0, 18.0),
         ),
         (
             PlayerButton::Queue,
             &player.icons.list,
             313.0,
-            Some(PlayerScreenInput::Queue),
+            PlayerScreenInput::Queue,
             (18.0, 15.0),
         ),
     ] {
-        let active = screen == Some(selected_screen);
+        let active = selected_screen == active_on;
         let (button_scale, is_animating) = interaction.scale_for(button, now);
         *animating |= is_animating;
         canvas.save();
@@ -1190,36 +1216,37 @@ fn draw_mode_navigation(
         canvas.scale((button_scale, button_scale));
         canvas.translate((-x * s, -y));
         let rect = Rect::from_xywh((x - 16.0) * s, y - 16.0 * s, 32.0 * s, 32.0 * s);
-        let mut paint = Paint::default();
-        paint.set_anti_alias(true);
-        paint.set_color4f(if active { ACTIVE_BG } else { INACTIVE_BG }, None);
+        let mut paint = plus_paint();
+        paint.set_color4f(if active { WHITE_BTN_ACTIVE } else { WHITE_BTN }, None);
         canvas.draw_round_rect(rect, 16.0 * s, 16.0 * s, &paint);
-        if button != PlayerButton::Output {
-            draw_icon(
-                canvas,
-                icon,
-                Point::new(x * s, y),
-                icon_size.0 * s,
-                icon_size.1 * s,
-                if active { ACTIVE_FG } else { WHITE },
-                1.0,
-            );
-        }
+        draw_icon(
+            canvas,
+            icon,
+            Point::new(x * s, y),
+            icon_size.0 * s,
+            icon_size.1 * s,
+            if active { WHITE_BTN_ACTIVE } else { WHITE_BTN },
+            1.0,
+        );
         canvas.restore();
     }
+
+    // Output: press scale only — never active/selected styling (always 0.4).
+    let output_x = 196.5;
+    let (output_scale, output_animating) = interaction.scale_for(PlayerButton::Output, now);
+    *animating |= output_animating;
+    canvas.save();
+    canvas.translate((output_x * s, y));
+    canvas.scale((output_scale, output_scale));
+    canvas.translate((-output_x * s, -y));
+    let output_rect = Rect::from_xywh((output_x - 16.0) * s, y - 16.0 * s, 32.0 * s, 32.0 * s);
+    let mut output_paint = plus_paint();
+    output_paint.set_color4f(WHITE_BTN, None);
+    canvas.draw_round_rect(output_rect, 16.0 * s, 16.0 * s, &output_paint);
     // AirPlay/audio output icon: three radio arcs and the lower triangle. It is
     // drawn as Skia primitives so it stays crisp at every render scale.
-    let (output_scale, _) = interaction.scale_for(PlayerButton::Output, now);
-    draw_airplay_overlay(
-        canvas,
-        Point::new(196.5 * s, y),
-        18.0 * s * output_scale,
-        if selected_screen == PlayerScreenInput::Artwork {
-            ACTIVE_FG
-        } else {
-            WHITE
-        },
-    );
+    draw_airplay_overlay(canvas, Point::new(output_x * s, y), 18.0 * s, WHITE_BTN);
+    canvas.restore();
 }
 
 fn draw_content_layer(
@@ -1269,9 +1296,8 @@ fn draw_action_button(
     canvas.translate(center);
     canvas.scale((scale, scale));
     canvas.translate((-center.x, -center.y));
-    let mut paint = Paint::default();
-    paint.set_anti_alias(true);
-    paint.set_color4f(INACTIVE_BG, None);
+    let mut paint = plus_paint();
+    paint.set_color4f(if filled { WHITE_BTN_ACTIVE } else { WHITE_BTN }, None);
     canvas.draw_circle(center, diameter * 0.5, &paint);
     draw_icon(
         canvas,
@@ -1283,8 +1309,8 @@ fn draw_action_button(
         } else {
             icon_size
         },
-        WHITE,
-        if filled { 1.0 } else { 1.0 },
+        if filled { WHITE_BTN_ACTIVE } else { WHITE_BTN },
+        1.0,
     );
     canvas.restore();
 }
@@ -1304,7 +1330,7 @@ fn draw_artwork(canvas: &skia_safe::Canvas, thumbnail: Option<&Image>, rect: Rec
         );
     } else {
         let mut paint = Paint::default();
-        paint.set_color4f(Color4f::new(0.8, 0.1, 0.45, 1.0), None);
+        paint.set_color4f(ARTWORK_PLACEHOLDER, None);
         canvas.draw_rect(rect, &paint);
     }
     canvas.restore();
@@ -1322,8 +1348,7 @@ fn draw_icon(
     let scale = (width / icon.view_width).min(height / icon.view_height);
     let draw_w = icon.view_width * scale;
     let draw_h = icon.view_height * scale;
-    let mut paint = Paint::default();
-    paint.set_anti_alias(true);
+    let mut paint = plus_paint();
     paint.set_color4f(
         Color4f::new(color.r, color.g, color.b, color.a * alpha),
         None,
@@ -1336,8 +1361,7 @@ fn draw_icon(
 }
 
 fn draw_airplay_overlay(canvas: &skia_safe::Canvas, center: Point, size: f32, color: Color4f) {
-    let mut paint = Paint::default();
-    paint.set_anti_alias(true);
+    let mut paint = plus_paint();
     paint.set_style(skia_safe::paint::Style::Stroke);
     paint.set_stroke_width((size * 0.075).max(1.0));
     paint.set_stroke_cap(skia_safe::paint::Cap::Round);
@@ -1367,8 +1391,7 @@ fn draw_play_icon(canvas: &skia_safe::Canvas, center: Point, size: f32) {
     builder.line_to((center.x + size * 0.43, center.y));
     builder.line_to((center.x - size * 0.28, center.y + size * 0.43));
     builder.close();
-    let mut paint = Paint::default();
-    paint.set_anti_alias(true);
+    let mut paint = plus_paint();
     paint.set_color4f(WHITE, None);
     canvas.draw_path(&builder.detach(), &paint);
 }
@@ -1390,8 +1413,7 @@ fn draw_runtime_label(
         .map(|typeface| Font::from_typeface(typeface, size))
         .unwrap_or_default();
     font.set_size(size);
-    let mut paint = Paint::default();
-    paint.set_anti_alias(true);
+    let mut paint = plus_paint();
     paint.set_color4f(Color4f::new(1.0, 1.0, 1.0, alpha), None);
     let measured = font.measure_str(text, Some(&paint)).0;
     let left = if right_aligned { x - measured } else { x };
@@ -1579,6 +1601,13 @@ mod tests {
     }
 
     #[test]
+    fn player_wire_defaults_to_artwork_when_screen_omitted() {
+        let player: PlayerInput =
+            serde_json::from_str(r#"{"title":"Jupiter","artist":"Coldplay"}"#).unwrap();
+        assert_eq!(player.screen, PlayerScreenInput::Artwork);
+    }
+
+    #[test]
     fn player_wire_deserializes_queue_screen_and_items() {
         let player: PlayerInput = serde_json::from_str(
             r#"{"screen":"queue","title":"Jupiter","artist":"Coldplay","queueTitle":"Up Next","queueSource":"From Jupiter","queueFilter":"repeatOne","queueItems":[{"title":"Moon Music","artist":"Coldplay"}]}"#,
@@ -1590,3 +1619,5 @@ mod tests {
         assert_eq!(player.queue_items[0].title, "Moon Music");
     }
 }
+
+

@@ -352,6 +352,18 @@ impl TextEngine {
         self.renderer.set_playback_state(playing, reactive);
     }
 
+    /// Push a native clock sample into the portrait player chrome (duration +
+    /// play/pause). Prefer this over host-wired isPlaying/duration when a
+    /// process-local music engine is available.
+    pub fn set_player_live_playback(&mut self, playing: bool, duration_ms: i32) {
+        self.renderer
+            .set_player_live_playback(playing, duration_ms);
+    }
+
+    pub fn clear_player_live_playback(&mut self) {
+        self.renderer.clear_player_live_playback();
+    }
+
     pub fn hit_test_lyrics_line(&mut self, x: f32, y: f32, current_time_ms: i32) -> i32 {
         self.renderer.hit_test_line(x, y, current_time_ms)
     }

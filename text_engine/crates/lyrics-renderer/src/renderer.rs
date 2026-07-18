@@ -25,7 +25,8 @@ use draw::{
 use font_fallback::{cjk_family_priority, new_font_system};
 use fonts::*;
 use player::{
-    PlayerInput, PlayerInteractionState, PlayerTransitionState, PreparedPlayer,
+    PlayerButton, PlayerInput, PlayerInteractionState, PlayerScreenInput, PlayerTransitionState,
+    PreparedPlayer,
 };
 use scroll::{ManualScrollState, SpringLineState};
 use text_utils::{
@@ -614,6 +615,17 @@ pub struct LyricsRenderer {
     /// Native player pointer state and button press/release animation.
     player_interaction: PlayerInteractionState,
     player_transition: PlayerTransitionState,
+    /// Authoritative portrait-player page. Host wire `screen` is only used as the
+    /// initial value when a player scene first appears; subsequent Lyrics /
+    /// Artwork / Queue taps update this field entirely inside Rust.
+    player_screen: PlayerScreenInput,
+    /// True once a player scene has been prepared at least once.
+    player_screen_initialized: bool,
+    /// Live duration/playing from music-foundation (or another native clock).
+    /// When set, they override the wire values baked into [PreparedPlayer] so
+    /// Kotlin never has to push per-frame transport state.
+    player_live_duration_ms: Option<i32>,
+    player_live_playing: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -1143,6 +1155,11 @@ impl LyricsRenderer {
             last_frame_timing: EngineFrameTiming::default(),
             player_interaction: PlayerInteractionState::default(),
             player_transition: PlayerTransitionState::default(),
+            // Default resting page is full artwork; lyrics/queue are toggles off it.
+            player_screen: PlayerScreenInput::Artwork,
+            player_screen_initialized: false,
+            player_live_duration_ms: None,
+            player_live_playing: None,
         }
     }
 
@@ -1155,10 +1172,17 @@ impl LyricsRenderer {
     /// ARGB_8888 (`0xAARRGGBB`), row-major `width`×`height`. Enables the full-bleed
     /// background mode. `seed` keeps a song's control-point layout stable.
     pub fn set_background_art(&mut self, pixels: &[u32], width: usize, height: usize, seed: u32) {
-        self.mesh_gradient = crate::mesh::MeshGradient::new(pixels, width, height, seed);
+        let replacing = self.background_enabled && self.mesh_gradient.is_some();
+        let Some(mesh) = crate::mesh::MeshGradient::new(pixels, width, height, seed) else {
+            // Keep the previous mesh on failure so a bad decode never blacks out
+            // an already-visible player surface.
+            return;
+        };
+        self.mesh_gradient = Some(mesh);
         self.background_enabled = true;
-        // Fade the new artwork in.
-        self.background_alpha = 0.0;
+        // First artwork fades up from black. Track-to-track swaps stay fully
+        // opaque so we never flash an empty black frame between covers.
+        self.background_alpha = if replacing { 1.0 } else { 0.0 };
     }
 
     /// Turn the background off (revert to transparent-overlay behavior).
@@ -1174,6 +1198,62 @@ impl LyricsRenderer {
         self.background_reactive = reactive;
     }
 
+    /// Override portrait-player transport chrome with a native clock sample
+    /// (music-foundation). Call every frame when a process-local clock is available.
+    pub fn set_player_live_playback(&mut self, playing: bool, duration_ms: i32) {
+        self.player_live_playing = Some(playing);
+        self.player_live_duration_ms = Some(duration_ms.max(0));
+        // Keep mesh time flow in lockstep with the same sample so hosts do not
+        // need a separate Kotlin isPlaying push for the player surface.
+        self.playback_active = playing;
+    }
+
+    /// Drop native live playback overrides (standalone hosts / tests).
+    pub fn clear_player_live_playback(&mut self) {
+        self.player_live_playing = None;
+        self.player_live_duration_ms = None;
+    }
+
+    /// Select one of the three portrait pages and start the transition. Hosts
+    /// should not echo this back through the scene wire.
+    pub fn select_player_screen(&mut self, screen: PlayerScreenInput) {
+        let previous = if self.player_screen_initialized {
+            Some(self.player_screen)
+        } else {
+            self.scene
+                .as_ref()
+                .and_then(|scene| scene.player.as_ref())
+                .map(|player| player.screen)
+        };
+        self.player_screen = screen;
+        self.player_screen_initialized = true;
+        if let Some(player) = self
+            .scene
+            .as_mut()
+            .and_then(|scene| scene.player.as_mut())
+        {
+            player.screen = screen;
+        }
+        self.player_transition.set_target(previous, Some(screen));
+    }
+
+    fn apply_player_live_state(&mut self) {
+        let Some(player) = self
+            .scene
+            .as_mut()
+            .and_then(|scene| scene.player.as_mut())
+        else {
+            return;
+        };
+        player.screen = self.player_screen;
+        if let Some(duration_ms) = self.player_live_duration_ms {
+            player.duration_ms = duration_ms;
+        }
+        if let Some(playing) = self.player_live_playing {
+            player.is_playing = playing;
+        }
+    }
+
     /// Draw the opaque mesh-gradient background across the whole surface and advance
     /// its (loudness-paced) animation clock. Returns whether the background is still
     /// animating (so the render loop keeps ticking). No-op unless `background_enabled`.
@@ -1186,7 +1266,7 @@ impl LyricsRenderer {
         let now = Instant::now();
         let frame_dt = self
             .last_mesh_frame_at
-            .map(|last| (now - last).as_secs_f32().clamp(0.0, 0.1))
+            .map(|last| now.saturating_duration_since(last).as_secs_f32().clamp(0.0, 0.1))
             .unwrap_or(0.0);
         let dt = frame_dt * 0.2;
         self.last_mesh_frame_at = Some(now);
@@ -1237,15 +1317,39 @@ impl LyricsRenderer {
 
     pub fn set_scene_json(&mut self, json: &str) -> Result<RendererMetrics, String> {
         let scene: LyricsScene = serde_json::from_str(json).map_err(|error| error.to_string())?;
-        let prepared = self.prepare_scene(scene)?;
+        let mut prepared = self.prepare_scene(scene)?;
+        // Rust owns the settled page once the player is live. Host wire `screen`
+        // only seeds the first player appearance so metadata updates never yank
+        // the user off the artwork/queue page mid-interaction.
+        if let Some(player) = prepared.player.as_mut() {
+            if self.player_screen_initialized {
+                player.screen = self.player_screen;
+            } else {
+                self.player_screen = player.screen;
+                self.player_screen_initialized = true;
+            }
+            if let Some(duration_ms) = self.player_live_duration_ms {
+                player.duration_ms = duration_ms;
+            }
+            if let Some(playing) = self.player_live_playing {
+                player.is_playing = playing;
+            }
+        } else {
+            self.player_screen_initialized = false;
+            self.player_screen = PlayerScreenInput::Artwork;
+        }
         let previous_screen = self
             .scene
             .as_ref()
             .and_then(|scene| scene.player.as_ref())
             .map(|player| player.screen);
         let target_screen = prepared.player.as_ref().map(|player| player.screen);
-        self.player_transition
-            .set_target(previous_screen, target_screen);
+        // Only re-target the transition when the page actually changes. Metadata
+        // scene rebuilds keep the same screen and must not restart the animation.
+        if previous_screen != target_screen {
+            self.player_transition
+                .set_target(previous_screen, target_screen);
+        }
         let metrics = RendererMetrics {
             width: prepared.config.width,
             height: prepared.config.height,
@@ -1311,6 +1415,10 @@ impl LyricsRenderer {
     ) -> i32 {
         let frame_start = Instant::now();
         let mut timing = EngineFrameTiming::default();
+
+        // Apply Rust-owned screen + native live transport before sampling the
+        // transition or drawing chrome, so every frame sees the same state.
+        self.apply_player_live_state();
 
         let phase = Instant::now();
         let typeface_stats = self.ensure_skia_typefaces_for_scene();
@@ -1874,30 +1982,62 @@ impl LyricsRenderer {
     /// Begin a native-player button gesture and return its stable action code.
     /// Zero means the point does not hit player chrome.
     pub fn player_pointer_down(&mut self, x: f32, y: f32) -> i32 {
-        let Some((layout, screen)) = self
+        let Some(layout) = self
             .scene
             .as_ref()
             .and_then(|scene| scene.player.as_ref())
-            .map(|player| (player.layout, player.screen))
+            .map(|player| player.layout)
         else {
             return 0;
         };
-        self.player_interaction.press(layout, screen, x, y)
+        self.player_interaction
+            .press(layout, self.player_screen, x, y)
     }
 
-    /// Finish a native-player button gesture. The action is emitted only when
-    /// release remains inside the button that accepted the press.
+    /// Finish a native-player button gesture.
+    ///
+    /// Mode nav:
+    /// - Lyrics / Queue are toggles against the resting Artwork page.
+    /// - Output never changes the page (host opens a media sheet).
+    ///
+    /// The action code is still returned so the host can handle transport /
+    /// favorite / more / output / queue filters.
     pub fn player_pointer_up(&mut self, x: f32, y: f32) -> i32 {
-        let Some((layout, screen)) = self
+        let Some(layout) = self
             .scene
             .as_ref()
             .and_then(|scene| scene.player.as_ref())
-            .map(|player| (player.layout, player.screen))
+            .map(|player| player.layout)
         else {
             self.player_interaction.cancel();
             return 0;
         };
-        self.player_interaction.release(layout, screen, x, y)
+        let action = self
+            .player_interaction
+            .release(layout, self.player_screen, x, y);
+        match action {
+            code if code == PlayerButton::Lyrics as i32 => {
+                let next = if self.player_screen == PlayerScreenInput::Lyrics {
+                    PlayerScreenInput::Artwork
+                } else {
+                    PlayerScreenInput::Lyrics
+                };
+                self.select_player_screen(next);
+            }
+            code if code == PlayerButton::Output as i32 => {
+                // Sheet-only: no page change, no selected state.
+            }
+            code if code == PlayerButton::Queue as i32 => {
+                let next = if self.player_screen == PlayerScreenInput::Queue {
+                    PlayerScreenInput::Artwork
+                } else {
+                    PlayerScreenInput::Queue
+                };
+                self.select_player_screen(next);
+            }
+            _ => {}
+        }
+        action
     }
 
     pub fn cancel_player_pointer(&mut self) {
@@ -3574,5 +3714,65 @@ mod tests {
         assert!(mid_effect.offset_y > 0.0);
         assert!(mid_effect.offset_y < start_effect.offset_y);
         assert!(end_effect.offset_y.abs() < 0.0001);
+    }
+
+    #[test]
+    fn rust_page_selection_is_authoritative_after_first_player_scene() {
+        let mut renderer = LyricsRenderer::new();
+        assert!(!renderer.player_screen_initialized);
+        assert_eq!(renderer.player_screen, PlayerScreenInput::Artwork);
+        renderer.player_screen_initialized = true;
+        renderer.select_player_screen(PlayerScreenInput::Lyrics);
+        assert_eq!(renderer.player_screen, PlayerScreenInput::Lyrics);
+        // A subsequent host wire still advertising artwork must not win once
+        // ownership is established (mirrors set_scene_json retention logic).
+        let wire_screen = PlayerScreenInput::Artwork;
+        let retained = if renderer.player_screen_initialized {
+            renderer.player_screen
+        } else {
+            wire_screen
+        };
+        assert_eq!(retained, PlayerScreenInput::Lyrics);
+    }
+
+    #[test]
+    fn lyrics_and_queue_mode_buttons_toggle_back_to_artwork() {
+        let mut renderer = LyricsRenderer::new();
+        renderer.player_screen_initialized = true;
+        renderer.player_screen = PlayerScreenInput::Artwork;
+
+        // Open lyrics, then toggle closed.
+        renderer.select_player_screen(PlayerScreenInput::Lyrics);
+        assert_eq!(renderer.player_screen, PlayerScreenInput::Lyrics);
+        let close_lyrics = if renderer.player_screen == PlayerScreenInput::Lyrics {
+            PlayerScreenInput::Artwork
+        } else {
+            PlayerScreenInput::Lyrics
+        };
+        renderer.select_player_screen(close_lyrics);
+        assert_eq!(renderer.player_screen, PlayerScreenInput::Artwork);
+
+        // Open queue, then toggle closed.
+        renderer.select_player_screen(PlayerScreenInput::Queue);
+        assert_eq!(renderer.player_screen, PlayerScreenInput::Queue);
+        let close_queue = if renderer.player_screen == PlayerScreenInput::Queue {
+            PlayerScreenInput::Artwork
+        } else {
+            PlayerScreenInput::Queue
+        };
+        renderer.select_player_screen(close_queue);
+        assert_eq!(renderer.player_screen, PlayerScreenInput::Artwork);
+    }
+
+    #[test]
+    fn live_playback_overrides_are_stored_for_frame_apply() {
+        let mut renderer = LyricsRenderer::new();
+        renderer.set_player_live_playback(true, 243_000);
+        assert_eq!(renderer.player_live_playing, Some(true));
+        assert_eq!(renderer.player_live_duration_ms, Some(243_000));
+        assert!(renderer.playback_active);
+        renderer.clear_player_live_playback();
+        assert_eq!(renderer.player_live_playing, None);
+        assert_eq!(renderer.player_live_duration_ms, None);
     }
 }

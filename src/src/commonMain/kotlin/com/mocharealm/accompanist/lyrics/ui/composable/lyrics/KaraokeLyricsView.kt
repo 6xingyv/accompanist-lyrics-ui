@@ -25,6 +25,15 @@ import org.jetbrains.compose.resources.FontResource
  * the top bar / above the navigation bar, [isPlaying] gates the background's time
  * flow, and [backgroundReactive] enables loudness-driven reactivity (fed by
  * `NativeAudioAnalysis`). These are ignored on non-Android targets.
+ *
+ * Portrait player chrome: pass [playerChrome] to hand the complete three-page
+ * player (lyrics / artwork / queue) to Rust. That path is mutually exclusive with
+ * the legacy top bar driven by [title] / [artist] / [onControlsClick].
+ *
+ * Rust owns page switching and, when [useMusicFoundationClock] is enabled,
+ * position / duration / play-pause via music-foundation's C ABI — the host must
+ * not push those every frame. [onPlayerAction] still delivers transport, favorite,
+ * more, media-output, and queue-filter actions for host-side control logic.
  */
 @Suppress("UNUSED_PARAMETER")
 @Composable
@@ -46,6 +55,8 @@ fun KaraokeLyricsView(
     title: String? = null,
     artist: String? = null,
     onControlsClick: (() -> Unit)? = null,
+    playerChrome: NativePlayerChrome? = null,
+    onPlayerAction: ((NativePlayerAction) -> Unit)? = null,
 ) {
     NativeLyricsViewHost(
         lyrics = lyrics,
@@ -65,5 +76,7 @@ fun KaraokeLyricsView(
         title = title,
         artist = artist,
         onControlsClick = onControlsClick,
+        playerChrome = playerChrome,
+        onPlayerAction = onPlayerAction,
     )
 }

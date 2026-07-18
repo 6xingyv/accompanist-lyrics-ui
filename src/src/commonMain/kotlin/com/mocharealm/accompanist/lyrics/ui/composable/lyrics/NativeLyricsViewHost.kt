@@ -22,9 +22,11 @@ internal expect fun NativeLyricsViewHost(
     fontResource: FontResource?,
     // Full-bleed GPU mesh-gradient background (Android). `backgroundArtwork` enables
     // it; `contentPadding` carries the SYSTEM insets (status/caption top, nav bottom);
-    // `isPlaying`/`backgroundReactive` drive the animation. When `title` is non-null,
-    // the surface also draws the player top bar (thumbnail + title/artist + ⋯ button),
-    // and `onControlsClick` fires on a ⋯ tap. All ignored off Android.
+    // `isPlaying`/`backgroundReactive` drive the animation. When `playerChrome` is
+    // non-null, Rust owns the complete three-page portrait player and
+    // `onPlayerAction` receives button codes. Otherwise a non-null `title` enables
+    // the legacy top bar (thumbnail + title/artist + ⋯) and `onControlsClick` fires
+    // on a ⋯ tap. All ignored off Android.
     backgroundArtwork: ImageBitmap? = null,
     contentPadding: PaddingValues = PaddingValues(0.dp),
     isPlaying: Boolean = true,
@@ -34,4 +36,6 @@ internal expect fun NativeLyricsViewHost(
     title: String? = null,
     artist: String? = null,
     onControlsClick: (() -> Unit)? = null,
+    playerChrome: NativePlayerChrome? = null,
+    onPlayerAction: ((NativePlayerAction) -> Unit)? = null,
 )
