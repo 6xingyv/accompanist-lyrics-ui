@@ -1,7 +1,11 @@
 package com.mocharealm.accompanist.lyrics.ui.renderer
 
+import android.animation.ValueAnimator
 import android.content.Context
 import android.graphics.Color
+import android.graphics.Outline
+import android.graphics.Path
+import android.graphics.RectF
 import android.graphics.SurfaceTexture
 import android.os.Handler
 import android.os.HandlerThread
@@ -15,12 +19,14 @@ import android.view.TextureView
 import android.view.VelocityTracker
 import android.view.View
 import android.view.ViewConfiguration
+import android.view.ViewOutlineProvider
 import com.mocharealm.accompanist.lyrics.core.model.SyncedLyrics
 import com.mocharealm.accompanist.lyrics.text.NativeFontConfig
 import com.mocharealm.accompanist.lyrics.text.NativeFontSource
 import com.mocharealm.accompanist.lyrics.text.NativeTextEngine
 import androidx.compose.ui.unit.Density
 import com.mocharealm.accompanist.lyrics.ui.composable.lyrics.KaraokeLyricsConfig
+import com.mocharealm.accompanist.lyrics.ui.composable.lyrics.NativePlayerExpansionGeometry
 import com.mocharealm.accompanist.lyrics.ui.composable.lyrics.getFontSource
 import com.mocharealm.accompanist.lyrics.ui.diagnostics.LyricsUiDiagnostics
 import java.util.concurrent.CountDownLatch
@@ -31,6 +37,8 @@ import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
+
+private const val PLAYER_EXPANSION_DURATION_MS = 420L
 
 // Playback-clock reconciliation tuning (see `computeDisplayTimeMs`).
 /** A gap larger than this between our clock and a fresh sample is a seek → snap. */
@@ -71,6 +79,11 @@ class RustSkiaLyricsView @JvmOverloads constructor(
     }
 
     init {
+        outlineProvider = object : ViewOutlineProvider() {
+            override fun getOutline(view: View, outline: Outline) {
+                updatePlayerOutline(outline)
+            }
+        }
         LyricsUiDiagnostics.record(
             "RustSkiaLyricsView",
             "created sdk=${android.os.Build.VERSION.SDK_INT} manufacturer=${android.os.Build.MANUFACTURER} model=${android.os.Build.MODEL}",
@@ -144,6 +157,14 @@ class RustSkiaLyricsView @JvmOverloads constructor(
     private var onControlsClicked: (() -> Unit)? = null
     private var playerWire: PlayerWire? = null
     private var playerExpansionProgress = 1f
+    private var playerExpansionTarget = 1f
+    private var playerExpansionGeometry: NativePlayerExpansionGeometry? = null
+    private var playerExpansionConfigured = false
+    private var playerExpansionAnimator: ValueAnimator? = null
+    private var playerExpansionDragStartProgress = 0f
+    private var playerExpansionGestureOwnsTarget = false
+    private val playerClipPath = Path()
+    private val playerClipRect = RectF()
     private var onPlayerAction: ((Int) -> Unit)? = null
     private data class QueueArtworkPixels(val pixels: IntArray, val width: Int, val height: Int)
     private val queueArtworkPixels = LinkedHashMap<String, QueueArtworkPixels>()
@@ -219,8 +240,7 @@ class RustSkiaLyricsView @JvmOverloads constructor(
     private var onLinePressed: ((Int) -> Unit)? = null
     private var onQueueReordered: ((Int, Int) -> Unit)? = null
     private var onPlayerExpansionDragStart: (() -> Unit)? = null
-    private var onPlayerExpansionDrag: ((Float) -> Unit)? = null
-    private var onPlayerExpansionDragEnd: ((Float) -> Unit)? = null
+    private var onPlayerExpansionSettled: ((Float) -> Unit)? = null
 
     private val gestureDetector = GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
         override fun onDown(e: MotionEvent): Boolean = true
@@ -470,9 +490,138 @@ class RustSkiaLyricsView @JvmOverloads constructor(
 
     fun setPlayerExpansionProgress(progress: Float) {
         val next = progress.coerceIn(0f, 1f)
+        cancelPlayerExpansionAnimator()
+        playerExpansionTarget = next
         if (playerExpansionProgress == next) return
         playerExpansionProgress = next
+        applyPlayerExpansionVisual(next)
         if (!engineClosed) postPlayerCommand { engine.setPlayerExpansionProgress(next) }
+    }
+
+    fun configurePlayerExpansion(
+        geometry: NativePlayerExpansionGeometry?,
+        target: Float,
+    ) {
+        val nextTarget = target.coerceIn(0f, 1f)
+        val firstConfiguration = !playerExpansionConfigured
+        val geometryChanged = playerExpansionGeometry != geometry
+        playerExpansionGeometry = geometry
+        playerExpansionConfigured = geometry != null
+        if (geometry == null) {
+            cancelPlayerExpansionAnimator()
+            playerExpansionProgress = nextTarget
+            playerExpansionTarget = nextTarget
+            translationX = 0f
+            translationY = 0f
+            clipToOutline = false
+            return
+        }
+        if (firstConfiguration) {
+            playerExpansionProgress = nextTarget
+            playerExpansionTarget = nextTarget
+            applyPlayerExpansionVisual(nextTarget)
+            if (!engineClosed) postPlayerCommand {
+                engine.setPlayerExpansionProgress(nextTarget)
+            }
+            return
+        }
+        if (geometryChanged) applyPlayerExpansionVisual(playerExpansionProgress)
+        if (isPlayerExpansionDragging || playerExpansionGestureOwnsTarget) return
+        if (nextTarget != playerExpansionTarget) animatePlayerExpansionTo(nextTarget)
+    }
+
+    private fun animatePlayerExpansionTo(target: Float) {
+        val next = target.coerceIn(0f, 1f)
+        cancelPlayerExpansionAnimator()
+        playerExpansionTarget = next
+        if (next == playerExpansionProgress) {
+            applyPlayerExpansionVisual(next)
+            playerExpansionGestureOwnsTarget = false
+            onPlayerExpansionSettled?.invoke(next)
+            return
+        }
+        if (!engineClosed) postPlayerCommand {
+            engine.animatePlayerExpansionTo(next, PLAYER_EXPANSION_DURATION_MS.toFloat())
+        }
+        playerExpansionAnimator = ValueAnimator.ofFloat(playerExpansionProgress, next).apply {
+            duration = PLAYER_EXPANSION_DURATION_MS
+            interpolator = android.animation.TimeInterpolator { input ->
+                input * input * (3f - 2f * input)
+            }
+            addUpdateListener { animator ->
+                playerExpansionProgress = animator.animatedValue as Float
+                applyPlayerExpansionVisual(playerExpansionProgress)
+            }
+            addListener(object : android.animation.AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: android.animation.Animator) {
+                    if (playerExpansionAnimator !== animation) return
+                    playerExpansionAnimator = null
+                    playerExpansionProgress = next
+                    applyPlayerExpansionVisual(next)
+                    playerExpansionGestureOwnsTarget = false
+                    onPlayerExpansionSettled?.invoke(next)
+                }
+            })
+            start()
+        }
+    }
+
+    private fun cancelPlayerExpansionAnimator() {
+        val animator = playerExpansionAnimator
+        playerExpansionAnimator = null
+        animator?.cancel()
+    }
+
+    private fun applyInteractivePlayerExpansion(progress: Float) {
+        val next = progress.coerceIn(0f, 1f)
+        playerExpansionProgress = next
+        playerExpansionTarget = next
+        applyPlayerExpansionVisual(next)
+        if (!engineClosed) postPlayerCommand { engine.setPlayerExpansionProgress(next) }
+    }
+
+    private fun applyPlayerExpansionVisual(progress: Float) {
+        val geometry = playerExpansionGeometry ?: return
+        val p = progress.coerceIn(0f, 1f)
+        translationX = geometry.collapsedLeft * (1f - p)
+        translationY = geometry.collapsedTop * (1f - p)
+        elevation = 16f * resources.displayMetrics.density * (1f - p)
+        clipToOutline = p < 1f || playerExpansionAnimator != null || isPlayerExpansionDragging
+        invalidateOutline()
+    }
+
+    private fun updatePlayerOutline(outline: Outline) {
+        val geometry = playerExpansionGeometry ?: run {
+            outline.setRect(0, 0, width, height)
+            return
+        }
+        val p = playerExpansionProgress.coerceIn(0f, 1f)
+        val clipWidth = geometry.collapsedWidth + (width - geometry.collapsedWidth) * p
+        val clipHeight = geometry.collapsedHeight + (height - geometry.collapsedHeight) * p
+        val collapsedRadius = geometry.collapsedHeight * 0.5f
+        fun radius(target: Float) = collapsedRadius + (target - collapsedRadius) * p
+        val topLeft = radius(geometry.expandedTopLeftRadius)
+        val topRight = radius(geometry.expandedTopRightRadius)
+        val bottomRight = radius(geometry.expandedBottomRightRadius)
+        val bottomLeft = radius(geometry.expandedBottomLeftRadius)
+        playerClipRect.set(0f, 0f, clipWidth, clipHeight)
+        playerClipPath.reset()
+        playerClipPath.addRoundRect(
+            playerClipRect,
+            floatArrayOf(
+                topLeft, topLeft,
+                topRight, topRight,
+                bottomRight, bottomRight,
+                bottomLeft, bottomLeft,
+            ),
+            Path.Direction.CW,
+        )
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+            outline.setPath(playerClipPath)
+        } else {
+            @Suppress("DEPRECATION")
+            outline.setConvexPath(playerClipPath)
+        }
     }
 
     /** Stable native action codes: favorite=1, more=2, previous=3,
@@ -483,12 +632,10 @@ class RustSkiaLyricsView @JvmOverloads constructor(
 
     fun setOnPlayerExpansionDragCallbacks(
         onStart: (() -> Unit)?,
-        onDrag: ((Float) -> Unit)?,
-        onEnd: ((Float) -> Unit)?,
+        onSettled: ((Float) -> Unit)?,
     ) {
         onPlayerExpansionDragStart = onStart
-        onPlayerExpansionDrag = onDrag
-        onPlayerExpansionDragEnd = onEnd
+        onPlayerExpansionSettled = onSettled
     }
 
     fun setOnQueueReordered(callback: ((Int, Int) -> Unit)?) {
@@ -920,25 +1067,38 @@ class RustSkiaLyricsView @JvmOverloads constructor(
                     return true
                 }
                 if (isPlayerExpansionDragging) {
-                    onPlayerExpansionDrag?.invoke(y - downY)
+                    val totalDy = y - downY
+                    val next = playerExpansionDragStartProgress -
+                        totalDy / height.coerceAtLeast(1)
+                    applyInteractivePlayerExpansion(next)
                     lastTouchY = y
                     return true
                 }
                 val miniCanExpand = playerWire?.presentation == "mini" &&
                     playerExpansionProgress < 0.999f &&
                     onPlayerExpansionDragStart != null
-                if (miniCanExpand) {
+                val fullCanCollapse = playerWire?.presentation == "full" &&
+                    playerExpansionProgress >= 0.999f &&
+                    downY <= 80f * resources.displayMetrics.density
+                if (miniCanExpand || fullCanCollapse) {
                     val totalDy = y - downY
-                    if (totalDy < -touchSlop) {
+                    val startsExpansion = miniCanExpand && totalDy < -touchSlop
+                    val startsCollapse = fullCanCollapse && totalDy > touchSlop
+                    if (startsExpansion || startsCollapse) {
                         isPlayerExpansionDragging = true
+                        playerExpansionGestureOwnsTarget = true
+                        cancelPlayerExpansionAnimator()
+                        playerExpansionDragStartProgress = playerExpansionProgress
                         lastTouchY = y
                         cancelTapDetection(event)
                         postPlayerCommand { engine.cancelPlayerPointer() }
                         onPlayerExpansionDragStart?.invoke()
-                        onPlayerExpansionDrag?.invoke(totalDy)
+                        val next = playerExpansionDragStartProgress -
+                            totalDy / height.coerceAtLeast(1)
+                        applyInteractivePlayerExpansion(next)
                     }
-                    // A mini player has no scrollable content. Keep owning the
-                    // gesture while deciding between a tap and an upward expand.
+                    // The mini player and the fullscreen top grab region own the
+                    // gesture while deciding between a tap and expansion drag.
                     return true
                 }
                 if (!isDragging && abs(y - downY) > touchSlop) {
@@ -967,7 +1127,13 @@ class RustSkiaLyricsView @JvmOverloads constructor(
                     velocityTracker?.addMovement(event)
                     velocityTracker?.computeCurrentVelocity(1000, maxFlingVelocity.toFloat())
                     val velocityY = velocityTracker?.getYVelocity(activePointerId) ?: 0f
-                    onPlayerExpansionDragEnd?.invoke(velocityY)
+                    val target = when {
+                        velocityY < -700f -> 1f
+                        velocityY > 700f -> 0f
+                        playerExpansionProgress >= 0.5f -> 1f
+                        else -> 0f
+                    }
+                    animatePlayerExpansionTo(target)
                     postPlayerCommand { engine.cancelPlayerPointer() }
                     recycleTouchState()
                     parent?.requestDisallowInterceptTouchEvent(false)
@@ -1012,7 +1178,11 @@ class RustSkiaLyricsView @JvmOverloads constructor(
             }
 
             MotionEvent.ACTION_CANCEL -> {
-                if (isPlayerExpansionDragging) onPlayerExpansionDragEnd?.invoke(0f)
+                if (isPlayerExpansionDragging) {
+                    animatePlayerExpansionTo(
+                        if (playerExpansionProgress >= 0.5f) 1f else 0f
+                    )
+                }
                 if (isQueueReordering) {
                     isQueueReordering = false
                     postPlayerCommand { engine.cancelQueueReorder() }
@@ -1047,6 +1217,7 @@ class RustSkiaLyricsView @JvmOverloads constructor(
     }
 
     override fun onDetachedFromWindow() {
+        cancelPlayerExpansionAnimator()
         super.onDetachedFromWindow()
         releaseRenderSurface()   // blocking EGL teardown on the render thread
         stopRenderThread()       // quitSafely + join → render thread is fully dead

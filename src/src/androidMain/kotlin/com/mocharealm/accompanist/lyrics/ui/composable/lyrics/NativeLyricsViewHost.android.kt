@@ -12,7 +12,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -26,7 +25,6 @@ import com.mocharealm.accompanist.lyrics.ui.renderer.RustSkiaLyricsView
 import com.mocharealm.accompanist.lyrics.ui.renderer.toSceneStyle
 import org.jetbrains.compose.resources.FontResource
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -51,10 +49,10 @@ internal actual fun NativeLyricsViewHost(
     artist: String?,
     onControlsClick: (() -> Unit)?,
     playerChrome: NativePlayerChrome?,
-    playerExpansionProgress: () -> Float,
+    playerExpansionTarget: Float,
+    playerExpansionGeometry: NativePlayerExpansionGeometry?,
     onPlayerExpansionDragStart: (() -> Unit)?,
-    onPlayerExpansionDrag: ((Float) -> Unit)?,
-    onPlayerExpansionDragEnd: ((Float) -> Unit)?,
+    onPlayerExpansionSettled: ((Float) -> Unit)?,
     onPlayerAction: ((NativePlayerAction) -> Unit)?,
     onQueueReordered: ((Int, Int) -> Unit)?,
 ) {
@@ -80,13 +78,11 @@ internal actual fun NativeLyricsViewHost(
     val latestControlsClick by rememberUpdatedState(onControlsClick)
     val latestPlayerAction by rememberUpdatedState(onPlayerAction)
     val latestExpansionDragStart by rememberUpdatedState(onPlayerExpansionDragStart)
-    val latestExpansionDrag by rememberUpdatedState(onPlayerExpansionDrag)
-    val latestExpansionDragEnd by rememberUpdatedState(onPlayerExpansionDragEnd)
+    val latestExpansionSettled by rememberUpdatedState(onPlayerExpansionSettled)
     val latestQueueReordered by rememberUpdatedState(onQueueReordered)
     val latestLyrics by rememberUpdatedState(lyrics)
     val latestLineClicked by rememberUpdatedState(onLineClicked)
     val latestLinePressed by rememberUpdatedState(onLinePressed)
-    val latestExpansionProgress by rememberUpdatedState(playerExpansionProgress)
     val nativeControlsClick = remember {
         {
             latestControlsClick?.invoke()
@@ -117,15 +113,9 @@ internal actual fun NativeLyricsViewHost(
             Unit
         }
     }
-    val nativeExpansionDrag = remember {
-        { deltaY: Float ->
-            latestExpansionDrag?.invoke(deltaY)
-            Unit
-        }
-    }
-    val nativeExpansionDragEnd = remember {
-        { velocityY: Float ->
-            latestExpansionDragEnd?.invoke(velocityY)
+    val nativeExpansionSettled = remember {
+        { progress: Float ->
+            latestExpansionSettled?.invoke(progress)
             Unit
         }
     }
@@ -175,12 +165,6 @@ internal actual fun NativeLyricsViewHost(
         }
         onDispose { playbackJob?.cancel() }
     }
-    LaunchedEffect(nativeView) {
-        snapshotFlow { latestExpansionProgress().coerceIn(0f, 1f) }
-            .distinctUntilChanged()
-            .collect(nativeView::setPlayerExpansionProgress)
-    }
-
     fun RustSkiaLyricsView.applyAll() {
         // Background art + insets + playback FIRST: a fresh view/engine picks them
         // up before the scene is built, and re-applies survive font reconfig.
@@ -188,7 +172,7 @@ internal actual fun NativeLyricsViewHost(
         setContentInsets(contentTopPx, contentBottomPx, contentLeftPx, contentRightPx)
         setMusicFoundationClockEnabled(useMusicFoundationClock)
         setPlaybackState(isPlaying, backgroundReactive)
-        setPlayerExpansionProgress(latestExpansionProgress())
+        configurePlayerExpansion(playerExpansionGeometry, playerExpansionTarget)
         if (playerChrome != null) {
             // Full portrait player owns chrome geometry; clear the legacy top bar.
             // Screen/duration/playing: Rust keeps page selection after first paint
@@ -216,14 +200,13 @@ internal actual fun NativeLyricsViewHost(
             setOnPlayerAction(nativePlayerAction)
             setOnPlayerExpansionDragCallbacks(
                 nativeExpansionDragStart,
-                nativeExpansionDrag,
-                nativeExpansionDragEnd,
+                nativeExpansionSettled,
             )
             setOnQueueReordered(nativeQueueReordered)
         } else {
             setPlayerChrome(title = null)
             setOnPlayerAction(null)
-            setOnPlayerExpansionDragCallbacks(null, null, null)
+            setOnPlayerExpansionDragCallbacks(null, null)
             setOnQueueReordered(null)
             setTopBar(title, artist)
             setOnControlsClicked(nativeControlsClick)

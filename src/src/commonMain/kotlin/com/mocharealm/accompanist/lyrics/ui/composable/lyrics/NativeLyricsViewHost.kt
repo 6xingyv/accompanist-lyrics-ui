@@ -37,10 +37,10 @@ internal expect fun NativeLyricsViewHost(
     artist: String? = null,
     onControlsClick: (() -> Unit)? = null,
     playerChrome: NativePlayerChrome? = null,
-    playerExpansionProgress: () -> Float = { 1f },
+    playerExpansionTarget: Float = 1f,
+    playerExpansionGeometry: NativePlayerExpansionGeometry? = null,
     onPlayerExpansionDragStart: (() -> Unit)? = null,
-    onPlayerExpansionDrag: ((Float) -> Unit)? = null,
-    onPlayerExpansionDragEnd: ((Float) -> Unit)? = null,
+    onPlayerExpansionSettled: ((Float) -> Unit)? = null,
     onPlayerAction: ((NativePlayerAction) -> Unit)? = null,
     onQueueReordered: ((Int, Int) -> Unit)? = null,
 )

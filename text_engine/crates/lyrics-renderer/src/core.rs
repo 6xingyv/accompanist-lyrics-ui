@@ -410,6 +410,11 @@ impl TextEngine {
         self.renderer.set_player_expansion_progress(progress);
     }
 
+    pub fn animate_player_expansion_to(&mut self, target: f32, duration_ms: f32) {
+        self.renderer
+            .animate_player_expansion_to(target, duration_ms);
+    }
+
     pub fn begin_queue_reorder(&mut self, x: f32, y: f32) -> i32 {
         self.renderer.begin_queue_reorder(x, y)
     }

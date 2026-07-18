@@ -29,10 +29,10 @@ internal actual fun NativeLyricsViewHost(
     artist: String?,
     onControlsClick: (() -> Unit)?,
     playerChrome: NativePlayerChrome?,
-    playerExpansionProgress: () -> Float,
+    playerExpansionTarget: Float,
+    playerExpansionGeometry: NativePlayerExpansionGeometry?,
     onPlayerExpansionDragStart: (() -> Unit)?,
-    onPlayerExpansionDrag: ((Float) -> Unit)?,
-    onPlayerExpansionDragEnd: ((Float) -> Unit)?,
+    onPlayerExpansionSettled: ((Float) -> Unit)?,
     onPlayerAction: ((NativePlayerAction) -> Unit)?,
     onQueueReordered: ((Int, Int) -> Unit)?,
 ) {

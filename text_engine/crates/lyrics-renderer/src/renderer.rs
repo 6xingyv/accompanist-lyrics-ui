@@ -635,6 +635,7 @@ pub struct LyricsRenderer {
     /// Host-driven mini → full expansion. It is updated independently of the
     /// prepared scene so a navigation gesture never reshapes lyrics each frame.
     player_expansion_progress: f32,
+    player_expansion_animation: Option<PlayerExpansionAnimation>,
 }
 
 #[derive(Debug, Clone)]
@@ -1011,6 +1012,14 @@ impl FocusScaleState {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct PlayerExpansionAnimation {
+    start: f32,
+    target: f32,
+    started_at: Instant,
+    duration_ms: f32,
+}
+
 #[derive(Debug, Clone)]
 struct PreparedSyllable {
     content: String,
@@ -1173,6 +1182,7 @@ impl LyricsRenderer {
             player_live_duration_ms: None,
             player_live_playing: None,
             player_expansion_progress: 1.0,
+            player_expansion_animation: None,
         }
     }
 
@@ -1243,6 +1253,49 @@ impl LyricsRenderer {
     pub fn set_player_expansion_progress(&mut self, progress: f32) {
         if progress.is_finite() {
             self.player_expansion_progress = progress.clamp(0.0, 1.0);
+            self.player_expansion_animation = None;
+        }
+    }
+
+    pub fn animate_player_expansion_to(&mut self, target: f32, duration_ms: f32) {
+        if !target.is_finite() || !duration_ms.is_finite() {
+            return;
+        }
+        let now = Instant::now();
+        self.sample_player_expansion(now);
+        let target = target.clamp(0.0, 1.0);
+        if (target - self.player_expansion_progress).abs() <= f32::EPSILON {
+            self.player_expansion_progress = target;
+            self.player_expansion_animation = None;
+            return;
+        }
+        self.player_expansion_animation = Some(PlayerExpansionAnimation {
+            start: self.player_expansion_progress,
+            target,
+            started_at: now,
+            duration_ms: duration_ms.max(1.0),
+        });
+    }
+
+    fn sample_player_expansion(&mut self, now: Instant) -> bool {
+        let Some(animation) = self.player_expansion_animation else {
+            return false;
+        };
+        let linear = (now
+            .saturating_duration_since(animation.started_at)
+            .as_secs_f32()
+            * 1000.0
+            / animation.duration_ms)
+            .clamp(0.0, 1.0);
+        let progress = ease_in_out(linear);
+        self.player_expansion_progress =
+            animation.start + (animation.target - animation.start) * progress;
+        if linear >= 1.0 {
+            self.player_expansion_progress = animation.target;
+            self.player_expansion_animation = None;
+            false
+        } else {
+            true
         }
     }
 
@@ -1301,7 +1354,7 @@ impl LyricsRenderer {
             return false;
         }
         let expansion = if presentation.is_some() {
-            ease_in_out(self.player_expansion_progress)
+            self.player_expansion_progress
         } else {
             1.0
         };
@@ -1466,6 +1519,7 @@ impl LyricsRenderer {
     ) -> i32 {
         let frame_start = Instant::now();
         let mut timing = EngineFrameTiming::default();
+        let player_expansion_animating = self.sample_player_expansion(frame_start);
 
         // Apply Rust-owned screen + native live transport before sampling the
         // transition or drawing chrome, so every frame sees the same state.
@@ -1663,7 +1717,7 @@ impl LyricsRenderer {
             let expansion = if presentation == Some(player::PlayerPresentationInput::Mini) {
                 0.0
             } else {
-                ease_in_out(self.player_expansion_progress)
+                self.player_expansion_progress
             };
             (alpha * expansion, scale)
         } else {
@@ -2045,6 +2099,7 @@ impl LyricsRenderer {
             || background_animating
             || focus_scale_animating
             || player_animating
+            || player_expansion_animating
             || queue_scroll_animating
         {
             1

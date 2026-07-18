@@ -157,6 +157,16 @@ actual class NativeTextEngine actual constructor(
         if (handle != 0L) nativeSetPlayerExpansionProgress(handle, progress.coerceIn(0f, 1f))
     }
 
+    fun animatePlayerExpansionTo(target: Float, durationMs: Float) {
+        if (handle != 0L) {
+            nativeAnimatePlayerExpansionTo(
+                handle,
+                target.coerceIn(0f, 1f),
+                durationMs.coerceAtLeast(1f),
+            )
+        }
+    }
+
     fun scrollLyricsBy(deltaYPx: Float) {
         if (handle != 0L) nativeScrollLyricsBy(handle, deltaYPx)
     }
@@ -464,6 +474,11 @@ actual class NativeTextEngine actual constructor(
 
     private external fun nativeBeginLyricsScroll(handle: Long)
     private external fun nativeSetPlayerExpansionProgress(handle: Long, progress: Float)
+    private external fun nativeAnimatePlayerExpansionTo(
+        handle: Long,
+        target: Float,
+        durationMs: Float,
+    )
     private external fun nativeScrollLyricsBy(handle: Long, deltaYPx: Float)
     private external fun nativeEndLyricsScroll(handle: Long, velocityYPx: Float)
     private external fun nativeCancelLyricsScroll(handle: Long)

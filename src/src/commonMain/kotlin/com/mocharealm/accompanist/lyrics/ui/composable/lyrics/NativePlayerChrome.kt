@@ -42,6 +42,18 @@ data class NativePlayerChrome(
     val queueItems: List<NativePlayerQueueItem> = emptyList(),
 )
 
+/** Fixed-surface geometry used by the Android host for mini/full transitions. */
+data class NativePlayerExpansionGeometry(
+    val collapsedLeft: Float,
+    val collapsedTop: Float,
+    val collapsedWidth: Float,
+    val collapsedHeight: Float,
+    val expandedTopLeftRadius: Float = 0f,
+    val expandedTopRightRadius: Float = 0f,
+    val expandedBottomRightRadius: Float = 0f,
+    val expandedBottomLeftRadius: Float = 0f,
+)
+
 enum class NativePlayerPresentation(val wireValue: String) {
     Mini("mini"),
     Full("full"),
