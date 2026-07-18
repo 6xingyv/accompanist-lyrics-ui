@@ -583,7 +583,9 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         val p = progress.coerceIn(0f, 1f)
         translationX = geometry.collapsedLeft * (1f - p)
         translationY = geometry.collapsedTop * (1f - p)
-        elevation = 16f * resources.displayMetrics.density * (1f - p)
+        // The mini background is owned by Compose. A native elevation shadow is
+        // clipped by the collapsed host layer and darkens the inside of the pill.
+        elevation = 0f
         clipToOutline = p < 1f || playerExpansionAnimator != null || isPlayerExpansionDragging
         invalidateOutline()
     }
