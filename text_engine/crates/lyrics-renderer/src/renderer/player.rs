@@ -7,8 +7,8 @@
 
 use super::*;
 use skia_safe::{
-    canvas::SaveLayerRec, BlendMode, ClipOp, Color4f, Contains, Font, Image, Paint, Path,
-    PathBuilder, Point, Rect, SamplingOptions,
+    canvas::SaveLayerRec, BlendMode, ClipOp, Color4f, Contains, Image, Paint, Path, PathBuilder,
+    Point, Rect, SamplingOptions,
 };
 
 const DESIGN_WIDTH: f32 = 393.0;
@@ -20,6 +20,7 @@ const TRANSPORT_ROW: f32 = 142.0;
 const MODE_NAV_ROW: f32 = 90.0;
 const BOTTOM_CHROME_IDLE_SECONDS: f32 = 3.0;
 const BOTTOM_CHROME_EXIT_SECONDS: f32 = 0.36;
+const RUNTIME_LABEL_GLYPHS: &str = "0123456789:−";
 
 // Player chrome is pure white + Plus over the mesh (not the mock's pink fills).
 // Alphas sampled from design exports (status bar ignored — system-drawn):
@@ -89,6 +90,32 @@ struct PreparedQueueItem {
     artwork_key: String,
 }
 
+/// Small, fixed glyph repertoire used by the live progress labels.
+///
+/// Preparing these glyphs through cosmic-text keeps the whole player on the
+/// supplied primary font (SF Pro in Clef) and preserves the normal per-cluster
+/// fallback path if a future primary font is missing the Unicode minus sign.
+/// It also avoids reshaping the two labels on every rendered frame.
+#[derive(Debug)]
+struct PreparedRuntimeLabelFont {
+    glyphs: Vec<(char, PreparedText)>,
+}
+
+impl PreparedRuntimeLabelFont {
+    fn glyph(&self, ch: char) -> Option<&PreparedText> {
+        self.glyphs
+            .iter()
+            .find_map(|(candidate, text)| (*candidate == ch).then_some(text))
+    }
+
+    fn text_width(&self, text: &str) -> f32 {
+        text.chars()
+            .filter_map(|ch| self.glyph(ch))
+            .map(prepared_text_width)
+            .sum()
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct PreparedPlayer {
     pub screen: PlayerScreenInput,
@@ -103,6 +130,7 @@ pub(super) struct PreparedPlayer {
     queue_source: PreparedText,
     queue_filter: QueueFilterInput,
     queue_items: Vec<PreparedQueueItem>,
+    runtime_label_font: PreparedRuntimeLabelFont,
     pub layout: PlayerLayout,
     icons: PlayerIcons,
 }
@@ -1200,6 +1228,25 @@ impl LyricsRenderer {
                 artwork_key: item.artwork_key.clone(),
             });
         }
+        self.text_attrs = TextAttrs {
+            weight: 400,
+            italic: false,
+        };
+        let runtime_label_font = PreparedRuntimeLabelFont {
+            glyphs: RUNTIME_LABEL_GLYPHS
+                .chars()
+                .map(|ch| {
+                    let text = self.prepare_plain_text(
+                        &ch.to_string(),
+                        11.0 * layout.scale,
+                        14.0 * layout.scale,
+                        1_000_000.0,
+                        false,
+                    );
+                    (ch, text)
+                })
+                .collect(),
+        };
         self.text_attrs = saved;
         Some(PreparedPlayer {
             screen: input.screen,
@@ -1214,6 +1261,7 @@ impl LyricsRenderer {
             queue_source,
             queue_filter: input.queue_filter,
             queue_items,
+            runtime_label_font,
             layout,
             icons: PlayerIcons::new(),
         })
@@ -1230,6 +1278,12 @@ pub(super) fn collect_player_font_usage(
         + collect_text_font_usage(&player.artwork_artist, ids)
         + collect_text_font_usage(&player.queue_title, ids)
         + collect_text_font_usage(&player.queue_source, ids)
+        + player
+            .runtime_label_font
+            .glyphs
+            .iter()
+            .map(|(_, text)| collect_text_font_usage(text, ids))
+            .sum::<usize>()
         + player
             .queue_items
             .iter()
@@ -1419,11 +1473,6 @@ pub(super) fn draw_player(
         canvas.restore();
     }
     animating || transition.active || bottom_chrome.active
-}
-
-/// Anti-aliased paint with additive (Plus) blend for white chrome over the mesh.
-fn plus_paint() -> Paint {
-    command_paint(WHITE, DrawBlend::Plus)
 }
 
 /// Draw prepared text through a Plus layer so white metadata matches Compose.
@@ -1848,20 +1897,20 @@ fn draw_progress(
     draw_runtime_label(
         canvas,
         typefaces,
+        &player.runtime_label_font,
         &elapsed,
         left,
         l.progress_top + 28.0 * s,
-        11.0 * s,
         TEXT_SECONDARY_ALPHA * chrome_alpha,
         false,
     );
     draw_runtime_label(
         canvas,
         typefaces,
+        &player.runtime_label_font,
         &remaining,
         left + width,
         l.progress_top + 28.0 * s,
-        11.0 * s,
         TEXT_SECONDARY_ALPHA * chrome_alpha,
         true,
     );
@@ -2293,25 +2342,36 @@ fn draw_play_icon(canvas: &skia_safe::Canvas, center: Point, size: f32, alpha: f
 fn draw_runtime_label(
     canvas: &skia_safe::Canvas,
     typefaces: &HashMap<fontdb::ID, Typeface>,
+    runtime_font: &PreparedRuntimeLabelFont,
     text: &str,
     x: f32,
     top: f32,
-    size: f32,
     alpha: f32,
     right_aligned: bool,
 ) {
-    let mut font = typefaces
-        .values()
-        .next()
-        .cloned()
-        .map(|typeface| Font::from_typeface(typeface, size))
-        .unwrap_or_default();
-    font.set_size(size);
-    let mut paint = plus_paint();
-    paint.set_color4f(Color4f::new(1.0, 1.0, 1.0, alpha), None);
-    let measured = font.measure_str(text, Some(&paint)).0;
-    let left = if right_aligned { x - measured } else { x };
-    canvas.draw_str(text, (left, top + size), &font, &paint);
+    let measured = runtime_font.text_width(text);
+    let mut cursor = if right_aligned { x - measured } else { x };
+    let mut layer = Paint::default();
+    layer.set_blend_mode(BlendMode::Plus);
+    canvas.save_layer(&SaveLayerRec::default().paint(&layer));
+    for ch in text.chars() {
+        let Some(glyph) = runtime_font.glyph(ch) else {
+            continue;
+        };
+        draw_prepared_text_skia(
+            canvas,
+            typefaces,
+            glyph,
+            cursor,
+            top,
+            (255, 255, 255, 255),
+            alpha,
+            0.0,
+            None,
+        );
+        cursor += prepared_text_width(glyph);
+    }
+    canvas.restore();
 }
 
 fn format_duration(milliseconds: i32) -> String {
