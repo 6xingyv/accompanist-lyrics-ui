@@ -495,6 +495,7 @@ impl PlayerUiLayout {
 enum DrawBlend {
     Plus,
     SourceOver,
+    DestinationOut,
 }
 
 enum DrawCommand<'a> {
@@ -610,6 +611,7 @@ fn command_paint(color: Color4f, blend: DrawBlend) -> Paint {
     paint.set_blend_mode(match blend {
         DrawBlend::Plus => BlendMode::Plus,
         DrawBlend::SourceOver => BlendMode::SrcOver,
+        DrawBlend::DestinationOut => BlendMode::DstOut,
     });
     paint
 }
@@ -619,6 +621,13 @@ pub(super) struct PlayerInteractionState {
     pressed: Option<PlayerButton>,
     pressed_at: Option<Instant>,
     released: Option<(PlayerButton, Instant, f32)>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ControlAnimation {
+    scale: f32,
+    press: f32,
+    active: bool,
 }
 
 impl PlayerInteractionState {
@@ -635,7 +644,7 @@ impl PlayerInteractionState {
             return 0;
         };
         let accepted = ui.hit_test(Point::new(x, y)) == Some(button);
-        let scale = self.scale_for(button, Instant::now()).0;
+        let scale = self.animation_for(button, Instant::now()).scale;
         self.pressed = None;
         self.pressed_at = None;
         self.released = Some((button, Instant::now(), scale));
@@ -648,14 +657,14 @@ impl PlayerInteractionState {
 
     pub(super) fn cancel(&mut self) {
         if let Some(button) = self.pressed {
-            let scale = self.scale_for(button, Instant::now()).0;
+            let scale = self.animation_for(button, Instant::now()).scale;
             self.pressed = None;
             self.released = Some((button, Instant::now(), scale));
         }
         self.pressed_at = None;
     }
 
-    fn scale_for(&mut self, button: PlayerButton, now: Instant) -> (f32, bool) {
+    fn animation_for(&mut self, button: PlayerButton, now: Instant) -> ControlAnimation {
         if self.pressed == Some(button) {
             let elapsed = self
                 .pressed_at
@@ -663,7 +672,12 @@ impl PlayerInteractionState {
                     now.saturating_duration_since(at).as_secs_f32() / 0.08
                 })
                 .clamp(0.0, 1.0);
-            return (1.0 - 0.1 * ease_out_cubic(elapsed), elapsed < 1.0);
+            let eased = ease_out_cubic(elapsed);
+            return ControlAnimation {
+                scale: 1.0 - 0.1 * eased,
+                press: eased,
+                active: elapsed < 1.0,
+            };
         }
         if let Some((released, at, from)) = self.released {
             if released == button {
@@ -671,12 +685,24 @@ impl PlayerInteractionState {
                     (now.saturating_duration_since(at).as_secs_f32() / 0.18).clamp(0.0, 1.0);
                 if elapsed >= 1.0 {
                     self.released = None;
-                    return (1.0, false);
+                    return ControlAnimation {
+                        scale: 1.0,
+                        press: 0.0,
+                        active: false,
+                    };
                 }
-                return (from + (1.0 - from) * ease_out_back(elapsed), true);
+                return ControlAnimation {
+                    scale: from + (1.0 - from) * ease_out_back(elapsed),
+                    press: 1.0 - ease_out_cubic(elapsed),
+                    active: true,
+                };
             }
         }
-        (1.0, false)
+        ControlAnimation {
+            scale: 1.0,
+            press: 0.0,
+            active: false,
+        }
     }
 }
 
@@ -1053,9 +1079,9 @@ fn draw_compact_header(
     );
     canvas.restore();
 
-    let (favorite_scale, favorite_animating) = interaction.scale_for(PlayerButton::Favorite, now);
-    let (more_scale, more_animating) = interaction.scale_for(PlayerButton::More, now);
-    *animating |= favorite_animating || more_animating;
+    let favorite_animation = interaction.animation_for(PlayerButton::Favorite, now);
+    let more_animation = interaction.animation_for(PlayerButton::More, now);
+    *animating |= favorite_animation.active || more_animation.active;
     let favorite = ui.control(PlayerButton::Favorite);
     let more = ui.control(PlayerButton::More);
     let (favorite_diameter, favorite_icon_size) = favorite.action_geometry();
@@ -1066,7 +1092,7 @@ fn draw_compact_header(
         favorite.center,
         favorite_diameter,
         favorite_icon_size,
-        favorite_scale,
+        favorite_animation.scale,
         player.liked,
     );
     draw_action_button(
@@ -1075,7 +1101,7 @@ fn draw_compact_header(
         more.center,
         more_diameter,
         more_icon_size,
-        more_scale,
+        more_animation.scale,
         false,
     );
 }
@@ -1116,9 +1142,9 @@ fn draw_artwork_metadata(
     );
     canvas.restore();
 
-    let (favorite_scale, favorite_animating) = interaction.scale_for(PlayerButton::Favorite, now);
-    let (more_scale, more_animating) = interaction.scale_for(PlayerButton::More, now);
-    *animating |= favorite_animating || more_animating;
+    let favorite_animation = interaction.animation_for(PlayerButton::Favorite, now);
+    let more_animation = interaction.animation_for(PlayerButton::More, now);
+    *animating |= favorite_animation.active || more_animation.active;
     let favorite = ui.control(PlayerButton::Favorite);
     let more = ui.control(PlayerButton::More);
     let (favorite_diameter, favorite_icon_size) = favorite.action_geometry();
@@ -1129,7 +1155,7 @@ fn draw_artwork_metadata(
         favorite.center,
         favorite_diameter,
         favorite_icon_size,
-        favorite_scale,
+        favorite_animation.scale,
         player.liked,
     );
     draw_action_button(
@@ -1138,7 +1164,7 @@ fn draw_artwork_metadata(
         more.center,
         more_diameter,
         more_icon_size,
-        more_scale,
+        more_animation.scale,
         false,
     );
 }
@@ -1181,11 +1207,11 @@ fn draw_queue_page(
     ] {
         let control = ui.control(button);
         let (pill, icon_width, icon_height) = control.filter_geometry();
-        let (button_scale, is_animating) = interaction.scale_for(button, now);
-        *animating |= is_animating;
+        let animation = interaction.animation_for(button, now);
+        *animating |= animation.active;
         canvas.save();
         canvas.translate(control.center);
-        canvas.scale((button_scale, button_scale));
+        canvas.scale((animation.scale, animation.scale));
         canvas.translate((-control.center.x, -control.center.y));
         let selected = player.queue_filter == filter;
         DrawCommand::RoundRect {
@@ -1371,34 +1397,34 @@ fn draw_transport(
     ] {
         let control = ui.control(button);
         let (width, height) = control.transport_size();
-        let (button_scale, active) = interaction.scale_for(button, now);
-        *animating |= active;
+        let animation = interaction.animation_for(button, now);
+        *animating |= animation.active;
         draw_icon(
             canvas,
             icon,
             control.center,
-            width * button_scale,
-            height * button_scale,
+            width * animation.scale,
+            height * animation.scale,
             WHITE,
             1.0,
         );
     }
     let play = ui.control(PlayerButton::PlayPause);
     let (play_width, play_height) = play.transport_size();
-    let (play_scale, active) = interaction.scale_for(PlayerButton::PlayPause, now);
-    *animating |= active;
+    let play_animation = interaction.animation_for(PlayerButton::PlayPause, now);
+    *animating |= play_animation.active;
     if player.is_playing {
         draw_icon(
             canvas,
             &player.icons.pause,
             play.center,
-            play_width * (32.0 / 42.0) * play_scale,
-            play_height * play_scale,
+            play_width * (32.0 / 42.0) * play_animation.scale,
+            play_height * play_animation.scale,
             WHITE,
             1.0,
         );
     } else {
-        draw_play_icon(canvas, play.center, play_width * play_scale);
+        draw_play_icon(canvas, play.center, play_width * play_animation.scale);
     }
 }
 
@@ -1411,80 +1437,130 @@ fn draw_mode_navigation(
     now: Instant,
     animating: &mut bool,
 ) {
-    // Only Lyrics and Queue carry a selected chip. Artwork is the resting page
-    // with every chip inactive; Output is never a selected destination.
-    for (button, icon, active_on) in [
+    for (button, glyph, active_on) in [
         (
             PlayerButton::Lyrics,
-            &player.icons.lyrics,
-            PlayerScreenInput::Lyrics,
+            ModeGlyph::Icon(&player.icons.lyrics),
+            Some(PlayerScreenInput::Lyrics),
         ),
+        (PlayerButton::Output, ModeGlyph::Airplay, None),
         (
             PlayerButton::Queue,
-            &player.icons.list,
-            PlayerScreenInput::Queue,
+            ModeGlyph::Icon(&player.icons.list),
+            Some(PlayerScreenInput::Queue),
         ),
     ] {
         let control = ui.control(button);
-        let (diameter, icon_width, icon_height) = control.mode_geometry();
-        let active = selected_screen == active_on;
-        let (button_scale, is_animating) = interaction.scale_for(button, now);
-        *animating |= is_animating;
-        canvas.save();
-        canvas.translate(control.center);
-        canvas.scale((button_scale, button_scale));
-        canvas.translate((-control.center.x, -control.center.y));
-        let rect = Rect::from_xywh(
+        let animation = interaction.animation_for(button, now);
+        *animating |= animation.active;
+        let selected = active_on == Some(selected_screen);
+        draw_mode_control(
+            canvas,
+            control,
+            glyph,
+            if selected {
+                WHITE_BTN_ACTIVE
+            } else {
+                WHITE_BTN
+            },
+            animation,
+        );
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ModeGlyph<'a> {
+    Icon(&'a SvgIcon),
+    Airplay,
+}
+
+fn draw_mode_control(
+    canvas: &skia_safe::Canvas,
+    control: PlayerControl,
+    glyph: ModeGlyph<'_>,
+    idle_color: Color4f,
+    animation: ControlAnimation,
+) {
+    let (diameter, icon_width, icon_height) = control.mode_geometry();
+    canvas.save();
+    canvas.translate(control.center);
+    canvas.scale((animation.scale, animation.scale));
+    canvas.translate((-control.center.x, -control.center.y));
+
+    draw_mode_glyph(
+        canvas,
+        glyph,
+        control.center,
+        icon_width,
+        icon_height,
+        Color4f::new(
+            idle_color.r,
+            idle_color.g,
+            idle_color.b,
+            idle_color.a * (1.0 - animation.press),
+        ),
+        DrawBlend::Plus,
+    );
+    if animation.press > 0.001 {
+        let bounds = Rect::from_xywh(
             control.center.x - diameter * 0.5,
             control.center.y - diameter * 0.5,
             diameter,
             diameter,
         );
-        DrawCommand::RoundRect {
-            rect,
+        let mut layer = Paint::default();
+        layer.set_blend_mode(BlendMode::Plus);
+        layer.set_alpha_f(animation.press);
+        canvas.save_layer(&SaveLayerRec::default().bounds(&bounds).paint(&layer));
+        DrawCommand::Circle {
+            center: control.center,
             radius: diameter * 0.5,
-            color: if active { WHITE_BTN_ACTIVE } else { WHITE_BTN },
-            blend: DrawBlend::Plus,
+            color: WHITE_BTN_ACTIVE,
+            blend: DrawBlend::SourceOver,
         }
         .draw(canvas);
-        draw_icon(
+        draw_mode_glyph(
             canvas,
-            icon,
+            glyph,
             control.center,
             icon_width,
             icon_height,
-            if active { WHITE_BTN_ACTIVE } else { WHITE_BTN },
-            1.0,
+            WHITE,
+            DrawBlend::DestinationOut,
         );
         canvas.restore();
     }
-
-    // Output: press scale only — never active/selected styling (always 0.4).
-    let output = ui.control(PlayerButton::Output);
-    let (output_diameter, output_width, _) = output.mode_geometry();
-    let (output_scale, output_animating) = interaction.scale_for(PlayerButton::Output, now);
-    *animating |= output_animating;
-    canvas.save();
-    canvas.translate(output.center);
-    canvas.scale((output_scale, output_scale));
-    canvas.translate((-output.center.x, -output.center.y));
-    let output_rect = Rect::from_xywh(
-        output.center.x - output_diameter * 0.5,
-        output.center.y - output_diameter * 0.5,
-        output_diameter,
-        output_diameter,
-    );
-    DrawCommand::RoundRect {
-        rect: output_rect,
-        radius: output_diameter * 0.5,
-        color: WHITE_BTN,
-        blend: DrawBlend::Plus,
-    }
-    .draw(canvas);
-    // AirPlay/audio output icon: three radio arcs and the lower triangle. It is
-    // drawn as Skia primitives so it stays crisp at every render scale.
-    draw_airplay_overlay(canvas, output.center, output_width, WHITE_BTN);
     canvas.restore();
+}
+
+fn draw_mode_glyph(
+    canvas: &skia_safe::Canvas,
+    glyph: ModeGlyph<'_>,
+    center: Point,
+    width: f32,
+    height: f32,
+    color: Color4f,
+    blend: DrawBlend,
+) {
+    match glyph {
+        ModeGlyph::Icon(icon) => DrawCommand::Icon {
+            icon,
+            center,
+            width,
+            height,
+            color,
+            alpha: 1.0,
+            blend,
+        }
+        .draw(canvas),
+        ModeGlyph::Airplay => DrawCommand::Airplay {
+            center,
+            size: width,
+            color,
+            blend,
+        }
+        .draw(canvas),
+    }
 }
 
 fn draw_content_layer(
@@ -1598,16 +1674,6 @@ fn draw_icon(
         height,
         color,
         alpha,
-        blend: DrawBlend::Plus,
-    }
-    .draw(canvas);
-}
-
-fn draw_airplay_overlay(canvas: &skia_safe::Canvas, center: Point, size: f32, color: Color4f) {
-    DrawCommand::Airplay {
-        center,
-        size,
-        color,
         blend: DrawBlend::Plus,
     }
     .draw(canvas);
@@ -1756,6 +1822,23 @@ mod tests {
         );
         state.cancel();
         assert_eq!(state.press(&ui, 291.5, 691.0), PlayerButton::Next as i32);
+    }
+
+    #[test]
+    fn mode_button_press_animates_from_plain_icon_to_inverse_fill() {
+        let now = Instant::now();
+        let mut state = PlayerInteractionState {
+            pressed: Some(PlayerButton::Lyrics),
+            pressed_at: Some(now - std::time::Duration::from_millis(80)),
+            released: None,
+        };
+        let pressed = state.animation_for(PlayerButton::Lyrics, now);
+        assert!(pressed.press > 0.999);
+        assert!((pressed.scale - 0.9).abs() < 0.001);
+
+        let idle = state.animation_for(PlayerButton::Queue, now);
+        assert_eq!(idle.press, 0.0);
+        assert_eq!(idle.scale, 1.0);
     }
 
     #[test]
