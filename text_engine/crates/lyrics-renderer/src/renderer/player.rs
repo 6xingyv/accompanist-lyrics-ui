@@ -226,6 +226,10 @@ impl PlayerTransitionSample {
             _ => 0.0,
         }
     }
+
+    fn shares_compact_header(self) -> bool {
+        self.from != PlayerScreenInput::Artwork && self.to != PlayerScreenInput::Artwork
+    }
 }
 
 #[derive(Debug)]
@@ -1052,8 +1056,9 @@ pub(super) fn draw_player(
         layout.width,
         bottom_chrome.content_end(layout) - layout.header_top,
     );
+    let shares_compact_header = transition.shares_compact_header();
     let (lyrics_alpha, lyrics_scale) = transition.content_transform(PlayerScreenInput::Lyrics);
-    if lyrics_alpha > 0.001 {
+    if lyrics_alpha > 0.001 && !shares_compact_header {
         draw_content_layer(
             canvas,
             page_bounds,
@@ -1102,7 +1107,19 @@ pub(super) fn draw_player(
             queue_alpha,
             queue_scale,
             |canvas, alpha| {
-                draw_queue_page(
+                if !shares_compact_header {
+                    draw_compact_header(
+                        canvas,
+                        typefaces,
+                        player,
+                        &queue_ui,
+                        interaction,
+                        now,
+                        alpha,
+                        &mut animating,
+                    );
+                }
+                draw_queue_body(
                     canvas,
                     typefaces,
                     thumbnail,
@@ -1115,6 +1132,18 @@ pub(super) fn draw_player(
                     &mut animating,
                 );
             },
+        );
+    }
+    if shares_compact_header {
+        draw_compact_header(
+            canvas,
+            typefaces,
+            player,
+            &active_ui,
+            interaction,
+            now,
+            1.0,
+            &mut animating,
         );
     }
 
@@ -1325,7 +1354,7 @@ fn draw_artwork_metadata(
     );
 }
 
-fn draw_queue_page(
+fn draw_queue_body(
     canvas: &skia_safe::Canvas,
     typefaces: &HashMap<fontdb::ID, Typeface>,
     thumbnail: Option<&Image>,
@@ -1337,17 +1366,6 @@ fn draw_queue_page(
     page_alpha: f32,
     animating: &mut bool,
 ) {
-    draw_compact_header(
-        canvas,
-        typefaces,
-        player,
-        ui,
-        interaction,
-        now,
-        page_alpha,
-        animating,
-    );
-
     let layout = player.layout;
     let scale = layout.scale;
     for (button, icon, filter) in [
@@ -2096,6 +2114,22 @@ mod tests {
         };
         assert!(artwork_to_queue.artwork_progress() > 0.0);
         assert!(artwork_to_queue.artwork_progress() < 1.0);
+    }
+
+    #[test]
+    fn lyrics_and_queue_share_the_compact_metadata_header() {
+        let lyrics_to_queue = PlayerTransitionSample {
+            from: PlayerScreenInput::Lyrics,
+            to: PlayerScreenInput::Queue,
+            progress: 0.5,
+            active: true,
+        };
+        assert!(lyrics_to_queue.shares_compact_header());
+        assert!(PlayerTransitionSample::settled(PlayerScreenInput::Lyrics).shares_compact_header());
+        assert!(PlayerTransitionSample::settled(PlayerScreenInput::Queue).shares_compact_header());
+        assert!(
+            !PlayerTransitionSample::settled(PlayerScreenInput::Artwork).shares_compact_header()
+        );
     }
 
     #[test]
