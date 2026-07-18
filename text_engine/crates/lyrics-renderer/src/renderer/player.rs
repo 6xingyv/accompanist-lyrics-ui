@@ -18,6 +18,8 @@ const COMPACT_HEADER: f32 = 92.0;
 const PROGRESS_ROW: f32 = 60.0;
 const TRANSPORT_ROW: f32 = 142.0;
 const MODE_NAV_ROW: f32 = 90.0;
+const BOTTOM_CHROME_IDLE_SECONDS: f32 = 3.0;
+const BOTTOM_CHROME_EXIT_SECONDS: f32 = 0.36;
 
 // Player chrome is pure white + Plus over the mesh (not the mock's pink fills).
 // Alphas sampled from design exports (status bar ignored — system-drawn):
@@ -310,6 +312,20 @@ pub(super) enum PlayerButton {
     QueueAlbum = 12,
 }
 
+impl PlayerButton {
+    fn is_bottom_chrome(self) -> bool {
+        matches!(
+            self,
+            Self::Previous
+                | Self::PlayPause
+                | Self::Next
+                | Self::Lyrics
+                | Self::Output
+                | Self::Queue
+        )
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 enum PlayerControlVisual {
     Action {
@@ -383,6 +399,8 @@ impl PlayerControl {
 
 #[derive(Debug)]
 pub(super) struct PlayerUiLayout {
+    layout: PlayerLayout,
+    screen: PlayerScreenInput,
     controls: Vec<PlayerControl>,
 }
 
@@ -471,7 +489,11 @@ impl PlayerUiLayout {
                 );
             }
         }
-        Self { controls }
+        Self {
+            layout,
+            screen,
+            controls,
+        }
     }
 
     fn control(&self, button: PlayerButton) -> PlayerControl {
@@ -482,11 +504,26 @@ impl PlayerUiLayout {
             .expect("visible player control must exist in resolved UI")
     }
 
-    fn hit_test(&self, point: Point) -> Option<PlayerButton> {
+    fn hit_test(&self, point: Point, bottom_chrome: BottomChromeSample) -> Option<PlayerButton> {
         self.controls
             .iter()
             .rev()
-            .find(|control| control.hit_rect.contains(point))
+            .find(|control| {
+                let mut rect = control.hit_rect;
+                if control.button.is_bottom_chrome() {
+                    if bottom_chrome.visibility <= 0.001 {
+                        return false;
+                    }
+                    let offset = bottom_chrome.slide_offset(self.layout);
+                    rect = Rect::new(
+                        rect.left,
+                        rect.top + offset,
+                        rect.right,
+                        rect.bottom + offset,
+                    );
+                }
+                rect.contains(point)
+            })
             .map(|control| control.button)
     }
 }
@@ -616,11 +653,43 @@ fn command_paint(color: Color4f, blend: DrawBlend) -> Paint {
     paint
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(super) struct PlayerInteractionState {
     pressed: Option<PlayerButton>,
     pressed_at: Option<Instant>,
     released: Option<(PlayerButton, Instant, f32)>,
+    last_activity_at: Instant,
+}
+
+impl Default for PlayerInteractionState {
+    fn default() -> Self {
+        Self {
+            pressed: None,
+            pressed_at: None,
+            released: None,
+            last_activity_at: Instant::now(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct BottomChromeSample {
+    pub visibility: f32,
+    pub active: bool,
+}
+
+impl BottomChromeSample {
+    pub(super) fn content_bottom(self, layout: PlayerLayout) -> f32 {
+        (layout.height - layout.progress_top).max(0.0) * self.visibility
+    }
+
+    fn content_end(self, layout: PlayerLayout) -> f32 {
+        layout.height - self.content_bottom(layout)
+    }
+
+    fn slide_offset(self, layout: PlayerLayout) -> f32 {
+        64.0 * layout.scale * (1.0 - self.visibility)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -631,10 +700,45 @@ struct ControlAnimation {
 }
 
 impl PlayerInteractionState {
+    pub(super) fn reveal(&mut self) {
+        self.last_activity_at = Instant::now();
+    }
+
+    pub(super) fn bottom_chrome_sample(
+        &self,
+        screen: PlayerScreenInput,
+        now: Instant,
+    ) -> BottomChromeSample {
+        if screen == PlayerScreenInput::Artwork {
+            return BottomChromeSample {
+                visibility: 1.0,
+                active: false,
+            };
+        }
+        let elapsed = now
+            .saturating_duration_since(self.last_activity_at)
+            .as_secs_f32();
+        if elapsed < BOTTOM_CHROME_IDLE_SECONDS {
+            return BottomChromeSample {
+                visibility: 1.0,
+                active: true,
+            };
+        }
+        let progress =
+            ((elapsed - BOTTOM_CHROME_IDLE_SECONDS) / BOTTOM_CHROME_EXIT_SECONDS).clamp(0.0, 1.0);
+        BottomChromeSample {
+            visibility: 1.0 - smooth_step(progress),
+            active: progress < 1.0,
+        }
+    }
+
     pub(super) fn press(&mut self, ui: &PlayerUiLayout, x: f32, y: f32) -> i32 {
-        let hit = ui.hit_test(Point::new(x, y));
+        let now = Instant::now();
+        let bottom_chrome = self.bottom_chrome_sample(ui.screen, now);
+        self.last_activity_at = now;
+        let hit = ui.hit_test(Point::new(x, y), bottom_chrome);
         self.pressed = hit;
-        self.pressed_at = hit.map(|_| Instant::now());
+        self.pressed_at = hit.map(|_| now);
         self.released = None;
         hit.map_or(0, |button| button as i32)
     }
@@ -643,7 +747,8 @@ impl PlayerInteractionState {
         let Some(button) = self.pressed else {
             return 0;
         };
-        let accepted = ui.hit_test(Point::new(x, y)) == Some(button);
+        let bottom_chrome = self.bottom_chrome_sample(ui.screen, Instant::now());
+        let accepted = ui.hit_test(Point::new(x, y), bottom_chrome) == Some(button);
         let scale = self.animation_for(button, Instant::now()).scale;
         self.pressed = None;
         self.pressed_at = None;
@@ -912,6 +1017,7 @@ pub(super) fn draw_player(
     player: &PreparedPlayer,
     interaction: &mut PlayerInteractionState,
     transition: PlayerTransitionSample,
+    bottom_chrome: BottomChromeSample,
     current_time_ms: i32,
 ) -> bool {
     let layout = player.layout;
@@ -936,7 +1042,7 @@ pub(super) fn draw_player(
         0.0,
         layout.header_top,
         layout.width,
-        layout.progress_top - layout.header_top,
+        bottom_chrome.content_end(layout) - layout.header_top,
     );
     let (lyrics_alpha, lyrics_scale) = transition.content_transform(PlayerScreenInput::Lyrics);
     if lyrics_alpha > 0.001 {
@@ -981,6 +1087,7 @@ pub(super) fn draw_player(
                 thumbnail,
                 player,
                 &queue_ui,
+                bottom_chrome,
                 interaction,
                 now,
                 &mut animating,
@@ -1000,18 +1107,38 @@ pub(super) fn draw_player(
     let radius = lerp(12.0 * scale, 18.0 * scale, artwork_progress);
     draw_artwork(canvas, thumbnail, shared_art, radius);
 
-    draw_progress(canvas, typefaces, player, current_time_ms);
-    draw_transport(canvas, player, &active_ui, interaction, now, &mut animating);
-    draw_mode_navigation(
-        canvas,
-        player,
-        &active_ui,
-        interaction,
-        transition.to,
-        now,
-        &mut animating,
-    );
-    animating || transition.active
+    if bottom_chrome.visibility > 0.001 {
+        canvas.save();
+        canvas.translate((0.0, bottom_chrome.slide_offset(layout)));
+        draw_progress(
+            canvas,
+            typefaces,
+            player,
+            current_time_ms,
+            bottom_chrome.visibility,
+        );
+        draw_transport(
+            canvas,
+            player,
+            &active_ui,
+            interaction,
+            now,
+            bottom_chrome.visibility,
+            &mut animating,
+        );
+        draw_mode_navigation(
+            canvas,
+            player,
+            &active_ui,
+            interaction,
+            transition.to,
+            now,
+            bottom_chrome.visibility,
+            &mut animating,
+        );
+        canvas.restore();
+    }
+    animating || transition.active || bottom_chrome.active
 }
 
 /// Anti-aliased paint with additive (Plus) blend for white chrome over the mesh.
@@ -1175,6 +1302,7 @@ fn draw_queue_page(
     thumbnail: Option<&Image>,
     player: &PreparedPlayer,
     ui: &PlayerUiLayout,
+    bottom_chrome: BottomChromeSample,
     interaction: &mut PlayerInteractionState,
     now: Instant,
     animating: &mut bool,
@@ -1247,7 +1375,7 @@ fn draw_queue_page(
             32.0 * scale,
             226.0 * scale,
             (layout.width - 64.0 * scale).max(1.0),
-            (layout.progress_top - 226.0 * scale).max(1.0),
+            (bottom_chrome.content_end(layout) - 226.0 * scale).max(1.0),
         ),
         ClipOp::Intersect,
         true,
@@ -1271,7 +1399,7 @@ fn draw_queue_page(
 
     for (index, item) in player.queue_items.iter().enumerate() {
         let top = (282.0 + index as f32 * 56.0) * scale;
-        if top >= layout.progress_top {
+        if top >= bottom_chrome.content_end(layout) {
             break;
         }
         draw_artwork(
@@ -1330,6 +1458,7 @@ fn draw_progress(
     typefaces: &HashMap<fontdb::ID, Typeface>,
     player: &PreparedPlayer,
     current_time_ms: i32,
+    chrome_alpha: f32,
 ) {
     let l = player.layout;
     let s = l.scale;
@@ -1344,14 +1473,14 @@ fn draw_progress(
     DrawCommand::RoundRect {
         rect: Rect::from_xywh(left, top, width, 4.0 * s),
         radius: 2.0 * s,
-        color: WHITE_TRACK,
+        color: multiplied_alpha(WHITE_TRACK, chrome_alpha),
         blend: DrawBlend::Plus,
     }
     .draw(canvas);
     DrawCommand::RoundRect {
         rect: Rect::from_xywh(left, top, width * ratio, 4.0 * s),
         radius: 2.0 * s,
-        color: WHITE_FILL,
+        color: multiplied_alpha(WHITE_FILL, chrome_alpha),
         blend: DrawBlend::Plus,
     }
     .draw(canvas);
@@ -1368,7 +1497,7 @@ fn draw_progress(
         left,
         l.progress_top + 28.0 * s,
         11.0 * s,
-        TEXT_SECONDARY_ALPHA,
+        TEXT_SECONDARY_ALPHA * chrome_alpha,
         false,
     );
     draw_runtime_label(
@@ -1378,7 +1507,7 @@ fn draw_progress(
         left + width,
         l.progress_top + 28.0 * s,
         11.0 * s,
-        TEXT_SECONDARY_ALPHA,
+        TEXT_SECONDARY_ALPHA * chrome_alpha,
         true,
     );
 }
@@ -1389,6 +1518,7 @@ fn draw_transport(
     ui: &PlayerUiLayout,
     interaction: &mut PlayerInteractionState,
     now: Instant,
+    chrome_alpha: f32,
     animating: &mut bool,
 ) {
     for (button, icon) in [
@@ -1406,7 +1536,7 @@ fn draw_transport(
             width * animation.scale,
             height * animation.scale,
             WHITE,
-            1.0,
+            chrome_alpha,
         );
     }
     let play = ui.control(PlayerButton::PlayPause);
@@ -1421,10 +1551,15 @@ fn draw_transport(
             play_width * (32.0 / 42.0) * play_animation.scale,
             play_height * play_animation.scale,
             WHITE,
-            1.0,
+            chrome_alpha,
         );
     } else {
-        draw_play_icon(canvas, play.center, play_width * play_animation.scale);
+        draw_play_icon(
+            canvas,
+            play.center,
+            play_width * play_animation.scale,
+            chrome_alpha,
+        );
     }
 }
 
@@ -1435,6 +1570,7 @@ fn draw_mode_navigation(
     interaction: &mut PlayerInteractionState,
     selected_screen: PlayerScreenInput,
     now: Instant,
+    chrome_alpha: f32,
     animating: &mut bool,
 ) {
     for (button, glyph, active_on) in [
@@ -1459,11 +1595,12 @@ fn draw_mode_navigation(
             control,
             glyph,
             if selected {
-                WHITE_BTN_ACTIVE
+                multiplied_alpha(WHITE_BTN_ACTIVE, chrome_alpha)
             } else {
-                WHITE_BTN
+                multiplied_alpha(WHITE_BTN, chrome_alpha)
             },
             animation,
+            chrome_alpha,
         );
     }
 }
@@ -1480,6 +1617,7 @@ fn draw_mode_control(
     glyph: ModeGlyph<'_>,
     idle_color: Color4f,
     animation: ControlAnimation,
+    chrome_alpha: f32,
 ) {
     let (diameter, icon_width, icon_height) = control.mode_geometry();
     canvas.save();
@@ -1510,7 +1648,7 @@ fn draw_mode_control(
         );
         let mut layer = Paint::default();
         layer.set_blend_mode(BlendMode::Plus);
-        layer.set_alpha_f(animation.press);
+        layer.set_alpha_f(animation.press * chrome_alpha);
         canvas.save_layer(&SaveLayerRec::default().bounds(&bounds).paint(&layer));
         DrawCommand::Circle {
             center: control.center,
@@ -1586,6 +1724,10 @@ fn draw_content_layer(
 
 fn lerp(from: f32, to: f32, progress: f32) -> f32 {
     from + (to - from) * progress.clamp(0.0, 1.0)
+}
+
+fn multiplied_alpha(color: Color4f, alpha: f32) -> Color4f {
+    Color4f::new(color.r, color.g, color.b, color.a * alpha.clamp(0.0, 1.0))
 }
 
 fn lerp_rect(from: Rect, to: Rect, progress: f32) -> Rect {
@@ -1709,11 +1851,11 @@ fn draw_airplay_command(
     canvas.draw_path(&triangle.detach(), &paint);
 }
 
-fn draw_play_icon(canvas: &skia_safe::Canvas, center: Point, size: f32) {
+fn draw_play_icon(canvas: &skia_safe::Canvas, center: Point, size: f32, alpha: f32) {
     DrawCommand::Play {
         center,
         size,
-        color: WHITE,
+        color: multiplied_alpha(WHITE, alpha),
         blend: DrawBlend::Plus,
     }
     .draw(canvas);
@@ -1831,6 +1973,7 @@ mod tests {
             pressed: Some(PlayerButton::Lyrics),
             pressed_at: Some(now - std::time::Duration::from_millis(80)),
             released: None,
+            last_activity_at: now,
         };
         let pressed = state.animation_for(PlayerButton::Lyrics, now);
         assert!(pressed.press > 0.999);
@@ -1839,6 +1982,29 @@ mod tests {
         let idle = state.animation_for(PlayerButton::Queue, now);
         assert_eq!(idle.press, 0.0);
         assert_eq!(idle.scale, 1.0);
+    }
+
+    #[test]
+    fn lyrics_and_queue_bottom_chrome_hide_after_three_seconds() {
+        let layout = PlayerLayout::resolve(393.0, 852.0);
+        let now = Instant::now();
+        let state = PlayerInteractionState {
+            last_activity_at: now - std::time::Duration::from_millis(3_180),
+            ..PlayerInteractionState::default()
+        };
+        let lyrics = state.bottom_chrome_sample(PlayerScreenInput::Lyrics, now);
+        assert!(lyrics.visibility > 0.0 && lyrics.visibility < 1.0);
+        assert!(lyrics.content_bottom(layout) < layout.lyrics_content_bottom());
+
+        let hidden = state.bottom_chrome_sample(
+            PlayerScreenInput::Queue,
+            now + std::time::Duration::from_secs(1),
+        );
+        assert_eq!(hidden.visibility, 0.0);
+        assert!(!hidden.active);
+
+        let artwork = state.bottom_chrome_sample(PlayerScreenInput::Artwork, now);
+        assert_eq!(artwork.visibility, 1.0);
     }
 
     #[test]

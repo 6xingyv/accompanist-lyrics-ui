@@ -1227,6 +1227,7 @@ impl LyricsRenderer {
         };
         self.player_screen = screen;
         self.player_screen_initialized = true;
+        self.player_interaction.reveal();
         if let Some(player) = self
             .scene
             .as_mut()
@@ -1327,6 +1328,7 @@ impl LyricsRenderer {
             } else {
                 self.player_screen = player.screen;
                 self.player_screen_initialized = true;
+                self.player_interaction.reveal();
             }
             if let Some(duration_ms) = self.player_live_duration_ms {
                 player.duration_ms = duration_ms;
@@ -1424,7 +1426,11 @@ impl LyricsRenderer {
         let typeface_stats = self.ensure_skia_typefaces_for_scene();
         timing.typefaces_ms = phase_ms(phase);
         let should_log_debug = self.should_log_render_debug(current_time_ms);
-        let player_transition = self.player_transition.sample(Instant::now());
+        let frame_now = Instant::now();
+        let player_transition = self.player_transition.sample(frame_now);
+        let bottom_chrome = self
+            .player_interaction
+            .bottom_chrome_sample(self.player_screen, frame_now);
 
         let phase = Instant::now();
         let (
@@ -1458,7 +1464,12 @@ impl LyricsRenderer {
                 scene.config.width.max(DEFAULT_WIDTH) as f32,
                 scene.config.height.max(DEFAULT_HEIGHT),
                 scene.config.content_top,
-                scene.config.content_bottom,
+                scene
+                    .player
+                    .as_ref()
+                    .map_or(scene.config.content_bottom, |player| {
+                        bottom_chrome.content_bottom(player.layout)
+                    }),
                 scene.config.lyrics_clip_left,
                 scene.config.lyrics_clip_right,
                 scene.config.keep_alive,
@@ -1918,6 +1929,7 @@ impl LyricsRenderer {
                 player,
                 &mut self.player_interaction,
                 player_transition,
+                bottom_chrome,
                 current_time_ms,
             )
         } else {
@@ -2081,6 +2093,11 @@ impl LyricsRenderer {
             self.pending_lyric_click_seek = None;
             return -1;
         };
+        let content_bottom = scene.player.as_ref().map_or(scene.config.content_bottom, |player| {
+            self.player_interaction
+                .bottom_chrome_sample(self.player_screen, Instant::now())
+                .content_bottom(player.layout)
+        });
 
         if x < 0.0 || y < 0.0 || x > scene.config.width as f32 || y > scene.config.height as f32 {
             self.pending_lyric_click_seek = None;
@@ -2091,7 +2108,7 @@ impl LyricsRenderer {
         if x < scene.config.lyrics_clip_left
             || x > scene.config.width as f32 - scene.config.lyrics_clip_right
             || y < scene.config.content_top
-            || y > scene.config.height as f32 - scene.config.content_bottom
+            || y > scene.config.height as f32 - content_bottom
         {
             self.pending_lyric_click_seek = None;
             return -1;
