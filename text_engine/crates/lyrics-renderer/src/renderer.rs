@@ -1990,8 +1990,8 @@ impl LyricsRenderer {
         else {
             return 0;
         };
-        self.player_interaction
-            .press(layout, self.player_screen, x, y)
+        let ui = player::PlayerUiLayout::resolve(layout, self.player_screen);
+        self.player_interaction.press(&ui, x, y)
     }
 
     /// Finish a native-player button gesture.
@@ -2012,9 +2012,8 @@ impl LyricsRenderer {
             self.player_interaction.cancel();
             return 0;
         };
-        let action = self
-            .player_interaction
-            .release(layout, self.player_screen, x, y);
+        let ui = player::PlayerUiLayout::resolve(layout, self.player_screen);
+        let action = self.player_interaction.release(&ui, x, y);
         match action {
             code if code == PlayerButton::Lyrics as i32 => {
                 let next = if self.player_screen == PlayerScreenInput::Lyrics {
