@@ -224,10 +224,20 @@ impl MeshGradient {
     /// Draw the background across the whole `width`×`height` surface.
     ///
     /// `time` is the (loudness-paced) animation clock; `amp` is the reactive
-    /// amplitude (the GL `u_amp`); `alpha` is a global fade (`u_alpha`). Per frame:
-    /// re-breathe the geometry (GL vertex shader), then one `drawVertices` with the
-    /// per-fragment `RuntimeEffect`, wrapped in a slightly-blurred layer.
-    pub fn draw(&self, canvas: &Canvas, width: f32, height: f32, time: f32, amp: f32, alpha: f32) {
+    /// amplitude (the GL `u_amp`); `color_alpha` is the artwork fade baked into
+    /// RGB, while `layer_alpha` composites the complete opaque mesh exactly once.
+    /// Keeping expansion out of the shader prevents a low expansion value from
+    /// producing an opaque black frame and still avoids translucent triangle seams.
+    pub fn draw(
+        &self,
+        canvas: &Canvas,
+        width: f32,
+        height: f32,
+        time: f32,
+        amp: f32,
+        color_alpha: f32,
+        layer_alpha: f32,
+    ) {
         if width <= 0.0 || height <= 0.0 || self.base.is_empty() {
             return;
         }
@@ -239,7 +249,7 @@ impl MeshGradient {
             TEX_SIZE as f32,
             time,
             amp,
-            alpha.clamp(0.0, 1.0),
+            color_alpha.clamp(0.0, 1.0),
             width,
             height,
         ] {
@@ -282,6 +292,7 @@ impl MeshGradient {
         // enough of it survives this blur to break 8-bit bands without reading as grain.
         // let sigma = (width.min(height) * 0.0025).clamp(1.0, 2.0);
         let mut layer_paint = Paint::default();
+        layer_paint.set_alpha_f(layer_alpha.clamp(0.0, 1.0));
         // if let Some(filter) =
         //     image_filters::blur((sigma, sigma), None, None, CropRect::NO_CROP_RECT)
         // {

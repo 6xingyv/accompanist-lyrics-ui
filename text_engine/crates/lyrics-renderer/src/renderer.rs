@@ -1362,9 +1362,6 @@ impl LyricsRenderer {
             canvas.clear(skia_safe::Color::BLACK);
         } else {
             canvas.clear(skia_safe::Color::TRANSPARENT);
-            let mut black = skia_safe::Paint::default();
-            black.set_color4f(skia_safe::Color4f::new(0.0, 0.0, 0.0, expansion), None);
-            canvas.draw_rect(skia_safe::Rect::from_xywh(0.0, 0.0, width, height), &black);
         }
 
         let now = Instant::now();
@@ -1397,12 +1394,20 @@ impl LyricsRenderer {
         // Re-tessellate the control-point grid if the surface size/aspect changed
         // (cheap; only rebuilds on a real resize), then draw. The linear fade-in
         // progress is eased so the artwork blooms in smoothly rather than ramping.
-        let eased_alpha = ease_in_out(self.background_alpha) * expansion;
+        let eased_alpha = ease_in_out(self.background_alpha);
         if let Some(mesh) = self.mesh_gradient.as_mut() {
             mesh.ensure_grid(width, height);
         }
         if let Some(mesh) = self.mesh_gradient.as_ref() {
-            mesh.draw(canvas, width, height, self.mesh_time, amp, eased_alpha);
+            mesh.draw(
+                canvas,
+                width,
+                height,
+                self.mesh_time,
+                amp,
+                eased_alpha,
+                expansion,
+            );
         }
         // Keep animating while playing (frozen — and parkable — when paused).
         self.playback_active
