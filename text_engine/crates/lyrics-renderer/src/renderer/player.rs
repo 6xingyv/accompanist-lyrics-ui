@@ -5,6 +5,7 @@
 //! receives the remaining height. All interaction and press feedback lives in
 //! Rust so a host only forwards pointer events and consumes action codes.
 
+use super::scroll::{advance_fling, spring_step};
 use super::*;
 use skia_safe::{
     canvas::SaveLayerRec, BlendMode, ClipOp, Color4f, Contains, Image, Paint, Path, PathBuilder,
@@ -949,24 +950,37 @@ impl LyricsRenderer {
         self.queue_scroll.last_frame_at = Some(now);
 
         if !self.queue_scroll.dragging && dt > 0.0 {
-            self.queue_scroll.offset += self.queue_scroll.velocity * dt;
-            self.queue_scroll.velocity *= self.scroll_params().deceleration_rate.powf(dt * 60.0);
+            let params = self.scroll_params();
+            advance_fling(
+                &mut self.queue_scroll.offset,
+                &mut self.queue_scroll.velocity,
+                params.deceleration_rate,
+                dt,
+            );
             let bound = self.queue_scroll.offset.clamp(0.0, max);
             let displacement = bound - self.queue_scroll.offset;
-            if displacement.abs() > 0.01 {
-                self.queue_scroll.velocity += displacement * 42.0 * dt;
-                self.queue_scroll.velocity *= (-9.0_f32 * dt).exp();
+            if displacement.abs() > LINE_LAYOUT_EPSILON {
+                spring_step(
+                    &mut self.queue_scroll.offset,
+                    &mut self.queue_scroll.velocity,
+                    bound,
+                    params.overscroll_stiffness,
+                    params.overscroll_damping,
+                    dt,
+                );
             }
-            if self.queue_scroll.velocity.abs() < 2.0 && displacement.abs() < 0.5 {
+            if self.queue_scroll.velocity.abs() < MANUAL_SCROLL_VELOCITY_EPSILON
+                && displacement.abs() < LINE_LAYOUT_EPSILON
+            {
                 self.queue_scroll.offset = bound;
                 self.queue_scroll.velocity = 0.0;
             }
         }
 
         let active = self.queue_scroll.dragging
-            || self.queue_scroll.velocity.abs() >= 2.0
-            || self.queue_scroll.offset < -0.5
-            || self.queue_scroll.offset > max + 0.5;
+            || self.queue_scroll.velocity.abs() >= MANUAL_SCROLL_VELOCITY_EPSILON
+            || self.queue_scroll.offset < -LINE_LAYOUT_EPSILON
+            || self.queue_scroll.offset > max + LINE_LAYOUT_EPSILON;
         (self.queue_scroll.offset, active)
     }
 

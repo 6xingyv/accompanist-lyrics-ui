@@ -219,9 +219,12 @@ impl LyricsRenderer {
                     return auto_scroll_y;
                 }
             } else if self.manual_scroll.velocity.abs() > MANUAL_SCROLL_VELOCITY_EPSILON {
-                self.manual_scroll.offset += self.manual_scroll.velocity * dt;
-                // iOS exponential deceleration: v *= rate^(elapsed_ms).
-                self.manual_scroll.velocity *= scroll.deceleration_rate.powf(dt * 1000.0);
+                advance_fling(
+                    &mut self.manual_scroll.offset,
+                    &mut self.manual_scroll.velocity,
+                    scroll.deceleration_rate,
+                    dt,
+                );
                 if self.manual_scroll.velocity.abs() <= MANUAL_SCROLL_VELOCITY_EPSILON {
                     self.manual_scroll.velocity = 0.0;
                 }
@@ -609,7 +612,31 @@ impl LyricsRenderer {
     }
 }
 
-fn spring_step(
+/// Advance an iOS-style exponential fling where `deceleration_rate` is the
+/// retained velocity per millisecond. Integrating the exponential analytically
+/// keeps both distance and velocity independent of display refresh rate.
+pub(super) fn advance_fling(offset: &mut f32, velocity: &mut f32, deceleration_rate: f32, dt: f32) {
+    if dt <= 0.0 || *velocity == 0.0 {
+        return;
+    }
+    let rate = deceleration_rate.clamp(0.0, 1.0);
+    if rate <= f32::EPSILON {
+        *velocity = 0.0;
+        return;
+    }
+    if rate >= 1.0 - f32::EPSILON {
+        *offset += *velocity * dt;
+        return;
+    }
+
+    let decay_per_second = rate.ln() * 1000.0;
+    let exponent = decay_per_second * dt;
+    let decay = exponent.exp();
+    *offset += *velocity * exponent.exp_m1() / decay_per_second;
+    *velocity *= decay;
+}
+
+pub(super) fn spring_step(
     value: &mut f32,
     velocity: &mut f32,
     target: f32,
@@ -709,6 +736,51 @@ mod tests {
         assert!(renderer.manual_scroll.return_to_auto_requested);
         assert!(renderer.manual_scroll_plain_list_active());
         assert!(!renderer.seek_glide_active);
+    }
+
+    #[test]
+    fn fling_decay_is_independent_of_frame_rate() {
+        let mut one_frame_offset = 0.0;
+        let mut one_frame_velocity = 6_000.0;
+        advance_fling(
+            &mut one_frame_offset,
+            &mut one_frame_velocity,
+            MANUAL_SCROLL_DECELERATION_RATE,
+            1.0,
+        );
+
+        let mut sixty_frame_offset = 0.0;
+        let mut sixty_frame_velocity = 6_000.0;
+        for _ in 0..60 {
+            advance_fling(
+                &mut sixty_frame_offset,
+                &mut sixty_frame_velocity,
+                MANUAL_SCROLL_DECELERATION_RATE,
+                1.0 / 60.0,
+            );
+        }
+
+        assert!((one_frame_offset - sixty_frame_offset).abs() < 0.01);
+        assert!((one_frame_velocity - sixty_frame_velocity).abs() < 0.01);
+    }
+
+    #[test]
+    fn default_fling_has_no_long_low_velocity_tail() {
+        let mut offset = 0.0;
+        let mut velocity = MANUAL_SCROLL_MAX_FLING_VELOCITY;
+        // Even a maximum-speed fling must be below the renderer's stop
+        // threshold in under 3.7 seconds. The old per-frame interpretation of
+        // the rate still retained almost the full velocity at this point.
+        for _ in 0..220 {
+            advance_fling(
+                &mut offset,
+                &mut velocity,
+                MANUAL_SCROLL_DECELERATION_RATE,
+                1.0 / 60.0,
+            );
+        }
+
+        assert!(velocity.abs() < MANUAL_SCROLL_VELOCITY_EPSILON);
     }
 
     #[test]
