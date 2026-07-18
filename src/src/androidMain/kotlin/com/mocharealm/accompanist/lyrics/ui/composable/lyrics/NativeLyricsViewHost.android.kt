@@ -189,6 +189,7 @@ internal actual fun NativeLyricsViewHost(
                 presentation = playerChrome.presentation.wireValue,
                 viewportWidth = playerChrome.viewportWidth,
                 viewportHeight = playerChrome.viewportHeight,
+                miniForegroundArgb = playerChrome.miniForegroundArgb,
                 screen = playerChrome.initialScreen.wireValue,
                 queueTitle = playerChrome.queueTitle,
                 queueSource = playerChrome.queueSource,

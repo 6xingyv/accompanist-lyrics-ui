@@ -30,6 +30,8 @@ data class NativePlayerChrome(
     /** Logical mini-player viewport inside a fixed-size native surface, in px. */
     val viewportWidth: Float? = null,
     val viewportHeight: Float? = null,
+    /** Theme-derived ARGB foreground used only by the collapsed mini player. */
+    val miniForegroundArgb: Int = -1,
     /**
      * Initial page only (default: full artwork with no mode chip selected).
      * After the first scene, Rust owns lyrics/queue toggles; subsequent host

@@ -86,6 +86,7 @@ pub(crate) struct PlayerInput {
     pub presentation: PlayerPresentationInput,
     pub viewport_width: Option<f32>,
     pub viewport_height: Option<f32>,
+    pub mini_foreground_argb: Option<i32>,
     pub screen: PlayerScreenInput,
     pub title: String,
     pub artist: String,
@@ -138,6 +139,7 @@ pub(super) struct PreparedPlayer {
     pub duration_ms: i32,
     pub is_playing: bool,
     pub liked: bool,
+    mini_foreground: Color4f,
     pub title: PreparedText,
     pub artist: PreparedText,
     pub artwork_title: PreparedText,
@@ -1577,6 +1579,7 @@ impl LyricsRenderer {
             duration_ms: input.duration_ms.max(0),
             is_playing: input.is_playing,
             liked: input.liked,
+            mini_foreground: color4f_from_argb(input.mini_foreground_argb.unwrap_or(-1)),
             title,
             artist,
             artwork_title,
@@ -1861,13 +1864,6 @@ fn draw_mini_player(
     let mini = ui
         .mini
         .expect("mini presentation must resolve mini flex geometry");
-    DrawCommand::RoundRect {
-        rect: Rect::from_xywh(0.0, 0.0, layout.width, layout.height),
-        radius: 16.0 * s,
-        color: Color4f::new(0.08, 0.08, 0.08, 0.82 * alpha),
-        blend: DrawBlend::SourceOver,
-    }
-    .draw(canvas);
     if draw_shared_artwork {
         draw_artwork(canvas, thumbnail, mini.artwork, 6.0 * s, alpha);
     }
@@ -1875,7 +1871,8 @@ fn draw_mini_player(
     let text_left = mini.text.left;
     let text_width = mini.text.width().max(1.0);
     let mut animating = false;
-    animating |= draw_plus_marquee_text(
+    let foreground_rgba = color4f_to_rgba(player.mini_foreground);
+    animating |= draw_marquee_text(
         canvas,
         typefaces,
         &player.title,
@@ -1884,10 +1881,11 @@ fn draw_mini_player(
         text_width,
         0.0,
         8.0 * s,
+        foreground_rgba,
         TEXT_PRIMARY_ALPHA * alpha,
         current_time_ms,
     );
-    animating |= draw_plus_marquee_text(
+    animating |= draw_marquee_text(
         canvas,
         typefaces,
         &player.artist,
@@ -1896,6 +1894,7 @@ fn draw_mini_player(
         text_width,
         0.0,
         8.0 * s,
+        foreground_rgba,
         TEXT_SECONDARY_ALPHA * alpha,
         current_time_ms,
     );
@@ -1915,17 +1914,66 @@ fn draw_mini_player(
         let (width, height) = control.transport_size();
         let animation = interaction.animation_for(button, now);
         animating |= animation.active;
-        draw_icon(
-            canvas,
+        DrawCommand::Icon {
             icon,
-            control.center,
-            width * animation.scale,
-            height * animation.scale,
-            WHITE,
+            center: control.center,
+            width: width * animation.scale,
+            height: height * animation.scale,
+            color: player.mini_foreground,
             alpha,
-        );
+            blend: DrawBlend::SourceOver,
+        }
+        .draw(canvas);
     }
     animating
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_marquee_text(
+    canvas: &skia_safe::Canvas,
+    typefaces: &HashMap<fontdb::ID, Typeface>,
+    text: &PreparedText,
+    left: f32,
+    top: f32,
+    max_width: f32,
+    left_fade_width: f32,
+    right_fade_width: f32,
+    color: (u8, u8, u8, u8),
+    alpha: f32,
+    current_time_ms: i32,
+) -> bool {
+    super::draw::draw_top_bar_marquee_line(
+        canvas,
+        typefaces,
+        text,
+        left,
+        top,
+        max_width,
+        left_fade_width,
+        right_fade_width,
+        color,
+        alpha,
+        current_time_ms,
+    )
+}
+
+fn color4f_from_argb(argb: i32) -> Color4f {
+    let argb = argb as u32;
+    Color4f::new(
+        ((argb >> 16) & 0xff) as f32 / 255.0,
+        ((argb >> 8) & 0xff) as f32 / 255.0,
+        (argb & 0xff) as f32 / 255.0,
+        ((argb >> 24) & 0xff) as f32 / 255.0,
+    )
+}
+
+fn color4f_to_rgba(color: Color4f) -> (u8, u8, u8, u8) {
+    (
+        (color.r * 255.0).round() as u8,
+        (color.g * 255.0).round() as u8,
+        (color.b * 255.0).round() as u8,
+        (color.a * 255.0).round() as u8,
+    )
 }
 
 /// Draw prepared text through a Plus layer so white metadata matches Compose.
@@ -3178,12 +3226,13 @@ mod tests {
     #[test]
     fn player_wire_deserializes_mini_viewport() {
         let player: PlayerInput = serde_json::from_str(
-            r#"{"presentation":"mini","viewportWidth":361.0,"viewportHeight":60.0,"title":"Jupiter","artist":"Coldplay"}"#,
+            r#"{"presentation":"mini","viewportWidth":361.0,"viewportHeight":60.0,"miniForegroundArgb":-16777216,"title":"Jupiter","artist":"Coldplay"}"#,
         )
         .unwrap();
         assert_eq!(player.presentation, PlayerPresentationInput::Mini);
         assert_eq!(player.viewport_width, Some(361.0));
         assert_eq!(player.viewport_height, Some(60.0));
+        assert_eq!(player.mini_foreground_argb, Some(-16777216));
     }
 
     #[test]

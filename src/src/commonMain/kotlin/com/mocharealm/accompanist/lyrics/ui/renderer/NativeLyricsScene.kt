@@ -161,6 +161,7 @@ internal data class PlayerWire(
     val presentation: String = "full",
     val viewportWidth: Float? = null,
     val viewportHeight: Float? = null,
+    val miniForegroundArgb: Int = -1,
     val screen: String = "artwork",
     val title: String,
     val artist: String,
