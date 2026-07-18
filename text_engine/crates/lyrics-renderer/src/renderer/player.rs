@@ -1046,17 +1046,24 @@ pub(super) fn draw_player(
     );
     let (lyrics_alpha, lyrics_scale) = transition.content_transform(PlayerScreenInput::Lyrics);
     if lyrics_alpha > 0.001 {
-        draw_content_layer(canvas, page_bounds, lyrics_alpha, lyrics_scale, |canvas| {
-            draw_compact_header(
-                canvas,
-                typefaces,
-                player,
-                &lyrics_ui,
-                interaction,
-                now,
-                &mut animating,
-            );
-        });
+        draw_content_layer(
+            canvas,
+            page_bounds,
+            lyrics_alpha,
+            lyrics_scale,
+            |canvas, alpha| {
+                draw_compact_header(
+                    canvas,
+                    typefaces,
+                    player,
+                    &lyrics_ui,
+                    interaction,
+                    now,
+                    alpha,
+                    &mut animating,
+                );
+            },
+        );
     }
     let (artwork_alpha, artwork_scale) = transition.content_transform(PlayerScreenInput::Artwork);
     if artwork_alpha > 0.001 {
@@ -1065,7 +1072,7 @@ pub(super) fn draw_player(
             page_bounds,
             artwork_alpha,
             artwork_scale,
-            |canvas| {
+            |canvas, alpha| {
                 draw_artwork_metadata(
                     canvas,
                     typefaces,
@@ -1073,6 +1080,7 @@ pub(super) fn draw_player(
                     &artwork_ui,
                     interaction,
                     now,
+                    alpha,
                     &mut animating,
                 );
             },
@@ -1080,19 +1088,26 @@ pub(super) fn draw_player(
     }
     let (queue_alpha, queue_scale) = transition.content_transform(PlayerScreenInput::Queue);
     if queue_alpha > 0.001 {
-        draw_content_layer(canvas, page_bounds, queue_alpha, queue_scale, |canvas| {
-            draw_queue_page(
-                canvas,
-                typefaces,
-                thumbnail,
-                player,
-                &queue_ui,
-                bottom_chrome,
-                interaction,
-                now,
-                &mut animating,
-            );
-        });
+        draw_content_layer(
+            canvas,
+            page_bounds,
+            queue_alpha,
+            queue_scale,
+            |canvas, alpha| {
+                draw_queue_page(
+                    canvas,
+                    typefaces,
+                    thumbnail,
+                    player,
+                    &queue_ui,
+                    bottom_chrome,
+                    interaction,
+                    now,
+                    alpha,
+                    &mut animating,
+                );
+            },
+        );
     }
 
     // One image participates in the transition. Its geometry is interpolated;
@@ -1105,7 +1120,7 @@ pub(super) fn draw_player(
         artwork_progress,
     );
     let radius = lerp(12.0 * scale, 18.0 * scale, artwork_progress);
-    draw_artwork(canvas, thumbnail, shared_art, radius);
+    draw_artwork(canvas, thumbnail, shared_art, radius, 1.0);
 
     if bottom_chrome.visibility > 0.001 {
         canvas.save();
@@ -1179,6 +1194,7 @@ fn draw_compact_header(
     ui: &PlayerUiLayout,
     interaction: &mut PlayerInteractionState,
     now: Instant,
+    page_alpha: f32,
     animating: &mut bool,
 ) {
     let s = player.layout.scale;
@@ -1194,7 +1210,7 @@ fn draw_compact_header(
         &player.title,
         116.0 * s,
         102.5 * s,
-        TEXT_PRIMARY_ALPHA,
+        TEXT_PRIMARY_ALPHA * page_alpha,
     );
     draw_plus_text(
         canvas,
@@ -1202,7 +1218,7 @@ fn draw_compact_header(
         &player.artist,
         116.0 * s,
         128.5 * s,
-        TEXT_SECONDARY_ALPHA,
+        TEXT_SECONDARY_ALPHA * page_alpha,
     );
     canvas.restore();
 
@@ -1221,6 +1237,7 @@ fn draw_compact_header(
         favorite_icon_size,
         favorite_animation.scale,
         player.liked,
+        page_alpha,
     );
     draw_action_button(
         canvas,
@@ -1230,6 +1247,7 @@ fn draw_compact_header(
         more_icon_size,
         more_animation.scale,
         false,
+        page_alpha,
     );
 }
 
@@ -1240,6 +1258,7 @@ fn draw_artwork_metadata(
     ui: &PlayerUiLayout,
     interaction: &mut PlayerInteractionState,
     now: Instant,
+    page_alpha: f32,
     animating: &mut bool,
 ) {
     let layout = player.layout;
@@ -1257,7 +1276,7 @@ fn draw_artwork_metadata(
         &player.artwork_title,
         32.0 * scale,
         top + 24.0 * scale,
-        TEXT_PRIMARY_ALPHA,
+        TEXT_PRIMARY_ALPHA * page_alpha,
     );
     draw_plus_text(
         canvas,
@@ -1265,7 +1284,7 @@ fn draw_artwork_metadata(
         &player.artwork_artist,
         32.0 * scale,
         top + 51.0 * scale,
-        TEXT_SECONDARY_ALPHA,
+        TEXT_SECONDARY_ALPHA * page_alpha,
     );
     canvas.restore();
 
@@ -1284,6 +1303,7 @@ fn draw_artwork_metadata(
         favorite_icon_size,
         favorite_animation.scale,
         player.liked,
+        page_alpha,
     );
     draw_action_button(
         canvas,
@@ -1293,6 +1313,7 @@ fn draw_artwork_metadata(
         more_icon_size,
         more_animation.scale,
         false,
+        page_alpha,
     );
 }
 
@@ -1305,9 +1326,19 @@ fn draw_queue_page(
     bottom_chrome: BottomChromeSample,
     interaction: &mut PlayerInteractionState,
     now: Instant,
+    page_alpha: f32,
     animating: &mut bool,
 ) {
-    draw_compact_header(canvas, typefaces, player, ui, interaction, now, animating);
+    draw_compact_header(
+        canvas,
+        typefaces,
+        player,
+        ui,
+        interaction,
+        now,
+        page_alpha,
+        animating,
+    );
 
     let layout = player.layout;
     let scale = layout.scale;
@@ -1346,9 +1377,9 @@ fn draw_queue_page(
             rect: pill,
             radius: pill.height() * 0.5,
             color: if selected {
-                WHITE_BTN_ACTIVE
+                multiplied_alpha(WHITE_BTN_ACTIVE, page_alpha)
             } else {
-                WHITE_BTN
+                multiplied_alpha(WHITE_BTN, page_alpha)
             },
             blend: DrawBlend::Plus,
         }
@@ -1364,7 +1395,7 @@ fn draw_queue_page(
             } else {
                 WHITE_BTN
             },
-            1.0,
+            page_alpha,
         );
         canvas.restore();
     }
@@ -1386,7 +1417,7 @@ fn draw_queue_page(
         &player.queue_title,
         32.0 * scale,
         234.0 * scale,
-        TEXT_PRIMARY_ALPHA,
+        TEXT_PRIMARY_ALPHA * page_alpha,
     );
     draw_plus_text(
         canvas,
@@ -1394,7 +1425,7 @@ fn draw_queue_page(
         &player.queue_source,
         32.0 * scale,
         260.0 * scale,
-        TEXT_SECONDARY_ALPHA,
+        TEXT_SECONDARY_ALPHA * page_alpha,
     );
 
     for (index, item) in player.queue_items.iter().enumerate() {
@@ -1407,6 +1438,7 @@ fn draw_queue_page(
             thumbnail,
             Rect::from_xywh(32.0 * scale, top + 4.0 * scale, 48.0 * scale, 48.0 * scale),
             8.0 * scale,
+            page_alpha,
         );
         canvas.save();
         canvas.clip_rect(
@@ -1420,7 +1452,7 @@ fn draw_queue_page(
             &item.title,
             92.0 * scale,
             top + 8.0 * scale,
-            TEXT_PRIMARY_ALPHA,
+            TEXT_PRIMARY_ALPHA * page_alpha,
         );
         draw_plus_text(
             canvas,
@@ -1428,15 +1460,20 @@ fn draw_queue_page(
             &item.artist,
             92.0 * scale,
             top + 30.0 * scale,
-            TEXT_SECONDARY_ALPHA,
+            TEXT_SECONDARY_ALPHA * page_alpha,
         );
         canvas.restore();
-        draw_reorder_handle(canvas, Point::new(349.0 * scale, top + 28.0 * scale), scale);
+        draw_reorder_handle(
+            canvas,
+            Point::new(349.0 * scale, top + 28.0 * scale),
+            scale,
+            page_alpha,
+        );
     }
     canvas.restore();
 }
 
-fn draw_reorder_handle(canvas: &skia_safe::Canvas, center: Point, scale: f32) {
+fn draw_reorder_handle(canvas: &skia_safe::Canvas, center: Point, scale: f32, alpha: f32) {
     for offset in [-4.0, 0.0, 4.0] {
         DrawCommand::RoundRect {
             rect: Rect::from_xywh(
@@ -1446,7 +1483,7 @@ fn draw_reorder_handle(canvas: &skia_safe::Canvas, center: Point, scale: f32) {
                 2.0 * scale,
             ),
             radius: scale,
-            color: WHITE_SECONDARY,
+            color: multiplied_alpha(WHITE_SECONDARY, alpha),
             blend: DrawBlend::Plus,
         }
         .draw(canvas);
@@ -1706,11 +1743,10 @@ fn draw_content_layer(
     bounds: Rect,
     alpha: f32,
     scale: f32,
-    draw: impl FnOnce(&skia_safe::Canvas),
+    draw: impl FnOnce(&skia_safe::Canvas, f32),
 ) {
-    let mut paint = Paint::default();
-    paint.set_alpha_f(alpha.clamp(0.0, 1.0));
-    canvas.save_layer(&SaveLayerRec::default().bounds(&bounds).paint(&paint));
+    canvas.save();
+    canvas.clip_rect(bounds, ClipOp::Intersect, true);
     let center = Point::new(
         (bounds.left + bounds.right) * 0.5,
         (bounds.top + bounds.bottom) * 0.5,
@@ -1718,7 +1754,7 @@ fn draw_content_layer(
     canvas.translate(center);
     canvas.scale((scale, scale));
     canvas.translate((-center.x, -center.y));
-    draw(canvas);
+    draw(canvas, alpha.clamp(0.0, 1.0));
     canvas.restore();
 }
 
@@ -1747,6 +1783,7 @@ fn draw_action_button(
     icon_size: f32,
     scale: f32,
     filled: bool,
+    alpha: f32,
 ) {
     canvas.save();
     canvas.translate(center);
@@ -1755,7 +1792,7 @@ fn draw_action_button(
     DrawCommand::Circle {
         center,
         radius: diameter * 0.5,
-        color: if filled { WHITE_BTN_ACTIVE } else { WHITE_BTN },
+        color: multiplied_alpha(if filled { WHITE_BTN_ACTIVE } else { WHITE_BTN }, alpha),
         blend: DrawBlend::Plus,
     }
     .draw(canvas);
@@ -1770,17 +1807,24 @@ fn draw_action_button(
             icon_size
         },
         if filled { WHITE_BTN_ACTIVE } else { WHITE_BTN },
-        1.0,
+        alpha,
     );
     canvas.restore();
 }
 
-fn draw_artwork(canvas: &skia_safe::Canvas, thumbnail: Option<&Image>, rect: Rect, radius: f32) {
+fn draw_artwork(
+    canvas: &skia_safe::Canvas,
+    thumbnail: Option<&Image>,
+    rect: Rect,
+    radius: f32,
+    alpha: f32,
+) {
     let clip = crate::capsule::continuous_rounded_rect(rect, radius);
     canvas.save();
     canvas.clip_path(&clip, ClipOp::Intersect, true);
     if let Some(image) = thumbnail {
-        let paint = Paint::default();
+        let mut paint = Paint::default();
+        paint.set_alpha_f(alpha.clamp(0.0, 1.0));
         canvas.draw_image_rect_with_sampling_options(
             image,
             None,
@@ -1792,7 +1836,7 @@ fn draw_artwork(canvas: &skia_safe::Canvas, thumbnail: Option<&Image>, rect: Rec
         DrawCommand::RoundRect {
             rect,
             radius: 0.0,
-            color: ARTWORK_PLACEHOLDER,
+            color: multiplied_alpha(ARTWORK_PLACEHOLDER, alpha),
             blend: DrawBlend::SourceOver,
         }
         .draw(canvas);
