@@ -29,6 +29,7 @@ internal actual fun NativeLyricsViewHost(
     artist: String?,
     onControlsClick: (() -> Unit)?,
     playerChrome: NativePlayerChrome?,
+    playerExpansionProgress: Float,
     onPlayerAction: ((NativePlayerAction) -> Unit)?,
     onQueueReordered: ((Int, Int) -> Unit)?,
 ) {

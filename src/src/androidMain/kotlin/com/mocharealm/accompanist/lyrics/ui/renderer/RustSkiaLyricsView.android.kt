@@ -143,6 +143,7 @@ class RustSkiaLyricsView @JvmOverloads constructor(
     private var topBarArtist: String? = null
     private var onControlsClicked: (() -> Unit)? = null
     private var playerWire: PlayerWire? = null
+    private var playerExpansionProgress = 1f
     private var onPlayerAction: ((Int) -> Unit)? = null
     private data class QueueArtworkPixels(val pixels: IntArray, val width: Int, val height: Int)
     private val queueArtworkPixels = LinkedHashMap<String, QueueArtworkPixels>()
@@ -416,6 +417,7 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         durationMs: Int = 0,
         playing: Boolean = false,
         liked: Boolean = false,
+        presentation: String = "full",
         screen: String = "artwork",
         queueTitle: String = "",
         queueSource: String = "",
@@ -425,11 +427,15 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         require(screen == "lyrics" || screen == "artwork" || screen == "queue") {
             "screen must be lyrics, artwork, or queue"
         }
+        require(presentation == "mini" || presentation == "full") {
+            "presentation must be mini or full"
+        }
         require(queueFilter in setOf("upNext", "shuffle", "repeatOne", "album")) {
             "queueFilter must be upNext, shuffle, repeatOne, or album"
         }
         val next = title?.let {
             PlayerWire(
+                presentation = presentation,
                 screen = screen,
                 title = it,
                 artist = artist,
@@ -452,6 +458,13 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         playerWire = next
         sceneDirty = true
         rebuildSceneAndRender()
+    }
+
+    fun setPlayerExpansionProgress(progress: Float) {
+        val next = progress.coerceIn(0f, 1f)
+        if (playerExpansionProgress == next) return
+        playerExpansionProgress = next
+        if (!engineClosed) postPlayerCommand { engine.setPlayerExpansionProgress(next) }
     }
 
     /** Stable native action codes: favorite=1, more=2, previous=3,
@@ -889,7 +902,6 @@ class RustSkiaLyricsView @JvmOverloads constructor(
                 if (!isDragging && abs(y - downY) > touchSlop) {
                     isDragging = true
                     lastTouchY = y
-                    if (playerWire != null) postPlayerCommand { engine.cancelPlayerPointer() }
                     postScrollCommand { engine.beginLyricsScroll() }
                     cancelTapDetection(event)
                     return true

@@ -632,6 +632,9 @@ pub struct LyricsRenderer {
     /// Kotlin never has to push per-frame transport state.
     player_live_duration_ms: Option<i32>,
     player_live_playing: Option<bool>,
+    /// Host-driven mini → full expansion. It is updated independently of the
+    /// prepared scene so a navigation gesture never reshapes lyrics each frame.
+    player_expansion_progress: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -1169,6 +1172,7 @@ impl LyricsRenderer {
             player_screen_initialized: false,
             player_live_duration_ms: None,
             player_live_playing: None,
+            player_expansion_progress: 1.0,
         }
     }
 
@@ -1236,6 +1240,12 @@ impl LyricsRenderer {
         self.player_live_duration_ms = None;
     }
 
+    pub fn set_player_expansion_progress(&mut self, progress: f32) {
+        if progress.is_finite() {
+            self.player_expansion_progress = progress.clamp(0.0, 1.0);
+        }
+    }
+
     /// Select one of the three portrait pages and start the transition. Hosts
     /// should not echo this back through the scene wire.
     pub fn select_player_screen(&mut self, screen: PlayerScreenInput) {
@@ -1275,12 +1285,34 @@ impl LyricsRenderer {
 
     /// Draw the opaque mesh-gradient background across the whole surface and advance
     /// its (loudness-paced) animation clock. Returns whether the background is still
-    /// animating (so the render loop keeps ticking). No-op unless `background_enabled`.
+    /// animating (so the render loop keeps ticking). Mini presentation always clears
+    /// transparent; full presentation is otherwise a no-op unless `background_enabled`.
     fn draw_background(&mut self, canvas: &skia_safe::Canvas, width: f32, height: f32) -> bool {
+        let presentation = self
+            .scene
+            .as_ref()
+            .and_then(|scene| scene.player.as_ref())
+            .map(|player| player.presentation);
+        if presentation == Some(player::PlayerPresentationInput::Mini) {
+            canvas.clear(skia_safe::Color::TRANSPARENT);
+            return false;
+        }
         if !self.background_enabled {
             return false;
         }
-        canvas.clear(skia_safe::Color::BLACK);
+        let expansion = if presentation.is_some() {
+            ease_in_out(self.player_expansion_progress)
+        } else {
+            1.0
+        };
+        if expansion >= 0.999 {
+            canvas.clear(skia_safe::Color::BLACK);
+        } else {
+            canvas.clear(skia_safe::Color::TRANSPARENT);
+            let mut black = skia_safe::Paint::default();
+            black.set_color4f(skia_safe::Color4f::new(0.0, 0.0, 0.0, expansion), None);
+            canvas.draw_rect(skia_safe::Rect::from_xywh(0.0, 0.0, width, height), &black);
+        }
 
         let now = Instant::now();
         let frame_dt = self
@@ -1312,7 +1344,7 @@ impl LyricsRenderer {
         // Re-tessellate the control-point grid if the surface size/aspect changed
         // (cheap; only rebuilds on a real resize), then draw. The linear fade-in
         // progress is eased so the artwork blooms in smoothly rather than ramping.
-        let eased_alpha = ease_in_out(self.background_alpha);
+        let eased_alpha = ease_in_out(self.background_alpha) * expansion;
         if let Some(mesh) = self.mesh_gradient.as_mut() {
             mesh.ensure_grid(width, height);
         }
@@ -1625,7 +1657,15 @@ impl LyricsRenderer {
             || lyrics_clip_right > 0.0;
         let player_scene = scene.player.is_some();
         let (player_lyrics_alpha, player_lyrics_scale) = if player_scene {
-            player_transition.content_transform(player::PlayerScreenInput::Lyrics)
+            let (alpha, scale) =
+                player_transition.content_transform(player::PlayerScreenInput::Lyrics);
+            let presentation = scene.player.as_ref().map(|player| player.presentation);
+            let expansion = if presentation == Some(player::PlayerPresentationInput::Mini) {
+                0.0
+            } else {
+                ease_in_out(self.player_expansion_progress)
+            };
+            (alpha * expansion, scale)
         } else {
             (1.0, 1.0)
         };
@@ -1951,6 +1991,7 @@ impl LyricsRenderer {
                 queue_scroll_y,
                 queue_reorder,
                 current_time_ms,
+                self.player_expansion_progress,
             )
         } else {
             false
@@ -2015,15 +2056,15 @@ impl LyricsRenderer {
     /// Begin a native-player button gesture and return its stable action code.
     /// Zero means the point does not hit player chrome.
     pub fn player_pointer_down(&mut self, x: f32, y: f32) -> i32 {
-        let Some(layout) = self
+        let Some((layout, presentation)) = self
             .scene
             .as_ref()
             .and_then(|scene| scene.player.as_ref())
-            .map(|player| player.layout)
+            .map(|player| (player.layout, player.presentation))
         else {
             return 0;
         };
-        let ui = player::PlayerUiLayout::resolve(layout, self.player_screen);
+        let ui = player::PlayerUiLayout::resolve(layout, self.player_screen, presentation);
         self.player_interaction.press(&ui, x, y)
     }
 
@@ -2036,16 +2077,16 @@ impl LyricsRenderer {
     /// The action code is still returned so the host can handle transport /
     /// favorite / more / output / queue filters.
     pub fn player_pointer_up(&mut self, x: f32, y: f32) -> i32 {
-        let Some(layout) = self
+        let Some((layout, presentation)) = self
             .scene
             .as_ref()
             .and_then(|scene| scene.player.as_ref())
-            .map(|player| player.layout)
+            .map(|player| (player.layout, player.presentation))
         else {
             self.player_interaction.cancel();
             return 0;
         };
-        let ui = player::PlayerUiLayout::resolve(layout, self.player_screen);
+        let ui = player::PlayerUiLayout::resolve(layout, self.player_screen, presentation);
         let action = self.player_interaction.release(&ui, x, y);
         match action {
             code if code == PlayerButton::Lyrics as i32 => {

@@ -26,6 +26,7 @@ data class NativePlayerChrome(
     /** Fallback play state when music-foundation is not present. */
     val isPlaying: Boolean = false,
     val liked: Boolean = false,
+    val presentation: NativePlayerPresentation = NativePlayerPresentation.Full,
     /**
      * Initial page only (default: full artwork with no mode chip selected).
      * After the first scene, Rust owns lyrics/queue toggles; subsequent host
@@ -37,6 +38,11 @@ data class NativePlayerChrome(
     val queueFilter: NativeQueueFilter = NativeQueueFilter.UpNext,
     val queueItems: List<NativePlayerQueueItem> = emptyList(),
 )
+
+enum class NativePlayerPresentation(val wireValue: String) {
+    Mini("mini"),
+    Full("full"),
+}
 
 /** Which of the three portrait player pages is currently settled / targeted. */
 enum class NativePlayerScreen(val wireValue: String) {
@@ -80,6 +86,7 @@ enum class NativePlayerAction(val code: Int) {
     QueueShuffle(10),
     QueueRepeatOne(11),
     QueueAlbum(12),
+    Open(13),
     ;
 
     companion object {

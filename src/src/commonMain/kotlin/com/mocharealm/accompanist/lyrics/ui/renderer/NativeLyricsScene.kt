@@ -158,6 +158,7 @@ internal data class LyricsSceneWire(
  * playback UI back into Compose. */
 @Serializable
 internal data class PlayerWire(
+    val presentation: String = "full",
     val screen: String = "artwork",
     val title: String,
     val artist: String,

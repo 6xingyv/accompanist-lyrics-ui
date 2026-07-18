@@ -49,6 +49,7 @@ internal actual fun NativeLyricsViewHost(
     artist: String?,
     onControlsClick: (() -> Unit)?,
     playerChrome: NativePlayerChrome?,
+    playerExpansionProgress: Float,
     onPlayerAction: ((NativePlayerAction) -> Unit)?,
     onQueueReordered: ((Int, Int) -> Unit)?,
 ) {
@@ -155,6 +156,7 @@ internal actual fun NativeLyricsViewHost(
         setContentInsets(contentTopPx, contentBottomPx, contentLeftPx, contentRightPx)
         setMusicFoundationClockEnabled(useMusicFoundationClock)
         setPlaybackState(isPlaying, backgroundReactive)
+        setPlayerExpansionProgress(playerExpansionProgress)
         if (playerChrome != null) {
             // Full portrait player owns chrome geometry; clear the legacy top bar.
             // Screen/duration/playing: Rust keeps page selection after first paint
@@ -168,6 +170,7 @@ internal actual fun NativeLyricsViewHost(
                 durationMs = playerChrome.durationMs,
                 playing = playerChrome.isPlaying,
                 liked = playerChrome.liked,
+                presentation = playerChrome.presentation.wireValue,
                 screen = playerChrome.initialScreen.wireValue,
                 queueTitle = playerChrome.queueTitle,
                 queueSource = playerChrome.queueSource,

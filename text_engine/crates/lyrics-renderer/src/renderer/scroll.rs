@@ -62,6 +62,13 @@ impl LyricsRenderer {
     }
 
     pub fn begin_manual_scroll(&mut self) {
+        let player_scene = self
+            .scene
+            .as_ref()
+            .is_some_and(|scene| scene.player.is_some());
+        if player_scene && !self.player_interaction.begin_scroll() {
+            return;
+        }
         if self.player_screen == PlayerScreenInput::Queue {
             self.begin_queue_scroll();
             return;
@@ -80,7 +87,18 @@ impl LyricsRenderer {
 
     pub fn scroll_manual_by(&mut self, delta_y: f32) {
         if self.player_screen == PlayerScreenInput::Queue {
+            if !self.queue_scroll.dragging {
+                return;
+            }
             self.scroll_queue_by(delta_y);
+            return;
+        }
+        if self
+            .scene
+            .as_ref()
+            .is_some_and(|scene| scene.player.is_some())
+            && !self.manual_scroll.dragging
+        {
             return;
         }
         if !self.lyrics_input_enabled() || !delta_y.is_finite() {
@@ -96,7 +114,18 @@ impl LyricsRenderer {
 
     pub fn end_manual_scroll(&mut self, velocity_y: f32) {
         if self.player_screen == PlayerScreenInput::Queue {
+            if !self.queue_scroll.dragging {
+                return;
+            }
             self.end_queue_scroll(velocity_y);
+            return;
+        }
+        if self
+            .scene
+            .as_ref()
+            .is_some_and(|scene| scene.player.is_some())
+            && !self.manual_scroll.dragging
+        {
             return;
         }
         if !self.lyrics_input_enabled() {

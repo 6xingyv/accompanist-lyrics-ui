@@ -37,6 +37,7 @@ internal expect fun NativeLyricsViewHost(
     artist: String? = null,
     onControlsClick: (() -> Unit)? = null,
     playerChrome: NativePlayerChrome? = null,
+    playerExpansionProgress: Float = 1f,
     onPlayerAction: ((NativePlayerAction) -> Unit)? = null,
     onQueueReordered: ((Int, Int) -> Unit)? = null,
 )

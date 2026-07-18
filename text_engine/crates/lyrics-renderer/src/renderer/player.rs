@@ -19,6 +19,9 @@ const COMPACT_HEADER: f32 = 92.0;
 const PROGRESS_ROW: f32 = 60.0;
 const TRANSPORT_ROW: f32 = 142.0;
 const MODE_NAV_ROW: f32 = 90.0;
+const ARTWORK_METADATA_ROW: f32 = 96.0;
+const QUEUE_FILTER_ROW: f32 = 54.0;
+const QUEUE_METADATA_ROW: f32 = 56.0;
 const BOTTOM_CHROME_IDLE_SECONDS: f32 = 3.0;
 const BOTTOM_CHROME_EXIT_SECONDS: f32 = 0.36;
 const RUNTIME_LABEL_GLYPHS: &str = "0123456789:−";
@@ -52,6 +55,14 @@ pub(crate) enum PlayerScreenInput {
 }
 
 #[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum PlayerPresentationInput {
+    Mini,
+    #[default]
+    Full,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) enum QueueFilterInput {
     #[default]
@@ -72,6 +83,7 @@ pub(crate) struct PlayerQueueItemInput {
 #[derive(Debug, Deserialize, Default)]
 #[serde(default, rename_all = "camelCase")]
 pub(crate) struct PlayerInput {
+    pub presentation: PlayerPresentationInput,
     pub screen: PlayerScreenInput,
     pub title: String,
     pub artist: String,
@@ -119,6 +131,7 @@ impl PreparedRuntimeLabelFont {
 
 #[derive(Debug)]
 pub(super) struct PreparedPlayer {
+    pub presentation: PlayerPresentationInput,
     pub screen: PlayerScreenInput,
     pub duration_ms: i32,
     pub is_playing: bool,
@@ -136,6 +149,112 @@ pub(super) struct PreparedPlayer {
     icons: PlayerIcons,
 }
 
+/// A small CSS-like flex axis used by the native player scene.
+///
+/// Call sites only declare row/column intent. The shared resolver owns free-space
+/// distribution and constrained shrinking, so responsive geometry is not rebuilt
+/// from unrelated `height - row - row` expressions in every drawing path.
+#[derive(Debug, Clone, Copy)]
+struct FlexItem {
+    basis: f32,
+    min: f32,
+    grow: f32,
+    shrink: f32,
+}
+
+impl FlexItem {
+    fn fixed(size: f32) -> Self {
+        let size = size.max(0.0);
+        Self {
+            basis: size,
+            min: size * 0.7,
+            grow: 0.0,
+            shrink: 1.0,
+        }
+    }
+
+    fn grow(weight: f32) -> Self {
+        Self {
+            basis: 0.0,
+            min: 0.0,
+            grow: weight.max(0.0),
+            shrink: 0.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct FlexSpan {
+    start: f32,
+    end: f32,
+}
+
+impl FlexSpan {
+    fn size(self) -> f32 {
+        self.end - self.start
+    }
+
+    fn center(self) -> f32 {
+        (self.start + self.end) * 0.5
+    }
+}
+
+fn resolve_flex_axis<const N: usize>(extent: f32, items: [FlexItem; N]) -> [FlexSpan; N] {
+    let extent = extent.max(0.0);
+    let mut sizes: [f32; N] = std::array::from_fn(|index| items[index].basis);
+    let basis_sum = sizes.iter().sum::<f32>();
+    let free_space = extent - basis_sum;
+
+    if free_space >= 0.0 {
+        let total_grow = items.iter().map(|item| item.grow).sum::<f32>();
+        if total_grow > 0.0 {
+            for (size, item) in sizes.iter_mut().zip(items) {
+                *size += free_space * item.grow / total_grow;
+            }
+        }
+    } else {
+        let mut deficit = -free_space;
+        for _ in 0..N {
+            let total_weight = items
+                .iter()
+                .enumerate()
+                .filter(|(index, item)| sizes[*index] > item.min && item.shrink > 0.0)
+                .map(|(index, item)| item.shrink * sizes[index])
+                .sum::<f32>();
+            if total_weight <= f32::EPSILON || deficit <= f32::EPSILON {
+                break;
+            }
+            let mut consumed = 0.0;
+            for (index, item) in items.iter().enumerate() {
+                if sizes[index] <= item.min || item.shrink <= 0.0 {
+                    continue;
+                }
+                let share = deficit * item.shrink * sizes[index] / total_weight;
+                let reduction = share.min(sizes[index] - item.min);
+                sizes[index] -= reduction;
+                consumed += reduction;
+            }
+            if consumed <= f32::EPSILON {
+                break;
+            }
+            deficit -= consumed;
+        }
+    }
+
+    let mut cursor = 0.0;
+    std::array::from_fn(|index| {
+        let start = cursor;
+        cursor += sizes[index];
+        FlexSpan { start, end: cursor }
+    })
+}
+
+macro_rules! flex_axis {
+    ($extent:expr; $( $name:ident => $item:expr ),+ $(,)?) => {
+        let [$($name),+] = resolve_flex_axis($extent, [$($item),+]);
+    };
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(super) struct PlayerLayout {
     pub scale: f32,
@@ -144,20 +263,39 @@ pub(super) struct PlayerLayout {
     pub header_top: f32,
     pub body_top: f32,
     pub progress_top: f32,
-    pub transport_top: f32,
-    pub nav_top: f32,
     pub artwork_metadata_top: f32,
+    pub queue_metadata_top: f32,
+    pub queue_content_top: f32,
+    action_center_y: f32,
+    artwork_action_center_y: f32,
+    queue_filter_center_y: f32,
+    transport_center_y: f32,
+    nav_center_y: f32,
 }
 
 impl PlayerLayout {
     pub(super) fn resolve(width: f32, height: f32) -> Self {
         let scale = (width / DESIGN_WIDTH).max(0.25);
-        let header_top = (TOP_INSET + HANDLE_ROW) * scale;
-        let body_top = header_top + COMPACT_HEADER * scale;
-        let nav_top = (height - MODE_NAV_ROW * scale).max(body_top);
-        let transport_top = (nav_top - TRANSPORT_ROW * scale).max(body_top);
-        let progress_top = (transport_top - PROGRESS_ROW * scale).max(body_top);
-        let artwork_metadata_top = (progress_top - 96.0 * scale).max(header_top);
+        flex_axis!(height;
+            top => FlexItem::fixed((TOP_INSET + HANDLE_ROW) * scale),
+            header => FlexItem::fixed(COMPACT_HEADER * scale),
+            body => FlexItem::grow(1.0),
+            _progress => FlexItem::fixed(PROGRESS_ROW * scale),
+            transport => FlexItem::fixed(TRANSPORT_ROW * scale),
+            nav => FlexItem::fixed(MODE_NAV_ROW * scale),
+        );
+        flex_axis!(body.end - top.end;
+            artwork => FlexItem::grow(1.0),
+            artwork_metadata => FlexItem::fixed(ARTWORK_METADATA_ROW * scale),
+        );
+        flex_axis!(body.size();
+            queue_filter => FlexItem::fixed(QUEUE_FILTER_ROW * scale),
+            queue_metadata => FlexItem::fixed(QUEUE_METADATA_ROW * scale),
+            _queue_list => FlexItem::grow(1.0),
+        );
+        let header_top = top.end;
+        let body_top = header.end;
+        let progress_top = body.end;
         Self {
             scale,
             width,
@@ -165,9 +303,14 @@ impl PlayerLayout {
             header_top,
             body_top,
             progress_top,
-            transport_top,
-            nav_top,
-            artwork_metadata_top,
+            artwork_metadata_top: header_top + artwork.end,
+            queue_metadata_top: body_top + queue_metadata.start,
+            queue_content_top: body_top + queue_metadata.end,
+            action_center_y: header.center(),
+            artwork_action_center_y: header_top + artwork_metadata.center(),
+            queue_filter_center_y: body_top + queue_filter.center(),
+            transport_center_y: transport.center(),
+            nav_center_y: nav.center(),
         }
     }
 
@@ -204,6 +347,49 @@ impl PlayerLayout {
             size,
             size,
         )
+    }
+
+    fn collapsed_artwork_rect(self) -> Rect {
+        MiniPlayerLayout::resolve(self).artwork
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MiniPlayerLayout {
+    artwork: Rect,
+    text: Rect,
+    play_center: Point,
+    next_center: Point,
+}
+
+impl MiniPlayerLayout {
+    fn resolve(layout: PlayerLayout) -> Self {
+        let s = layout.scale;
+        flex_axis!(layout.width;
+            _leading => FlexItem::fixed(8.0 * s),
+            artwork => FlexItem::fixed(44.0 * s),
+            artwork_gap => FlexItem::fixed(8.0 * s),
+            _metadata => FlexItem::grow(1.0),
+            control_gap => FlexItem::fixed(4.0 * s),
+            play => FlexItem::fixed(44.0 * s),
+            _play_gap => FlexItem::fixed(4.0 * s),
+            next => FlexItem::fixed(44.0 * s),
+            _trailing => FlexItem::fixed(14.0 * s),
+        );
+        let center_y = layout.height * 0.5;
+        let artwork_size = artwork.size().min((layout.height - 16.0 * s).max(1.0));
+        let artwork_left = artwork.start + (artwork.size() - artwork_size) * 0.5;
+        Self {
+            artwork: Rect::from_xywh(
+                artwork_left,
+                center_y - artwork_size * 0.5,
+                artwork_size,
+                artwork_size,
+            ),
+            text: Rect::new(artwork_gap.end, 0.0, control_gap.start, layout.height),
+            play_center: Point::new(play.center(), center_y),
+            next_center: Point::new(next.center(), center_y),
+        }
     }
 }
 
@@ -345,6 +531,7 @@ pub(super) enum PlayerButton {
     QueueShuffle = 10,
     QueueRepeatOne = 11,
     QueueAlbum = 12,
+    Open = 13,
 }
 
 impl PlayerButton {
@@ -363,6 +550,7 @@ impl PlayerButton {
 
 #[derive(Debug, Clone, Copy)]
 enum PlayerControlVisual {
+    Open,
     Action {
         diameter: f32,
         icon_size: f32,
@@ -392,6 +580,15 @@ struct PlayerControl {
 }
 
 impl PlayerControl {
+    fn open(hit_rect: Rect) -> Self {
+        Self {
+            button: PlayerButton::Open,
+            center: Point::new(hit_rect.center_x(), hit_rect.center_y()),
+            hit_rect,
+            visual: PlayerControlVisual::Open,
+        }
+    }
+
     fn action_geometry(self) -> (f32, f32) {
         match self.visual {
             PlayerControlVisual::Action {
@@ -437,73 +634,116 @@ pub(super) struct PlayerUiLayout {
     layout: PlayerLayout,
     screen: PlayerScreenInput,
     controls: Vec<PlayerControl>,
+    mini: Option<MiniPlayerLayout>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlayerHit {
+    Control(PlayerButton),
+    Scroll,
+}
+
+macro_rules! push_player_controls {
+    ($controls:ident, $s:expr, $y:expr, action; $( $button:ident, $x:expr, $icon:expr );+ $(;)?) => {
+        $(
+            $controls.push(PlayerControl {
+                button: PlayerButton::$button,
+                hit_rect: Rect::from_xywh(($x - 24.0) * $s, $y - 24.0 * $s, 48.0 * $s, 48.0 * $s),
+                center: Point::new($x * $s, $y),
+                visual: PlayerControlVisual::Action {
+                    diameter: 32.0 * $s,
+                    icon_size: $icon * $s,
+                },
+            });
+        )+
+    };
+    ($controls:ident, $s:expr, $y:expr, transport; $( $button:ident, $x:expr, $width:expr, $height:expr );+ $(;)?) => {
+        $(
+            $controls.push(PlayerControl {
+                button: PlayerButton::$button,
+                hit_rect: Rect::from_xywh(($x - 32.0) * $s, $y - 36.0 * $s, 64.0 * $s, 72.0 * $s),
+                center: Point::new($x * $s, $y),
+                visual: PlayerControlVisual::Transport {
+                    width: $width * $s,
+                    height: $height * $s,
+                },
+            });
+        )+
+    };
+    ($controls:ident, $s:expr, $y:expr, mode; $( $button:ident, $x:expr, $width:expr, $height:expr );+ $(;)?) => {
+        $(
+            $controls.push(PlayerControl {
+                button: PlayerButton::$button,
+                hit_rect: Rect::from_xywh(($x - 32.0) * $s, $y - 32.0 * $s, 64.0 * $s, 56.0 * $s),
+                center: Point::new($x * $s, $y),
+                visual: PlayerControlVisual::Mode {
+                    diameter: 32.0 * $s,
+                    width: $width * $s,
+                    height: $height * $s,
+                },
+            });
+        )+
+    };
 }
 
 impl PlayerUiLayout {
-    pub(super) fn resolve(layout: PlayerLayout, screen: PlayerScreenInput) -> Self {
+    pub(super) fn resolve(
+        layout: PlayerLayout,
+        screen: PlayerScreenInput,
+        presentation: PlayerPresentationInput,
+    ) -> Self {
         let s = layout.scale;
+        if presentation == PlayerPresentationInput::Mini {
+            let mini = MiniPlayerLayout::resolve(layout);
+            let mut controls = vec![PlayerControl::open(Rect::from_xywh(
+                0.0,
+                0.0,
+                layout.width,
+                layout.height,
+            ))];
+            for (button, center) in [
+                (PlayerButton::PlayPause, mini.play_center),
+                (PlayerButton::Next, mini.next_center),
+            ] {
+                controls.push(PlayerControl {
+                    button,
+                    hit_rect: Rect::from_xywh(center.x - 22.0 * s, 0.0, 44.0 * s, layout.height),
+                    center,
+                    visual: PlayerControlVisual::Transport {
+                        width: 32.0 * s,
+                        height: 32.0 * s,
+                    },
+                });
+            }
+            return Self {
+                layout,
+                screen,
+                controls,
+                mini: Some(mini),
+            };
+        }
         let action_y = if screen == PlayerScreenInput::Artwork {
-            layout.artwork_metadata_top + 48.0 * s
+            layout.artwork_action_center_y
         } else {
-            126.0 * s
+            layout.action_center_y
         };
-        let transport_y = layout.transport_top + 71.0 * s;
-        let nav_y = layout.nav_top + 45.0 * s;
+        let transport_y = layout.transport_center_y;
+        let nav_y = layout.nav_center_y;
         let mut controls = Vec::with_capacity(12);
-        let mut push = |button, hit_rect, center, visual| {
-            controls.push(PlayerControl {
-                button,
-                hit_rect,
-                center,
-                visual,
-            });
-        };
-
-        for (button, x, icon_size) in [
-            (PlayerButton::Favorite, 301.0, 20.0),
-            (PlayerButton::More, 345.0, 20.0),
-        ] {
-            push(
-                button,
-                Rect::from_xywh((x - 24.0) * s, action_y - 24.0 * s, 48.0 * s, 48.0 * s),
-                Point::new(x * s, action_y),
-                PlayerControlVisual::Action {
-                    diameter: 32.0 * s,
-                    icon_size: icon_size * s,
-                },
-            );
-        }
-        for (button, x, width, height) in [
-            (PlayerButton::Previous, 101.5, 42.0, 35.0),
-            (PlayerButton::PlayPause, 196.5, 42.0, 42.0),
-            (PlayerButton::Next, 291.5, 42.0, 35.0),
-        ] {
-            push(
-                button,
-                Rect::from_xywh((x - 32.0) * s, transport_y - 36.0 * s, 64.0 * s, 72.0 * s),
-                Point::new(x * s, transport_y),
-                PlayerControlVisual::Transport {
-                    width: width * s,
-                    height: height * s,
-                },
-            );
-        }
-        for (button, x, width, height) in [
-            (PlayerButton::Lyrics, 80.0, 18.0, 18.0),
-            (PlayerButton::Output, 196.5, 18.0, 18.0),
-            (PlayerButton::Queue, 313.0, 18.0, 15.0),
-        ] {
-            push(
-                button,
-                Rect::from_xywh((x - 32.0) * s, nav_y - 32.0 * s, 64.0 * s, 56.0 * s),
-                Point::new(x * s, nav_y),
-                PlayerControlVisual::Mode {
-                    diameter: 32.0 * s,
-                    width: width * s,
-                    height: height * s,
-                },
-            );
-        }
+        push_player_controls!(controls, s, action_y, action;
+            Favorite, 301.0, 20.0;
+            More, 345.0, 20.0;
+        );
+        push_player_controls!(controls, s, transport_y, transport;
+            Previous, 101.5, 42.0, 35.0;
+            PlayPause, 196.5, 42.0, 42.0;
+            Next, 291.5, 42.0, 35.0;
+        );
+        push_player_controls!(controls, s, nav_y, mode;
+            Lyrics, 80.0, 18.0, 18.0;
+            Output, 196.5, 18.0, 18.0;
+            Queue, 313.0, 18.0, 15.0;
+        );
         if screen == PlayerScreenInput::Queue {
             for (button, x, width, height) in [
                 (PlayerButton::QueueUpNext, 68.0, 18.0, 14.0),
@@ -511,23 +751,29 @@ impl PlayerUiLayout {
                 (PlayerButton::QueueRepeatOne, 238.0, 18.0, 15.0),
                 (PlayerButton::QueueAlbum, 323.0, 18.0, 15.0),
             ] {
-                let pill = Rect::from_xywh((x - 36.0) * s, 180.0 * s, 72.0 * s, 38.0 * s);
-                push(
+                let pill = Rect::from_xywh(
+                    (x - 36.0) * s,
+                    layout.queue_filter_center_y - 19.0 * s,
+                    72.0 * s,
+                    38.0 * s,
+                );
+                controls.push(PlayerControl {
                     button,
-                    pill,
-                    Point::new(x * s, 199.0 * s),
-                    PlayerControlVisual::Filter {
+                    hit_rect: pill,
+                    center: Point::new(x * s, layout.queue_filter_center_y),
+                    visual: PlayerControlVisual::Filter {
                         pill,
                         width: width * s,
                         height: height * s,
                     },
-                );
+                });
             }
         }
         Self {
             layout,
             screen,
             controls,
+            mini: None,
         }
     }
 
@@ -539,8 +785,9 @@ impl PlayerUiLayout {
             .expect("visible player control must exist in resolved UI")
     }
 
-    fn hit_test(&self, point: Point, bottom_chrome: BottomChromeSample) -> Option<PlayerButton> {
-        self.controls
+    fn hit_test(&self, point: Point, bottom_chrome: BottomChromeSample) -> Option<PlayerHit> {
+        if let Some(button) = self
+            .controls
             .iter()
             .rev()
             .find(|control| {
@@ -560,6 +807,23 @@ impl PlayerUiLayout {
                 rect.contains(point)
             })
             .map(|control| control.button)
+        {
+            return Some(PlayerHit::Control(button));
+        }
+
+        let scroll_top = match self.screen {
+            PlayerScreenInput::Lyrics => self.layout.body_top,
+            PlayerScreenInput::Queue => self.layout.queue_content_top,
+            PlayerScreenInput::Artwork => return None,
+        };
+        Rect::new(
+            0.0,
+            scroll_top,
+            self.layout.width,
+            bottom_chrome.content_end(self.layout),
+        )
+        .contains(point)
+        .then_some(PlayerHit::Scroll)
     }
 }
 
@@ -593,12 +857,6 @@ enum DrawCommand<'a> {
         blend: DrawBlend,
     },
     Airplay {
-        center: Point,
-        size: f32,
-        color: Color4f,
-        blend: DrawBlend,
-    },
-    Play {
         center: Point,
         size: f32,
         color: Color4f,
@@ -647,8 +905,13 @@ impl DrawCommand<'_> {
                     blend,
                 );
                 canvas.save();
-                canvas.translate((center.x - draw_w * 0.5, center.y - draw_h * 0.5));
-                canvas.scale((scale, scale));
+                let origin_x = if icon.mirror_x {
+                    center.x + draw_w * 0.5
+                } else {
+                    center.x - draw_w * 0.5
+                };
+                canvas.translate((origin_x, center.y - draw_h * 0.5));
+                canvas.scale((if icon.mirror_x { -scale } else { scale }, scale));
                 canvas.draw_path(&icon.path, &paint);
                 canvas.restore();
             }
@@ -659,19 +922,6 @@ impl DrawCommand<'_> {
                 blend,
             } => {
                 draw_airplay_command(canvas, center, size, color, blend);
-            }
-            Self::Play {
-                center,
-                size,
-                color,
-                blend,
-            } => {
-                let mut builder = PathBuilder::new();
-                builder.move_to((center.x - size * 0.28, center.y - size * 0.43));
-                builder.line_to((center.x + size * 0.43, center.y));
-                builder.line_to((center.x - size * 0.28, center.y + size * 0.43));
-                builder.close();
-                canvas.draw_path(&builder.detach(), &command_paint(color, blend));
             }
         }
     }
@@ -691,6 +941,7 @@ fn command_paint(color: Color4f, blend: DrawBlend) -> Paint {
 
 #[derive(Debug)]
 pub(super) struct PlayerInteractionState {
+    pointer_hit: Option<PlayerHit>,
     pressed: Option<PlayerButton>,
     pressed_at: Option<Instant>,
     released: Option<(PlayerButton, Instant, f32)>,
@@ -700,6 +951,7 @@ pub(super) struct PlayerInteractionState {
 impl Default for PlayerInteractionState {
     fn default() -> Self {
         Self {
+            pointer_hit: None,
             pressed: None,
             pressed_at: None,
             released: None,
@@ -718,7 +970,7 @@ pub(super) struct BottomChromeSample {
 pub(super) struct QueueScrollState {
     offset: f32,
     velocity: f32,
-    dragging: bool,
+    pub(super) dragging: bool,
     last_frame_at: Option<Instant>,
 }
 
@@ -808,20 +1060,27 @@ impl PlayerInteractionState {
         let bottom_chrome = self.bottom_chrome_sample(ui.screen, now);
         self.last_activity_at = now;
         let hit = ui.hit_test(Point::new(x, y), bottom_chrome);
-        self.pressed = hit;
-        self.pressed_at = hit.map(|_| now);
+        self.pointer_hit = hit;
+        self.pressed = match hit {
+            Some(PlayerHit::Control(button)) => Some(button),
+            _ => None,
+        };
+        self.pressed_at = self.pressed.map(|_| now);
         self.released = None;
-        hit.map_or(0, |button| button as i32)
+        self.pressed.map_or(0, |button| button as i32)
     }
 
     pub(super) fn release(&mut self, ui: &PlayerUiLayout, x: f32, y: f32) -> i32 {
         let Some(button) = self.pressed else {
+            self.pointer_hit = None;
             return 0;
         };
         let bottom_chrome = self.bottom_chrome_sample(ui.screen, Instant::now());
-        let accepted = ui.hit_test(Point::new(x, y), bottom_chrome) == Some(button);
+        let accepted =
+            ui.hit_test(Point::new(x, y), bottom_chrome) == Some(PlayerHit::Control(button));
         let scale = self.animation_for(button, Instant::now()).scale;
         self.pressed = None;
+        self.pointer_hit = None;
         self.pressed_at = None;
         self.released = Some((button, Instant::now(), scale));
         if accepted {
@@ -837,7 +1096,21 @@ impl PlayerInteractionState {
             self.pressed = None;
             self.released = Some((button, Instant::now(), scale));
         }
+        self.pointer_hit = None;
         self.pressed_at = None;
+    }
+
+    pub(super) fn begin_scroll(&mut self) -> bool {
+        let accepted = self.pointer_hit == Some(PlayerHit::Scroll);
+        if accepted {
+            self.pressed = None;
+            self.pressed_at = None;
+            self.released = None;
+            self.pointer_hit = None;
+        } else {
+            self.cancel();
+        }
+        accepted
     }
 
     fn animation_for(&mut self, button: PlayerButton, now: Instant) -> ControlAnimation {
@@ -887,7 +1160,7 @@ impl LyricsRenderer {
         let Some(player) = self.scene.as_ref().and_then(|scene| scene.player.as_ref()) else {
             return 0.0;
         };
-        let list_top = 282.0 * player.layout.scale;
+        let list_top = player.layout.queue_content_top;
         let content_height = player.queue_items.len() as f32 * 56.0 * player.layout.scale;
         (list_top + content_height - bottom_chrome.content_end(player.layout)).max(0.0)
     }
@@ -992,7 +1265,7 @@ impl LyricsRenderer {
             return -1;
         };
         let scale = player.layout.scale;
-        let list_top = 282.0 * scale;
+        let list_top = player.layout.queue_content_top;
         let list_bottom = self
             .player_interaction
             .bottom_chrome_sample(self.player_screen, Instant::now())
@@ -1028,7 +1301,7 @@ impl LyricsRenderer {
         };
         let scale = player.layout.scale;
         let row_height = 56.0 * scale;
-        let list_top = 282.0 * scale;
+        let list_top = player.layout.queue_content_top;
         let list_bottom = self
             .player_interaction
             .bottom_chrome_sample(self.player_screen, Instant::now())
@@ -1079,6 +1352,7 @@ struct PlayerIcons {
     star: SvgIcon,
     ellipsis: SvgIcon,
     previous: SvgIcon,
+    play: SvgIcon,
     pause: SvgIcon,
     next: SvgIcon,
     lyrics: SvgIcon,
@@ -1093,6 +1367,7 @@ struct SvgIcon {
     path: Path,
     view_width: f32,
     view_height: f32,
+    mirror_x: bool,
 }
 
 impl SvgIcon {
@@ -1103,7 +1378,13 @@ impl SvgIcon {
             path: Path::from_svg(data).unwrap_or_default(),
             view_width,
             view_height,
+            mirror_x: false,
         }
+    }
+
+    fn mirrored(mut self) -> Self {
+        self.mirror_x = true;
+        self
     }
 }
 
@@ -1112,9 +1393,10 @@ impl PlayerIcons {
         Self {
             star: SvgIcon::new(STAR_PATH, 2316.92, 2209.92),
             ellipsis: SvgIcon::new(ELLIPSIS_PATH, 1947.92, 460.92),
-            previous: SvgIcon::new(PREVIOUS_PATH, 1931.92, 1609.92),
-            pause: SvgIcon::new(PAUSE_PATH, 1301.92, 1735.92),
-            next: SvgIcon::new(NEXT_PATH, 1931.92, 1609.92),
+            previous: SvgIcon::new(COMPOSE_FORWARD_PATH, 32.0, 32.0).mirrored(),
+            play: SvgIcon::new(COMPOSE_PLAY_PATH, 32.0, 32.0),
+            pause: SvgIcon::new(COMPOSE_PAUSE_PATH, 32.0, 32.0),
+            next: SvgIcon::new(COMPOSE_FORWARD_PATH, 32.0, 32.0),
             lyrics: SvgIcon::new(LYRICS_PATH, 2285.92, 2156.92),
             list: SvgIcon::new(LIST_PATH, 2096.92, 1542.92),
             shuffle: SvgIcon::new(SHUFFLE_PATH, 2379.92, 1893.92),
@@ -1263,6 +1545,7 @@ impl LyricsRenderer {
         };
         self.text_attrs = saved;
         Some(PreparedPlayer {
+            presentation: input.presentation,
             screen: input.screen,
             duration_ms: input.duration_ms.max(0),
             is_playing: input.is_playing,
@@ -1320,21 +1603,36 @@ pub(super) fn draw_player(
     queue_scroll_y: f32,
     queue_reorder: QueueReorderSample,
     current_time_ms: i32,
+    expansion_progress: f32,
 ) -> bool {
     let layout = player.layout;
     let scale = layout.scale;
     let now = Instant::now();
     let mut animating = false;
-    let lyrics_ui = PlayerUiLayout::resolve(layout, PlayerScreenInput::Lyrics);
-    let artwork_ui = PlayerUiLayout::resolve(layout, PlayerScreenInput::Artwork);
-    let queue_ui = PlayerUiLayout::resolve(layout, PlayerScreenInput::Queue);
-    let active_ui = PlayerUiLayout::resolve(layout, transition.to);
+    let lyrics_ui = PlayerUiLayout::resolve(layout, PlayerScreenInput::Lyrics, player.presentation);
+    let artwork_ui =
+        PlayerUiLayout::resolve(layout, PlayerScreenInput::Artwork, player.presentation);
+    let queue_ui = PlayerUiLayout::resolve(layout, PlayerScreenInput::Queue, player.presentation);
+    let active_ui = PlayerUiLayout::resolve(layout, transition.to, player.presentation);
+    if player.presentation == PlayerPresentationInput::Mini {
+        return draw_mini_player(
+            canvas,
+            typefaces,
+            thumbnail,
+            player,
+            &active_ui,
+            interaction,
+            now,
+            current_time_ms,
+        );
+    }
+    let expansion = smooth_step(expansion_progress.clamp(0.0, 1.0));
 
     // Drag handle — soft white pill (Plus).
     DrawCommand::RoundRect {
         rect: Rect::from_xywh(166.5 * scale, 59.5 * scale, 60.0 * scale, 5.0 * scale),
         radius: 2.5 * scale,
-        color: WHITE_HANDLE,
+        color: multiplied_alpha(WHITE_HANDLE, expansion),
         blend: DrawBlend::Plus,
     }
     .draw(canvas);
@@ -1351,7 +1649,7 @@ pub(super) fn draw_player(
         draw_content_layer(
             canvas,
             page_bounds,
-            lyrics_alpha,
+            lyrics_alpha * expansion,
             lyrics_scale,
             |canvas, alpha| {
                 draw_compact_header(
@@ -1373,7 +1671,7 @@ pub(super) fn draw_player(
         draw_content_layer(
             canvas,
             page_bounds,
-            artwork_alpha,
+            artwork_alpha * expansion,
             artwork_scale,
             |canvas, alpha| {
                 draw_artwork_metadata(
@@ -1395,7 +1693,7 @@ pub(super) fn draw_player(
         draw_content_layer(
             canvas,
             page_bounds,
-            queue_alpha,
+            queue_alpha * expansion,
             queue_scale,
             |canvas, alpha| {
                 if !shares_compact_header {
@@ -1438,7 +1736,7 @@ pub(super) fn draw_player(
             interaction,
             now,
             current_time_ms,
-            1.0,
+            expansion,
             &mut animating,
         );
     }
@@ -1447,12 +1745,14 @@ pub(super) fn draw_player(
     // compact and full cover copies are never cross-faded over one another.
     // Normal blend (not Plus) so the cover keeps true colour.
     let artwork_progress = transition.artwork_progress();
-    let shared_art = lerp_rect(
+    let expanded_art = lerp_rect(
         layout.compact_artwork_rect(),
         layout.full_artwork_rect(),
         artwork_progress,
     );
-    let radius = lerp(12.0 * scale, 18.0 * scale, artwork_progress);
+    let shared_art = lerp_rect(layout.collapsed_artwork_rect(), expanded_art, expansion);
+    let expanded_radius = lerp(12.0 * scale, 18.0 * scale, artwork_progress);
+    let radius = lerp(6.0 * scale, expanded_radius, expansion);
     draw_artwork(canvas, thumbnail, shared_art, radius, 1.0);
 
     if bottom_chrome.visibility > 0.001 {
@@ -1463,7 +1763,7 @@ pub(super) fn draw_player(
             typefaces,
             player,
             current_time_ms,
-            bottom_chrome.visibility,
+            bottom_chrome.visibility * expansion,
         );
         draw_transport(
             canvas,
@@ -1471,7 +1771,7 @@ pub(super) fn draw_player(
             &active_ui,
             interaction,
             now,
-            bottom_chrome.visibility,
+            bottom_chrome.visibility * expansion,
             &mut animating,
         );
         draw_mode_navigation(
@@ -1481,12 +1781,92 @@ pub(super) fn draw_player(
             interaction,
             transition.to,
             now,
-            bottom_chrome.visibility,
+            bottom_chrome.visibility * expansion,
             &mut animating,
         );
         canvas.restore();
     }
     animating || transition.active || bottom_chrome.active
+}
+
+fn draw_mini_player(
+    canvas: &skia_safe::Canvas,
+    typefaces: &HashMap<fontdb::ID, Typeface>,
+    thumbnail: Option<&Image>,
+    player: &PreparedPlayer,
+    ui: &PlayerUiLayout,
+    interaction: &mut PlayerInteractionState,
+    now: Instant,
+    current_time_ms: i32,
+) -> bool {
+    let layout = player.layout;
+    let s = layout.scale;
+    let mini = ui
+        .mini
+        .expect("mini presentation must resolve mini flex geometry");
+    DrawCommand::RoundRect {
+        rect: Rect::from_xywh(0.0, 0.0, layout.width, layout.height),
+        radius: 16.0 * s,
+        color: Color4f::new(0.08, 0.08, 0.08, 0.82),
+        blend: DrawBlend::SourceOver,
+    }
+    .draw(canvas);
+    draw_artwork(canvas, thumbnail, mini.artwork, 6.0 * s, 1.0);
+
+    let text_left = mini.text.left;
+    let text_width = mini.text.width().max(1.0);
+    let mut animating = false;
+    animating |= draw_plus_marquee_text(
+        canvas,
+        typefaces,
+        &player.title,
+        text_left,
+        7.0 * s,
+        text_width,
+        0.0,
+        8.0 * s,
+        TEXT_PRIMARY_ALPHA,
+        current_time_ms,
+    );
+    animating |= draw_plus_marquee_text(
+        canvas,
+        typefaces,
+        &player.artist,
+        text_left,
+        31.0 * s,
+        text_width,
+        0.0,
+        8.0 * s,
+        TEXT_SECONDARY_ALPHA,
+        current_time_ms,
+    );
+
+    for (button, icon) in [
+        (
+            PlayerButton::PlayPause,
+            if player.is_playing {
+                &player.icons.pause
+            } else {
+                &player.icons.play
+            },
+        ),
+        (PlayerButton::Next, &player.icons.next),
+    ] {
+        let control = ui.control(button);
+        let (width, height) = control.transport_size();
+        let animation = interaction.animation_for(button, now);
+        animating |= animation.active;
+        draw_icon(
+            canvas,
+            icon,
+            control.center,
+            width * animation.scale,
+            height * animation.scale,
+            WHITE,
+            1.0,
+        );
+    }
+    animating
 }
 
 /// Draw prepared text through a Plus layer so white metadata matches Compose.
@@ -1749,7 +2129,7 @@ fn draw_queue_body(
         typefaces,
         &player.queue_title,
         32.0 * scale,
-        234.0 * scale,
+        layout.queue_metadata_top + 8.0 * scale,
         TEXT_PRIMARY_ALPHA * page_alpha,
     );
     draw_plus_text(
@@ -1757,11 +2137,11 @@ fn draw_queue_body(
         typefaces,
         &player.queue_source,
         32.0 * scale,
-        260.0 * scale,
+        layout.queue_metadata_top + 34.0 * scale,
         TEXT_SECONDARY_ALPHA * page_alpha,
     );
 
-    let list_top = 282.0 * scale;
+    let list_top = layout.queue_content_top;
     let list_bottom = bottom_chrome.content_end(layout);
     canvas.save();
     canvas.clip_rect(
@@ -1779,7 +2159,7 @@ fn draw_queue_body(
     for visual_index in 0..player.queue_items.len() {
         let item_index = reordered_item_index(visual_index, queue_reorder);
         let item = &player.queue_items[item_index];
-        let mut top = (282.0 + visual_index as f32 * 56.0) * scale;
+        let mut top = list_top + visual_index as f32 * 56.0 * scale;
         if queue_reorder.active && item_index == queue_reorder.from {
             top = queue_reorder.pointer_y + queue_scroll_y - 28.0 * scale;
         }
@@ -1972,10 +2352,13 @@ fn draw_transport(
             chrome_alpha,
         );
     } else {
-        draw_play_icon(
+        draw_icon(
             canvas,
+            &player.icons.play,
             play.center,
             play_width * play_animation.scale,
+            play_height * play_animation.scale,
+            WHITE,
             chrome_alpha,
         );
     }
@@ -2343,16 +2726,6 @@ fn draw_airplay_command(
     canvas.draw_path(&triangle.detach(), &paint);
 }
 
-fn draw_play_icon(canvas: &skia_safe::Canvas, center: Point, size: f32, alpha: f32) {
-    DrawCommand::Play {
-        center,
-        size,
-        color: multiplied_alpha(WHITE, alpha),
-        blend: DrawBlend::Plus,
-    }
-    .draw(canvas);
-}
-
 fn draw_runtime_label(
     canvas: &skia_safe::Canvas,
     typefaces: &HashMap<fontdb::ID, Typeface>,
@@ -2408,7 +2781,18 @@ fn ease_out_back(value: f32) -> f32 {
     1.0 + c3 * (value - 1.0).powi(3) + c1 * (value - 1.0).powi(2)
 }
 
+// Exact vectors used by Clef's Compose mini player. Full and mini transports
+// intentionally share these paths so the icon cannot change during expansion.
+const COMPOSE_PLAY_PATH: &str = "M7.988 23.977V7.711C7.988 7.125 8.133 6.695 8.422 6.422C8.711 6.141 9.055 6 9.453 6C9.805 6 10.164 6.102 10.531 6.305L24.184 14.285C24.668 14.566 25.004 14.82 25.191 15.047C25.387 15.266 25.484 15.531 25.484 15.844C25.484 16.148 25.387 16.414 25.191 16.641C25.004 16.867 24.668 17.121 24.184 17.402L10.531 25.383C10.164 25.586 9.805 25.688 9.453 25.688C9.055 25.688 8.711 25.547 8.422 25.266C8.133 24.984 7.988 24.555 7.988 23.977Z";
+const COMPOSE_PAUSE_PATH: &str = "M10.559 25.383C10.043 25.383 9.652 25.25 9.387 24.984C9.129 24.719 9 24.328 9 23.813V7.559C9 7.043 9.129 6.656 9.387 6.398C9.652 6.133 10.043 6 10.559 6H13.231C13.738 6 14.125 6.125 14.391 6.375C14.656 6.625 14.789 7.02 14.789 7.559V23.813C14.789 24.328 14.656 24.719 14.391 24.984C14.125 25.25 13.738 25.383 13.231 25.383H10.559ZM19.078 25.383C18.563 25.383 18.172 25.25 17.906 24.984C17.641 24.719 17.508 24.328 17.508 23.813V7.559C17.508 7.043 17.641 6.656 17.906 6.398C18.172 6.133 18.563 6 19.078 6H21.738C22.254 6 22.641 6.125 22.898 6.375C23.164 6.625 23.297 7.02 23.297 7.559V23.813C23.297 24.328 23.164 24.719 22.898 24.984C22.641 25.25 22.254 25.383 21.738 25.383H19.078Z";
+const COMPOSE_FORWARD_PATH: &str = "M0 23.277V8.617C0 8.07 0.137 7.664 0.41 7.398C0.691 7.133 1.02 7 1.395 7C1.738 7 2.078 7.098 2.414 7.293L14.731 14.465C15.168 14.723 15.481 14.961 15.668 15.18C15.856 15.398 15.949 15.656 15.949 15.953C15.949 16.25 15.856 16.508 15.668 16.727C15.481 16.945 15.168 17.184 14.731 17.441L2.414 24.613C2.078 24.809 1.738 24.906 1.395 24.906C1.02 24.906 0.691 24.773 0.41 24.508C0.137 24.242 0 23.832 0 23.277ZM15.891 23.277V8.617C15.891 8.07 16.027 7.664 16.301 7.398C16.574 7.133 16.902 7 17.285 7C17.629 7 17.969 7.098 18.305 7.293L30.609 14.465C31.055 14.723 31.371 14.961 31.559 15.18C31.746 15.398 31.84 15.656 31.84 15.953C31.84 16.25 31.746 16.508 31.559 16.727C31.371 16.945 31.055 17.184 30.609 17.441L18.305 24.613C17.969 24.809 17.629 24.906 17.285 24.906C16.902 24.906 16.574 24.773 16.301 24.508C16.027 24.242 15.891 23.832 15.891 23.277Z";
+
 // Paths extracted from E:/interest/sf-pro-extracor/SF-Pro.ttf via sf_map.json.
+// Retained while older design snapshots still reference their extracted names.
+#[allow(dead_code)]
+fn legacy_transport_paths() -> [&'static str; 3] {
+    [PREVIOUS_PATH, PAUSE_PATH, NEXT_PATH]
+}
 const STAR_PATH: &str = "M473.960 2144.960Q442.960 2121.960 436.460 2082.960Q429.960 2043.960 448.960 1989.960L657.960 1367.960L123.960 983.960Q76.960 950.960 58.960 915.960Q40.960 880.960 52.960 843.960Q64.960 807.960 99.960 789.960Q134.960 771.960 192.960 772.960L847.960 776.960L1046.960 151.960Q1064.960 96.960 1092.460 68.960Q1119.960 40.960 1157.960 40.960Q1196.960 40.960 1224.460 68.960Q1251.960 96.960 1269.960 151.960L1468.960 776.960L2123.960 772.960Q2181.960 771.960 2216.960 789.960Q2251.960 807.960 2263.960 843.960Q2275.960 880.960 2257.960 915.960Q2239.960 950.960 2192.960 983.960L1658.960 1367.960L1867.960 1989.960Q1886.960 2043.960 1880.460 2082.960Q1873.960 2121.960 1842.960 2144.960Q1811.960 2168.960 1772.960 2161.460Q1733.960 2153.960 1687.960 2120.960L1157.960 1731.960L628.960 2120.960Q582.960 2153.960 543.960 2161.460Q504.960 2168.960 473.960 2144.960ZM617.960 1946.960Q619.960 1949.960 626.960 1944.960L1107.960 1577.960Q1131.960 1558.960 1158.460 1558.960Q1184.960 1558.960 1208.960 1577.960L1689.960 1944.960Q1696.960 1949.960 1698.960 1946.960Q1699.960 1944.960 1698.960 1937.960L1499.960 1365.960Q1492.960 1346.960 1493.460 1329.960Q1493.960 1312.960 1502.960 1298.460Q1511.960 1283.960 1528.960 1271.960L2026.960 927.960Q2033.960 923.960 2031.960 919.960Q2030.960 916.960 2022.960 916.960L1417.960 927.960Q1386.960 928.960 1366.960 915.460Q1346.960 901.960 1337.960 870.960L1163.960 291.960Q1161.960 283.960 1157.960 283.960Q1154.960 283.960 1152.960 291.960L978.960 870.960Q969.960 901.960 949.960 915.460Q929.960 928.960 898.960 927.960L293.960 916.960Q285.960 916.960 284.960 919.960Q282.960 923.960 289.960 927.960L787.960 1271.960Q804.960 1283.960 813.960 1298.460Q822.960 1312.960 823.460 1329.960Q823.960 1346.960 816.960 1365.960L617.960 1937.960Q615.960 1944.960 617.960 1946.960Z";
 const ELLIPSIS_PATH: &str = "M230.960 419.960Q177.960 419.960 134.960 394.460Q91.960 368.960 66.460 325.960Q40.960 282.960 40.960 230.960Q40.960 177.960 66.460 134.960Q91.960 91.960 134.960 66.460Q177.960 40.960 230.960 40.960Q282.960 40.960 325.960 66.460Q368.960 91.960 394.460 134.960Q419.960 177.960 419.960 230.960Q419.960 282.960 394.460 325.960Q368.960 368.960 325.960 394.460Q282.960 419.960 230.960 419.960ZM973.960 419.960Q920.960 419.960 877.960 394.460Q834.960 368.960 809.460 325.960Q783.960 282.960 783.960 230.960Q783.960 177.960 809.460 134.960Q834.960 91.960 877.960 66.460Q920.960 40.960 973.960 40.960Q1025.960 40.960 1068.960 66.460Q1111.960 91.960 1137.460 134.960Q1162.960 177.960 1162.960 230.960Q1162.960 282.960 1137.460 325.960Q1111.960 368.960 1068.960 394.460Q1025.960 419.960 973.960 419.960ZM1716.960 419.960Q1663.960 419.960 1620.960 394.460Q1577.960 368.960 1552.460 325.960Q1526.960 282.960 1526.960 230.960Q1526.960 177.960 1552.460 134.960Q1577.960 91.960 1620.960 66.460Q1663.960 40.960 1716.960 40.960Q1768.960 40.960 1811.960 66.460Q1854.960 91.960 1880.960 134.960Q1906.960 177.960 1906.960 230.960Q1906.960 282.960 1880.960 325.960Q1854.960 368.960 1811.960 394.460Q1768.960 419.960 1716.960 419.960Z";
 const PREVIOUS_PATH: &str = "M1890.960 1429.960Q1890.960 1500.960 1855.460 1534.960Q1819.960 1568.960 1771.960 1568.960Q1727.960 1568.960 1684.960 1543.960L633.960 931.960Q577.960 898.960 553.960 870.960Q529.960 842.960 529.960 804.960Q529.960 766.960 553.960 738.960Q577.960 710.960 633.960 677.960L1684.960 65.960Q1727.960 40.960 1771.960 40.960Q1819.960 40.960 1855.460 74.960Q1890.960 108.960 1890.960 178.960L1890.960 1429.960ZM401.960 1562.960L173.960 1562.960Q107.960 1562.960 74.460 1528.960Q40.960 1494.960 40.960 1428.960L40.960 179.960Q40.960 110.960 74.460 78.460Q107.960 45.960 173.960 45.960L401.960 45.960Q466.960 45.960 500.960 79.960Q534.960 113.960 534.960 179.960L534.960 1428.960Q534.960 1494.960 500.960 1528.960Q466.960 1562.960 401.960 1562.960Z";
@@ -2430,9 +2814,32 @@ mod tests {
         assert_eq!(layout.header_top, 80.0);
         assert_eq!(layout.body_top, 172.0);
         assert_eq!(layout.progress_top, 560.0);
-        assert_eq!(layout.transport_top, 620.0);
-        assert_eq!(layout.nav_top, 762.0);
+        assert_eq!(layout.transport_center_y, 691.0);
+        assert_eq!(layout.nav_center_y, 807.0);
+        assert_eq!(layout.queue_metadata_top, 226.0);
+        assert_eq!(layout.queue_content_top, 282.0);
         assert_eq!(layout.lyrics_content_bottom(), 292.0);
+    }
+
+    #[test]
+    fn compressed_flex_rows_remain_ordered() {
+        let layout = PlayerLayout::resolve(393.0, 400.0);
+        assert!(layout.header_top <= layout.body_top);
+        assert!(layout.body_top <= layout.progress_top);
+        assert!(layout.progress_top <= layout.transport_center_y);
+        assert!(layout.transport_center_y <= layout.nav_center_y);
+        assert!(layout.nav_center_y <= layout.height);
+    }
+
+    #[test]
+    fn mini_player_uses_horizontal_flex_slots() {
+        let layout = PlayerLayout::resolve(393.0, 60.0);
+        let mini = MiniPlayerLayout::resolve(layout);
+        assert_eq!(mini.artwork, Rect::from_xywh(8.0, 8.0, 44.0, 44.0));
+        assert_eq!(mini.text.left, 60.0);
+        assert_eq!(mini.text.right, 283.0);
+        assert_eq!(mini.play_center, Point::new(309.0, 30.0));
+        assert_eq!(mini.next_center, Point::new(357.0, 30.0));
     }
 
     #[test]
@@ -2454,7 +2861,11 @@ mod tests {
     #[test]
     fn transport_hit_targets_follow_visual_order() {
         let layout = PlayerLayout::resolve(393.0, 852.0);
-        let ui = PlayerUiLayout::resolve(layout, PlayerScreenInput::Lyrics);
+        let ui = PlayerUiLayout::resolve(
+            layout,
+            PlayerScreenInput::Lyrics,
+            PlayerPresentationInput::Full,
+        );
         let mut state = PlayerInteractionState::default();
         assert_eq!(
             state.press(&ui, 101.5, 691.0),
@@ -2473,6 +2884,7 @@ mod tests {
     fn mode_button_press_animates_from_plain_icon_to_inverse_fill() {
         let now = Instant::now();
         let mut state = PlayerInteractionState {
+            pointer_hit: Some(PlayerHit::Control(PlayerButton::Lyrics)),
             pressed: Some(PlayerButton::Lyrics),
             pressed_at: Some(now - std::time::Duration::from_millis(80)),
             released: None,
@@ -2588,8 +3000,16 @@ mod tests {
     fn queue_filter_hit_targets_only_exist_on_queue_screen() {
         let layout = PlayerLayout::resolve(393.0, 852.0);
         let mut state = PlayerInteractionState::default();
-        let lyrics_ui = PlayerUiLayout::resolve(layout, PlayerScreenInput::Lyrics);
-        let queue_ui = PlayerUiLayout::resolve(layout, PlayerScreenInput::Queue);
+        let lyrics_ui = PlayerUiLayout::resolve(
+            layout,
+            PlayerScreenInput::Lyrics,
+            PlayerPresentationInput::Full,
+        );
+        let queue_ui = PlayerUiLayout::resolve(
+            layout,
+            PlayerScreenInput::Queue,
+            PlayerPresentationInput::Full,
+        );
         assert_eq!(state.press(&lyrics_ui, 153.0, 199.0), 0);
         assert_eq!(
             state.press(&queue_ui, 153.0, 199.0),
@@ -2600,7 +3020,11 @@ mod tests {
     #[test]
     fn queue_ui_hit_test_matches_every_resolved_control_center() {
         let layout = PlayerLayout::resolve(393.0, 852.0);
-        let ui = PlayerUiLayout::resolve(layout, PlayerScreenInput::Queue);
+        let ui = PlayerUiLayout::resolve(
+            layout,
+            PlayerScreenInput::Queue,
+            PlayerPresentationInput::Full,
+        );
         let visible = BottomChromeSample {
             visibility: 1.0,
             active: false,
@@ -2609,11 +3033,62 @@ mod tests {
         for control in &ui.controls {
             assert_eq!(
                 ui.hit_test(control.center, visible),
-                Some(control.button),
+                Some(PlayerHit::Control(control.button)),
                 "center must hit {:?}",
                 control.button,
             );
         }
+    }
+
+    #[test]
+    fn scroll_regions_share_the_player_hit_test_and_controls_take_precedence() {
+        let layout = PlayerLayout::resolve(393.0, 852.0);
+        let visible = BottomChromeSample {
+            visibility: 1.0,
+            active: false,
+        };
+        let lyrics = PlayerUiLayout::resolve(
+            layout,
+            PlayerScreenInput::Lyrics,
+            PlayerPresentationInput::Full,
+        );
+        assert_eq!(
+            lyrics.hit_test(Point::new(196.5, 300.0), visible),
+            Some(PlayerHit::Scroll),
+        );
+        assert_eq!(
+            lyrics.hit_test(lyrics.control(PlayerButton::PlayPause).center, visible),
+            Some(PlayerHit::Control(PlayerButton::PlayPause)),
+        );
+
+        let artwork = PlayerUiLayout::resolve(
+            layout,
+            PlayerScreenInput::Artwork,
+            PlayerPresentationInput::Full,
+        );
+        assert_eq!(artwork.hit_test(Point::new(196.5, 300.0), visible), None);
+    }
+
+    #[test]
+    fn mini_player_hit_test_exposes_open_behind_transport_controls() {
+        let layout = PlayerLayout::resolve(393.0, 60.0);
+        let ui = PlayerUiLayout::resolve(
+            layout,
+            PlayerScreenInput::Artwork,
+            PlayerPresentationInput::Mini,
+        );
+        let visible = BottomChromeSample {
+            visibility: 1.0,
+            active: false,
+        };
+        assert_eq!(
+            ui.hit_test(Point::new(120.0, 30.0), visible),
+            Some(PlayerHit::Control(PlayerButton::Open)),
+        );
+        assert_eq!(
+            ui.hit_test(ui.control(PlayerButton::PlayPause).center, visible),
+            Some(PlayerHit::Control(PlayerButton::PlayPause)),
+        );
     }
 
     #[test]

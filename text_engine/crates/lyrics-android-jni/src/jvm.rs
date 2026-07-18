@@ -1065,6 +1065,18 @@ pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeTextE
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeTextEngine_nativeSetPlayerExpansionProgress(
+    _env: JNIEnv,
+    _this: JObject,
+    handle: jlong,
+    progress: jfloat,
+) {
+    with_engine_mut(handle, (), |engine| {
+        engine.set_player_expansion_progress(progress);
+    });
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeTextEngine_nativeScrollLyricsBy(
     _env: JNIEnv,
     _this: JObject,
