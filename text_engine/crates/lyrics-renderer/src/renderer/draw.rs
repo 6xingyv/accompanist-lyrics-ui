@@ -65,9 +65,8 @@ pub(super) fn draw_top_bar_skia(
     // toward the Start edge through the padding on both sides. Those two padding
     // strips are the fade zones; the text's normal column always remains solid.
     let left_fade_width = (bar.text_left - (bar.thumb_left + bar.thumb_size)).max(0.0);
-    let right_fade_width = ((bar.button_cx - bar.button_radius)
-        - (bar.text_left + bar.text_max_width))
-        .max(0.0);
+    let right_fade_width =
+        ((bar.button_cx - bar.button_radius) - (bar.text_left + bar.text_max_width)).max(0.0);
     let mut animating = false;
     animating |= draw_top_bar_marquee_line(
         canvas,
@@ -140,7 +139,7 @@ const MARQUEE_HOLD_MS: f32 = 1600.0;
 /// animating (i.e. actually overflowing) so the caller can keep the render loop
 /// ticking.
 #[allow(clippy::too_many_arguments)]
-fn draw_top_bar_marquee_line(
+pub(super) fn draw_top_bar_marquee_line(
     canvas: &skia_safe::Canvas,
     typefaces: &HashMap<fontdb::ID, Typeface>,
     text: &PreparedText,
@@ -171,12 +170,8 @@ fn draw_top_bar_marquee_line(
     // Keep the second copy one full viewport plus a blank gap behind the first.
     // This guarantees the first copy has completely left before the next one can
     // enter, and the second lands exactly at `left` at the end of the travel.
-    let cycle_distance = marquee_cycle_distance(
-        text_width,
-        max_width,
-        left_fade_width,
-        right_fade_width,
-    );
+    let cycle_distance =
+        marquee_cycle_distance(text_width, max_width, left_fade_width, right_fade_width);
     let offset = marquee_offset(current_time_ms, cycle_distance);
 
     // Expand the drawable/clip bounds into the two neighbouring padding strips.
@@ -268,10 +263,7 @@ fn apply_horizontal_padding_fade(
     left_fade_width: f32,
     right_fade_width: f32,
 ) {
-    if width <= 0.0
-        || height <= 0.0
-        || (left_fade_width <= 0.0 && right_fade_width <= 0.0)
-    {
+    if width <= 0.0 || height <= 0.0 || (left_fade_width <= 0.0 && right_fade_width <= 0.0) {
         return;
     }
     let left_fade_width = left_fade_width.max(0.0);
@@ -310,10 +302,7 @@ fn apply_horizontal_padding_fade(
     paint.set_anti_alias(false);
     paint.set_shader(shader);
     paint.set_blend_mode(BlendMode::DstIn);
-    canvas.draw_rect(
-        Rect::new(fade_left, top, fade_right, top + height),
-        &paint,
-    );
+    canvas.draw_rect(Rect::new(fade_left, top, fade_right, top + height), &paint);
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -452,30 +441,14 @@ pub(super) fn draw_prepared_text_skia(
         } else {
             // Fall through without a blur layer.
             return draw_prepared_text_skia_inner(
-                canvas,
-                typefaces,
-                text,
-                origin_x,
-                origin_y,
-                base_color,
-                alpha,
-                0.0,
-                karaoke,
+                canvas, typefaces, text, origin_x, origin_y, base_color, alpha, 0.0, karaoke,
             );
         }
     }
     let inner_blur = if layer_blur { 0.0 } else { blur_radius };
 
     draw_prepared_text_skia_inner(
-        canvas,
-        typefaces,
-        text,
-        origin_x,
-        origin_y,
-        base_color,
-        alpha,
-        inner_blur,
-        karaoke,
+        canvas, typefaces, text, origin_x, origin_y, base_color, alpha, inner_blur, karaoke,
     );
 
     if layer_blur {
@@ -494,7 +467,6 @@ fn draw_prepared_text_skia_inner(
     inner_blur: f32,
     karaoke: Option<(i32, bool, f32, &Vec<PreparedSyllable>)>,
 ) {
-
     for row in &text.rows {
         let (row_min_x, row_max_x) =
             row_x_bounds(row, origin_x).unwrap_or((origin_x, origin_x + row.width));
@@ -1076,13 +1048,8 @@ pub(super) fn draw_breathing_dots_skia(
         let scaled_x = center_x + (base_x - center_x) * scale;
         let scaled_y = center_y + (base_y - center_y) * scale;
         let radius = dots.size * 0.5 * scale;
-        let dot_alpha = breathing_dot_alpha(
-            index,
-            dots.number,
-            current_time,
-            enter_end,
-            exit_start,
-        );
+        let dot_alpha =
+            breathing_dot_alpha(index, dots.number, current_time, enter_end, exit_start);
 
         if radius <= 0.0 {
             continue;
@@ -1336,13 +1303,21 @@ mod tests {
 
     #[test]
     fn breathing_dots_light_from_point_four_to_one_in_sequence() {
-        let (_, _, enter_end, exit_start) =
-            breathing_dots_state(0, 10_000, 3_000, test_dots());
+        let (_, _, enter_end, exit_start) = breathing_dots_state(0, 10_000, 3_000, test_dots());
         let span = (exit_start - enter_end) / 3.0;
 
-        assert_eq!(breathing_dot_alpha(0, 3, enter_end, enter_end, exit_start), 0.4);
-        assert_eq!(breathing_dot_alpha(1, 3, enter_end, enter_end, exit_start), 0.4);
-        assert_eq!(breathing_dot_alpha(2, 3, enter_end, enter_end, exit_start), 0.4);
+        assert_eq!(
+            breathing_dot_alpha(0, 3, enter_end, enter_end, exit_start),
+            0.4
+        );
+        assert_eq!(
+            breathing_dot_alpha(1, 3, enter_end, enter_end, exit_start),
+            0.4
+        );
+        assert_eq!(
+            breathing_dot_alpha(2, 3, enter_end, enter_end, exit_start),
+            0.4
+        );
 
         assert_eq!(
             breathing_dot_alpha(0, 3, enter_end + span, enter_end, exit_start),

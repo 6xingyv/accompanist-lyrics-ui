@@ -56,6 +56,7 @@ enum class NativeQueueFilter(val wireValue: String) {
 data class NativePlayerQueueItem(
     val title: String,
     val artist: String = "",
+    val artworkUri: String? = null,
 )
 
 /**

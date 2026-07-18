@@ -30,7 +30,7 @@ const BOTTOM_CHROME_EXIT_SECONDS: f32 = 0.36;
 //   - drag handle: ~0.40
 const WHITE: Color4f = Color4f::new(1.0, 1.0, 1.0, 1.0);
 const WHITE_HANDLE: Color4f = Color4f::new(1.0, 1.0, 1.0, 0.40);
-const WHITE_BTN: Color4f = Color4f::new(1.0, 1.0, 1.0, 0.40);
+const WHITE_BTN: Color4f = Color4f::new(1.0, 1.0, 1.0, 0.10);
 const WHITE_BTN_ACTIVE: Color4f = Color4f::new(1.0, 1.0, 1.0, 0.60);
 const WHITE_SECONDARY: Color4f = Color4f::new(1.0, 1.0, 1.0, 0.60);
 const WHITE_TRACK: Color4f = Color4f::new(1.0, 1.0, 1.0, 0.50);
@@ -64,6 +64,7 @@ pub(crate) enum QueueFilterInput {
 pub(crate) struct PlayerQueueItemInput {
     pub title: String,
     pub artist: String,
+    pub artwork_key: String,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -85,6 +86,7 @@ pub(crate) struct PlayerInput {
 struct PreparedQueueItem {
     title: PreparedText,
     artist: PreparedText,
+    artwork_key: String,
 }
 
 #[derive(Debug)]
@@ -586,7 +588,8 @@ impl DrawCommand<'_> {
             } => {
                 let mut paint = command_paint(color, blend);
                 paint.set_anti_alias(true);
-                canvas.draw_round_rect(rect, radius, radius, &paint);
+                let path = crate::capsule::continuous_rounded_rect(rect, radius);
+                canvas.draw_path(&path, &paint);
             }
             Self::Circle {
                 center,
@@ -680,6 +683,41 @@ impl Default for PlayerInteractionState {
 pub(super) struct BottomChromeSample {
     pub visibility: f32,
     pub active: bool,
+}
+
+#[derive(Debug, Default)]
+pub(super) struct QueueScrollState {
+    offset: f32,
+    velocity: f32,
+    dragging: bool,
+    last_frame_at: Option<Instant>,
+}
+
+#[derive(Debug, Default)]
+pub(super) struct QueueReorderState {
+    active: bool,
+    from: usize,
+    to: usize,
+    pointer_y: f32,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct QueueReorderSample {
+    pub active: bool,
+    pub from: usize,
+    pub to: usize,
+    pub pointer_y: f32,
+}
+
+impl QueueReorderState {
+    pub(super) fn sample(&self) -> QueueReorderSample {
+        QueueReorderSample {
+            active: self.active,
+            from: self.from,
+            to: self.to,
+            pointer_y: self.pointer_y,
+        }
+    }
 }
 
 impl BottomChromeSample {
@@ -812,6 +850,185 @@ impl PlayerInteractionState {
             press: 0.0,
             active: false,
         }
+    }
+}
+
+impl LyricsRenderer {
+    fn queue_scroll_max(&self, bottom_chrome: BottomChromeSample) -> f32 {
+        let Some(player) = self.scene.as_ref().and_then(|scene| scene.player.as_ref()) else {
+            return 0.0;
+        };
+        let list_top = 282.0 * player.layout.scale;
+        let content_height = player.queue_items.len() as f32 * 56.0 * player.layout.scale;
+        (list_top + content_height - bottom_chrome.content_end(player.layout)).max(0.0)
+    }
+
+    pub(super) fn begin_queue_scroll(&mut self) {
+        self.queue_scroll.dragging = true;
+        self.queue_scroll.velocity = 0.0;
+        self.queue_scroll.last_frame_at = Some(Instant::now());
+        self.player_interaction.reveal();
+    }
+
+    pub(super) fn scroll_queue_by(&mut self, delta_y: f32) {
+        if !delta_y.is_finite() {
+            return;
+        }
+        let max = self.queue_scroll_max(BottomChromeSample {
+            visibility: 1.0,
+            active: true,
+        });
+        let limit = self
+            .scene
+            .as_ref()
+            .and_then(|scene| scene.player.as_ref())
+            .map_or(80.0, |player| 80.0 * player.layout.scale);
+        self.queue_scroll.offset = (self.queue_scroll.offset + delta_y).clamp(-limit, max + limit);
+        self.queue_scroll.velocity = 0.0;
+        self.queue_scroll.dragging = true;
+        self.queue_scroll.last_frame_at = Some(Instant::now());
+        self.player_interaction.reveal();
+    }
+
+    pub(super) fn end_queue_scroll(&mut self, velocity_y: f32) {
+        self.queue_scroll.dragging = false;
+        self.queue_scroll.velocity = velocity_y.clamp(
+            -self.scroll_params().max_fling_velocity,
+            self.scroll_params().max_fling_velocity,
+        );
+        self.queue_scroll.last_frame_at = Some(Instant::now());
+        self.player_interaction.reveal();
+    }
+
+    pub(super) fn cancel_queue_scroll(&mut self) {
+        self.queue_scroll.dragging = false;
+        self.queue_scroll.velocity = 0.0;
+        self.queue_scroll.last_frame_at = Some(Instant::now());
+    }
+
+    pub(super) fn sample_queue_scroll(
+        &mut self,
+        now: Instant,
+        bottom_chrome: BottomChromeSample,
+    ) -> (f32, bool) {
+        let max = self.queue_scroll_max(bottom_chrome);
+        let dt = self
+            .queue_scroll
+            .last_frame_at
+            .map(|last| now.saturating_duration_since(last).as_secs_f32())
+            .unwrap_or(0.0)
+            .clamp(0.0, 0.05);
+        self.queue_scroll.last_frame_at = Some(now);
+
+        if !self.queue_scroll.dragging && dt > 0.0 {
+            self.queue_scroll.offset += self.queue_scroll.velocity * dt;
+            self.queue_scroll.velocity *= self.scroll_params().deceleration_rate.powf(dt * 60.0);
+            let bound = self.queue_scroll.offset.clamp(0.0, max);
+            let displacement = bound - self.queue_scroll.offset;
+            if displacement.abs() > 0.01 {
+                self.queue_scroll.velocity += displacement * 42.0 * dt;
+                self.queue_scroll.velocity *= (-9.0_f32 * dt).exp();
+            }
+            if self.queue_scroll.velocity.abs() < 2.0 && displacement.abs() < 0.5 {
+                self.queue_scroll.offset = bound;
+                self.queue_scroll.velocity = 0.0;
+            }
+        }
+
+        let active = self.queue_scroll.dragging
+            || self.queue_scroll.velocity.abs() >= 2.0
+            || self.queue_scroll.offset < -0.5
+            || self.queue_scroll.offset > max + 0.5;
+        (self.queue_scroll.offset, active)
+    }
+
+    pub fn begin_queue_reorder(&mut self, x: f32, y: f32) -> i32 {
+        if self.player_screen != PlayerScreenInput::Queue {
+            return -1;
+        }
+        let Some(player) = self.scene.as_ref().and_then(|scene| scene.player.as_ref()) else {
+            return -1;
+        };
+        let scale = player.layout.scale;
+        let list_top = 282.0 * scale;
+        let list_bottom = self
+            .player_interaction
+            .bottom_chrome_sample(self.player_screen, Instant::now())
+            .content_end(player.layout);
+        if x < 326.0 * scale || x > 377.0 * scale || y < list_top || y > list_bottom {
+            return -1;
+        }
+        let row_height = 56.0 * scale;
+        let index = ((y + self.queue_scroll.offset - list_top) / row_height).floor() as usize;
+        if index >= player.queue_items.len() {
+            return -1;
+        }
+        self.queue_reorder = QueueReorderState {
+            active: true,
+            from: index,
+            to: index,
+            pointer_y: y,
+        };
+        self.queue_scroll.dragging = false;
+        self.queue_scroll.velocity = 0.0;
+        self.player_interaction.cancel();
+        self.player_interaction.reveal();
+        index as i32
+    }
+
+    pub fn update_queue_reorder(&mut self, y: f32) {
+        if !self.queue_reorder.active || !y.is_finite() {
+            return;
+        }
+        let Some(player) = self.scene.as_ref().and_then(|scene| scene.player.as_ref()) else {
+            self.queue_reorder = QueueReorderState::default();
+            return;
+        };
+        let scale = player.layout.scale;
+        let row_height = 56.0 * scale;
+        let list_top = 282.0 * scale;
+        let list_bottom = self
+            .player_interaction
+            .bottom_chrome_sample(self.player_screen, Instant::now())
+            .content_end(player.layout);
+        let edge = 36.0 * scale;
+        let max = self.queue_scroll_max(BottomChromeSample {
+            visibility: 1.0,
+            active: true,
+        });
+        if y < list_top + edge {
+            self.queue_scroll.offset = (self.queue_scroll.offset - 12.0 * scale).max(0.0);
+        } else if y > list_bottom - edge {
+            self.queue_scroll.offset = (self.queue_scroll.offset + 12.0 * scale).min(max);
+        }
+        let content_y = y.clamp(list_top, list_bottom) + self.queue_scroll.offset;
+        let target = ((content_y - list_top) / row_height).floor() as usize;
+        self.queue_reorder.to = target.min(player.queue_items.len().saturating_sub(1));
+        self.queue_reorder.pointer_y =
+            y.clamp(list_top + row_height * 0.5, list_bottom - row_height * 0.5);
+        self.player_interaction.reveal();
+    }
+
+    pub fn finish_queue_reorder(&mut self) -> i64 {
+        if !self.queue_reorder.active {
+            return -1;
+        }
+        let from = self.queue_reorder.from;
+        let to = self.queue_reorder.to;
+        if from != to {
+            if let Some(player) = self.scene.as_mut().and_then(|scene| scene.player.as_mut()) {
+                if from < player.queue_items.len() && to < player.queue_items.len() {
+                    let item = player.queue_items.remove(from);
+                    player.queue_items.insert(to, item);
+                }
+            }
+        }
+        self.queue_reorder = QueueReorderState::default();
+        ((from as i64) << 32) | to as i64
+    }
+
+    pub fn cancel_queue_reorder(&mut self) {
+        self.queue_reorder = QueueReorderState::default();
     }
 }
 
@@ -980,6 +1197,7 @@ impl LyricsRenderer {
             queue_items.push(PreparedQueueItem {
                 title: item_title,
                 artist: item_artist,
+                artwork_key: item.artwork_key.clone(),
             });
         }
         self.text_attrs = saved;
@@ -1026,10 +1244,13 @@ pub(super) fn draw_player(
     canvas: &skia_safe::Canvas,
     typefaces: &HashMap<fontdb::ID, Typeface>,
     thumbnail: Option<&Image>,
+    queue_artworks: &HashMap<String, Image>,
     player: &PreparedPlayer,
     interaction: &mut PlayerInteractionState,
     transition: PlayerTransitionSample,
     bottom_chrome: BottomChromeSample,
+    queue_scroll_y: f32,
+    queue_reorder: QueueReorderSample,
     current_time_ms: i32,
 ) -> bool {
     let layout = player.layout;
@@ -1072,6 +1293,7 @@ pub(super) fn draw_player(
                     &lyrics_ui,
                     interaction,
                     now,
+                    current_time_ms,
                     alpha,
                     &mut animating,
                 );
@@ -1093,6 +1315,7 @@ pub(super) fn draw_player(
                     &artwork_ui,
                     interaction,
                     now,
+                    current_time_ms,
                     alpha,
                     &mut animating,
                 );
@@ -1115,6 +1338,7 @@ pub(super) fn draw_player(
                         &queue_ui,
                         interaction,
                         now,
+                        current_time_ms,
                         alpha,
                         &mut animating,
                     );
@@ -1123,9 +1347,12 @@ pub(super) fn draw_player(
                     canvas,
                     typefaces,
                     thumbnail,
+                    queue_artworks,
                     player,
                     &queue_ui,
                     bottom_chrome,
+                    queue_scroll_y,
+                    queue_reorder,
                     interaction,
                     now,
                     alpha,
@@ -1142,6 +1369,7 @@ pub(super) fn draw_player(
             &active_ui,
             interaction,
             now,
+            current_time_ms,
             1.0,
             &mut animating,
         );
@@ -1224,6 +1452,39 @@ fn draw_plus_text(
     canvas.restore();
 }
 
+#[allow(clippy::too_many_arguments)]
+fn draw_plus_marquee_text(
+    canvas: &skia_safe::Canvas,
+    typefaces: &HashMap<fontdb::ID, Typeface>,
+    text: &PreparedText,
+    left: f32,
+    top: f32,
+    max_width: f32,
+    left_fade_width: f32,
+    right_fade_width: f32,
+    alpha: f32,
+    current_time_ms: i32,
+) -> bool {
+    let mut layer = Paint::default();
+    layer.set_blend_mode(BlendMode::Plus);
+    canvas.save_layer(&SaveLayerRec::default().paint(&layer));
+    let animating = super::draw::draw_top_bar_marquee_line(
+        canvas,
+        typefaces,
+        text,
+        left,
+        top,
+        max_width,
+        left_fade_width,
+        right_fade_width,
+        (255, 255, 255, 255),
+        alpha,
+        current_time_ms,
+    );
+    canvas.restore();
+    animating
+}
+
 fn draw_compact_header(
     canvas: &skia_safe::Canvas,
     typefaces: &HashMap<fontdb::ID, Typeface>,
@@ -1231,33 +1492,35 @@ fn draw_compact_header(
     ui: &PlayerUiLayout,
     interaction: &mut PlayerInteractionState,
     now: Instant,
+    current_time_ms: i32,
     page_alpha: f32,
     animating: &mut bool,
 ) {
     let s = player.layout.scale;
-    canvas.save();
-    canvas.clip_rect(
-        Rect::from_xywh(116.0 * s, 90.0 * s, 157.0 * s, 72.0 * s),
-        ClipOp::Intersect,
-        true,
-    );
-    draw_plus_text(
+    *animating |= draw_plus_marquee_text(
         canvas,
         typefaces,
         &player.title,
         116.0 * s,
         102.5 * s,
+        157.0 * s,
+        12.0 * s,
+        4.0 * s,
         TEXT_PRIMARY_ALPHA * page_alpha,
+        current_time_ms,
     );
-    draw_plus_text(
+    *animating |= draw_plus_marquee_text(
         canvas,
         typefaces,
         &player.artist,
         116.0 * s,
         128.5 * s,
+        157.0 * s,
+        12.0 * s,
+        4.0 * s,
         TEXT_SECONDARY_ALPHA * page_alpha,
+        current_time_ms,
     );
-    canvas.restore();
 
     let favorite_animation = interaction.animation_for(PlayerButton::Favorite, now);
     let more_animation = interaction.animation_for(PlayerButton::More, now);
@@ -1295,35 +1558,37 @@ fn draw_artwork_metadata(
     ui: &PlayerUiLayout,
     interaction: &mut PlayerInteractionState,
     now: Instant,
+    current_time_ms: i32,
     page_alpha: f32,
     animating: &mut bool,
 ) {
     let layout = player.layout;
     let scale = layout.scale;
     let top = layout.artwork_metadata_top;
-    canvas.save();
-    canvas.clip_rect(
-        Rect::from_xywh(32.0 * scale, top + 8.0 * scale, 241.0 * scale, 72.0 * scale),
-        ClipOp::Intersect,
-        true,
-    );
-    draw_plus_text(
+    *animating |= draw_plus_marquee_text(
         canvas,
         typefaces,
         &player.artwork_title,
         32.0 * scale,
         top + 24.0 * scale,
+        241.0 * scale,
+        8.0 * scale,
+        4.0 * scale,
         TEXT_PRIMARY_ALPHA * page_alpha,
+        current_time_ms,
     );
-    draw_plus_text(
+    *animating |= draw_plus_marquee_text(
         canvas,
         typefaces,
         &player.artwork_artist,
         32.0 * scale,
         top + 51.0 * scale,
+        241.0 * scale,
+        8.0 * scale,
+        4.0 * scale,
         TEXT_SECONDARY_ALPHA * page_alpha,
+        current_time_ms,
     );
-    canvas.restore();
 
     let favorite_animation = interaction.animation_for(PlayerButton::Favorite, now);
     let more_animation = interaction.animation_for(PlayerButton::More, now);
@@ -1358,9 +1623,12 @@ fn draw_queue_body(
     canvas: &skia_safe::Canvas,
     typefaces: &HashMap<fontdb::ID, Typeface>,
     thumbnail: Option<&Image>,
+    queue_artworks: &HashMap<String, Image>,
     player: &PreparedPlayer,
     ui: &PlayerUiLayout,
     bottom_chrome: BottomChromeSample,
+    queue_scroll_y: f32,
+    queue_reorder: QueueReorderSample,
     interaction: &mut PlayerInteractionState,
     now: Instant,
     page_alpha: f32,
@@ -1399,44 +1667,20 @@ fn draw_queue_body(
         canvas.scale((animation.scale, animation.scale));
         canvas.translate((-control.center.x, -control.center.y));
         let selected = player.queue_filter == filter;
-        DrawCommand::RoundRect {
-            rect: pill,
-            radius: pill.height() * 0.5,
-            color: if selected {
-                multiplied_alpha(WHITE_BTN_ACTIVE, page_alpha)
-            } else {
-                multiplied_alpha(WHITE_BTN, page_alpha)
-            },
-            blend: DrawBlend::Plus,
-        }
-        .draw(canvas);
-        draw_icon(
+        draw_inverse_button(
             canvas,
             icon,
             control.center,
             icon_width,
             icon_height,
-            if selected {
-                WHITE_BTN_ACTIVE
-            } else {
-                WHITE_BTN
-            },
+            0.0,
+            Some((pill, pill.height() * 0.5)),
+            selected,
             page_alpha,
         );
         canvas.restore();
     }
 
-    canvas.save();
-    canvas.clip_rect(
-        Rect::from_xywh(
-            32.0 * scale,
-            226.0 * scale,
-            (layout.width - 64.0 * scale).max(1.0),
-            (bottom_chrome.content_end(layout) - 226.0 * scale).max(1.0),
-        ),
-        ClipOp::Intersect,
-        true,
-    );
     draw_plus_text(
         canvas,
         typefaces,
@@ -1454,14 +1698,41 @@ fn draw_queue_body(
         TEXT_SECONDARY_ALPHA * page_alpha,
     );
 
-    for (index, item) in player.queue_items.iter().enumerate() {
-        let top = (282.0 + index as f32 * 56.0) * scale;
-        if top >= bottom_chrome.content_end(layout) {
+    let list_top = 282.0 * scale;
+    let list_bottom = bottom_chrome.content_end(layout);
+    canvas.save();
+    canvas.clip_rect(
+        Rect::from_xywh(
+            32.0 * scale,
+            list_top,
+            (layout.width - 64.0 * scale).max(1.0),
+            (list_bottom - list_top).max(1.0),
+        ),
+        ClipOp::Intersect,
+        true,
+    );
+    canvas.translate((0.0, -queue_scroll_y));
+
+    for visual_index in 0..player.queue_items.len() {
+        let item_index = reordered_item_index(visual_index, queue_reorder);
+        let item = &player.queue_items[item_index];
+        let mut top = (282.0 + visual_index as f32 * 56.0) * scale;
+        if queue_reorder.active && item_index == queue_reorder.from {
+            top = queue_reorder.pointer_y + queue_scroll_y - 28.0 * scale;
+        }
+        if top - queue_scroll_y >= list_bottom {
             break;
+        }
+        if top + 56.0 * scale - queue_scroll_y <= list_top {
+            continue;
         }
         draw_artwork(
             canvas,
-            thumbnail,
+            if item.artwork_key.is_empty() {
+                thumbnail
+            } else {
+                queue_artworks.get(&item.artwork_key)
+            },
             Rect::from_xywh(32.0 * scale, top + 4.0 * scale, 48.0 * scale, 48.0 * scale),
             8.0 * scale,
             page_alpha,
@@ -1497,6 +1768,27 @@ fn draw_queue_body(
         );
     }
     canvas.restore();
+}
+
+fn reordered_item_index(visual_index: usize, reorder: QueueReorderSample) -> usize {
+    if !reorder.active || reorder.from == reorder.to {
+        return visual_index;
+    }
+    if reorder.from < reorder.to {
+        if visual_index == reorder.to {
+            reorder.from
+        } else if visual_index >= reorder.from && visual_index < reorder.to {
+            visual_index + 1
+        } else {
+            visual_index
+        }
+    } else if visual_index == reorder.to {
+        reorder.from
+    } else if visual_index > reorder.to && visual_index <= reorder.from {
+        visual_index - 1
+    } else {
+        visual_index
+    }
 }
 
 fn draw_reorder_handle(canvas: &skia_safe::Canvas, center: Point, scale: f32, alpha: f32) {
@@ -1653,18 +1945,7 @@ fn draw_mode_navigation(
         let animation = interaction.animation_for(button, now);
         *animating |= animation.active;
         let selected = active_on == Some(selected_screen);
-        draw_mode_control(
-            canvas,
-            control,
-            glyph,
-            if selected {
-                multiplied_alpha(WHITE_BTN_ACTIVE, chrome_alpha)
-            } else {
-                multiplied_alpha(WHITE_BTN, chrome_alpha)
-            },
-            animation,
-            chrome_alpha,
-        );
+        draw_mode_control(canvas, control, glyph, selected, animation, chrome_alpha);
     }
 }
 
@@ -1678,7 +1959,7 @@ fn draw_mode_control(
     canvas: &skia_safe::Canvas,
     control: PlayerControl,
     glyph: ModeGlyph<'_>,
-    idle_color: Color4f,
+    selected: bool,
     animation: ControlAnimation,
     chrome_alpha: f32,
 ) {
@@ -1688,21 +1969,17 @@ fn draw_mode_control(
     canvas.scale((animation.scale, animation.scale));
     canvas.translate((-control.center.x, -control.center.y));
 
+    let fill = if selected { 1.0 } else { animation.press };
     draw_mode_glyph(
         canvas,
         glyph,
         control.center,
         icon_width,
         icon_height,
-        Color4f::new(
-            idle_color.r,
-            idle_color.g,
-            idle_color.b,
-            idle_color.a * (1.0 - animation.press),
-        ),
+        multiplied_alpha(WHITE, chrome_alpha * (1.0 - fill)),
         DrawBlend::Plus,
     );
-    if animation.press > 0.001 {
+    if fill > 0.001 {
         let bounds = Rect::from_xywh(
             control.center.x - diameter * 0.5,
             control.center.y - diameter * 0.5,
@@ -1711,7 +1988,7 @@ fn draw_mode_control(
         );
         let mut layer = Paint::default();
         layer.set_blend_mode(BlendMode::Plus);
-        layer.set_alpha_f(animation.press * chrome_alpha);
+        layer.set_alpha_f(fill * chrome_alpha);
         canvas.save_layer(&SaveLayerRec::default().bounds(&bounds).paint(&layer));
         DrawCommand::Circle {
             center: control.center,
@@ -1815,14 +2092,7 @@ fn draw_action_button(
     canvas.translate(center);
     canvas.scale((scale, scale));
     canvas.translate((-center.x, -center.y));
-    DrawCommand::Circle {
-        center,
-        radius: diameter * 0.5,
-        color: multiplied_alpha(if filled { WHITE_BTN_ACTIVE } else { WHITE_BTN }, alpha),
-        blend: DrawBlend::Plus,
-    }
-    .draw(canvas);
-    draw_icon(
+    draw_inverse_button(
         canvas,
         icon,
         center,
@@ -1832,9 +2102,98 @@ fn draw_action_button(
         } else {
             icon_size
         },
-        if filled { WHITE_BTN_ACTIVE } else { WHITE_BTN },
+        diameter,
+        None,
+        filled,
         alpha,
     );
+    canvas.restore();
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_inverse_button(
+    canvas: &skia_safe::Canvas,
+    icon: &SvgIcon,
+    center: Point,
+    icon_width: f32,
+    icon_height: f32,
+    circle_diameter: f32,
+    pill: Option<(Rect, f32)>,
+    selected: bool,
+    alpha: f32,
+) {
+    let bounds = pill.map_or_else(
+        || {
+            let diameter = circle_diameter.max(1.0);
+            Rect::from_xywh(
+                center.x - diameter * 0.5,
+                center.y - diameter * 0.5,
+                diameter,
+                diameter,
+            )
+        },
+        |(rect, _)| rect,
+    );
+    if !selected {
+        match pill {
+            Some((rect, radius)) => DrawCommand::RoundRect {
+                rect,
+                radius,
+                color: multiplied_alpha(WHITE_BTN, alpha),
+                blend: DrawBlend::Plus,
+            }
+            .draw(canvas),
+            None => DrawCommand::Circle {
+                center,
+                radius: bounds.width() * 0.5,
+                color: multiplied_alpha(WHITE_BTN, alpha),
+                blend: DrawBlend::Plus,
+            }
+            .draw(canvas),
+        }
+        DrawCommand::Icon {
+            icon,
+            center,
+            width: icon_width,
+            height: icon_height,
+            color: WHITE,
+            alpha,
+            blend: DrawBlend::Plus,
+        }
+        .draw(canvas);
+        return;
+    }
+
+    let mut layer = Paint::default();
+    layer.set_blend_mode(BlendMode::Plus);
+    layer.set_alpha_f(alpha.clamp(0.0, 1.0));
+    canvas.save_layer(&SaveLayerRec::default().bounds(&bounds).paint(&layer));
+    match pill {
+        Some((rect, radius)) => DrawCommand::RoundRect {
+            rect,
+            radius,
+            color: WHITE_BTN_ACTIVE,
+            blend: DrawBlend::SourceOver,
+        }
+        .draw(canvas),
+        None => DrawCommand::Circle {
+            center,
+            radius: bounds.width() * 0.5,
+            color: WHITE_BTN_ACTIVE,
+            blend: DrawBlend::SourceOver,
+        }
+        .draw(canvas),
+    }
+    DrawCommand::Icon {
+        icon,
+        center,
+        width: icon_width,
+        height: icon_height,
+        color: WHITE,
+        alpha: 1.0,
+        blend: DrawBlend::DestinationOut,
+    }
+    .draw(canvas);
     canvas.restore();
 }
 
@@ -2218,12 +2577,41 @@ mod tests {
     #[test]
     fn player_wire_deserializes_queue_screen_and_items() {
         let player: PlayerInput = serde_json::from_str(
-            r#"{"screen":"queue","title":"Jupiter","artist":"Coldplay","queueTitle":"Up Next","queueSource":"From Jupiter","queueFilter":"repeatOne","queueItems":[{"title":"Moon Music","artist":"Coldplay"}]}"#,
+            r#"{"screen":"queue","title":"Jupiter","artist":"Coldplay","queueTitle":"Up Next","queueSource":"From Jupiter","queueFilter":"repeatOne","queueItems":[{"title":"Moon Music","artist":"Coldplay","artworkKey":"content://cover/1"}]}"#,
         )
         .unwrap();
         assert_eq!(player.screen, PlayerScreenInput::Queue);
         assert_eq!(player.queue_filter, QueueFilterInput::RepeatOne);
         assert_eq!(player.queue_items.len(), 1);
         assert_eq!(player.queue_items[0].title, "Moon Music");
+        assert_eq!(player.queue_items[0].artwork_key, "content://cover/1");
+    }
+
+    #[test]
+    fn queue_reorder_mapping_moves_one_row_and_closes_the_gap() {
+        let down = QueueReorderSample {
+            active: true,
+            from: 1,
+            to: 3,
+            pointer_y: 0.0,
+        };
+        assert_eq!(
+            (0..5)
+                .map(|index| reordered_item_index(index, down))
+                .collect::<Vec<_>>(),
+            vec![0, 2, 3, 1, 4],
+        );
+        let up = QueueReorderSample {
+            active: true,
+            from: 3,
+            to: 1,
+            pointer_y: 0.0,
+        };
+        assert_eq!(
+            (0..5)
+                .map(|index| reordered_item_index(index, up))
+                .collect::<Vec<_>>(),
+            vec![0, 3, 1, 2, 4],
+        );
     }
 }

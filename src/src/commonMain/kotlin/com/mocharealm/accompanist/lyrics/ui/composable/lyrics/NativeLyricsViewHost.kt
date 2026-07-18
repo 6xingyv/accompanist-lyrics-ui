@@ -38,4 +38,5 @@ internal expect fun NativeLyricsViewHost(
     onControlsClick: (() -> Unit)? = null,
     playerChrome: NativePlayerChrome? = null,
     onPlayerAction: ((NativePlayerAction) -> Unit)? = null,
+    onQueueReordered: ((Int, Int) -> Unit)? = null,
 )

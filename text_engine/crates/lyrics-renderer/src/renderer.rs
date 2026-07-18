@@ -590,11 +590,17 @@ pub struct LyricsRenderer {
     /// Ramps toward 1.0 while the user manually scrolls so everything is sharp,
     /// and back toward 0.0 once the list settles at the auto position again.
     manual_scroll_blur_release: f32,
+    /// Queue uses the same touch/fling input pipeline as lyrics, but keeps an
+    /// independent absolute list offset so lyric auto-follow is never disturbed.
+    queue_scroll: player::QueueScrollState,
+    queue_reorder: player::QueueReorderState,
     locale: String,
     scene: Option<PreparedScene>,
     /// GPU mesh-gradient background, built from the current album art. `None` until
     /// art is supplied via [`set_background_art`]; drawn behind the lyrics.
     mesh_gradient: Option<crate::mesh::MeshGradient>,
+    /// Small decoded queue covers keyed by the artwork key in the player wire.
+    queue_artworks: HashMap<String, skia_safe::Image>,
     /// When true the engine owns the whole (full-bleed) surface: it clears to black
     /// and paints the mesh background before the lyrics. When false it behaves as a
     /// transparent overlay (legacy).
@@ -1142,9 +1148,12 @@ impl LyricsRenderer {
             last_manual_scroll_frame_at: None,
             manual_scroll_active: false,
             manual_scroll_blur_release: 0.0,
+            queue_scroll: player::QueueScrollState::default(),
+            queue_reorder: player::QueueReorderState::default(),
             locale: "en-US".to_string(),
             scene: None,
             mesh_gradient: None,
+            queue_artworks: HashMap::new(),
             background_enabled: false,
             background_reactive: false,
             playback_active: false,
@@ -1191,6 +1200,19 @@ impl LyricsRenderer {
         self.background_enabled = false;
     }
 
+    pub fn set_queue_artwork(&mut self, key: String, pixels: &[u32], width: usize, height: usize) {
+        if key.is_empty() {
+            return;
+        }
+        if let Some(image) = crate::mesh::make_thumbnail_image(pixels, width, height) {
+            self.queue_artworks.insert(key, image);
+        }
+    }
+
+    pub fn clear_queue_artworks(&mut self) {
+        self.queue_artworks.clear();
+    }
+
     /// Update playback state driving the background: `playing` gates the time flow,
     /// `reactive` enables loudness-driven pacing/amplitude.
     pub fn set_playback_state(&mut self, playing: bool, reactive: bool) {
@@ -1232,22 +1254,14 @@ impl LyricsRenderer {
             self.reset_manual_scroll();
             self.pending_lyric_click_seek = None;
         }
-        if let Some(player) = self
-            .scene
-            .as_mut()
-            .and_then(|scene| scene.player.as_mut())
-        {
+        if let Some(player) = self.scene.as_mut().and_then(|scene| scene.player.as_mut()) {
             player.screen = screen;
         }
         self.player_transition.set_target(previous, Some(screen));
     }
 
     fn apply_player_live_state(&mut self) {
-        let Some(player) = self
-            .scene
-            .as_mut()
-            .and_then(|scene| scene.player.as_mut())
-        else {
+        let Some(player) = self.scene.as_mut().and_then(|scene| scene.player.as_mut()) else {
             return;
         };
         player.screen = self.player_screen;
@@ -1271,7 +1285,11 @@ impl LyricsRenderer {
         let now = Instant::now();
         let frame_dt = self
             .last_mesh_frame_at
-            .map(|last| now.saturating_duration_since(last).as_secs_f32().clamp(0.0, 0.1))
+            .map(|last| {
+                now.saturating_duration_since(last)
+                    .as_secs_f32()
+                    .clamp(0.0, 0.1)
+            })
             .unwrap_or(0.0);
         let dt = frame_dt * 0.2;
         self.last_mesh_frame_at = Some(now);
@@ -1281,15 +1299,10 @@ impl LyricsRenderer {
         // negative; because amp also shifted shader phase, transients visibly shook
         // the whole background.
         let raw_loudness = (crate::audio::current_metrics().loudness / 6.0).clamp(0.0, 1.0);
-        self.mesh_smoothed_loudness = smooth_mesh_loudness(
-            self.mesh_smoothed_loudness,
-            raw_loudness,
-            frame_dt,
-        );
-        let (amp, speed) = mesh_reactive_parameters(
-            self.mesh_smoothed_loudness,
-            self.background_reactive,
-        );
+        self.mesh_smoothed_loudness =
+            smooth_mesh_loudness(self.mesh_smoothed_loudness, raw_loudness, frame_dt);
+        let (amp, speed) =
+            mesh_reactive_parameters(self.mesh_smoothed_loudness, self.background_reactive);
         if self.playback_active {
             self.mesh_time += dt * speed;
         }
@@ -1435,6 +1448,9 @@ impl LyricsRenderer {
         let bottom_chrome = self
             .player_interaction
             .bottom_chrome_sample(self.player_screen, frame_now);
+        let (queue_scroll_y, queue_scroll_animating) =
+            self.sample_queue_scroll(frame_now, bottom_chrome);
+        let queue_reorder = self.queue_reorder.sample();
 
         let phase = Instant::now();
         let (
@@ -1600,16 +1616,13 @@ impl LyricsRenderer {
         // to the pixel grid removes the seam.
         let phase = Instant::now();
         let band_left = lyrics_clip_left.round().clamp(0.0, width);
-        let band_right = (width - lyrics_clip_right)
-            .round()
-            .clamp(band_left, width);
+        let band_right = (width - lyrics_clip_right).round().clamp(band_left, width);
         let band_top = content_top.round();
         let band_bottom = (height as f32 - content_bottom).round();
-        let inset_lyrics =
-            content_top > 0.0
-                || content_bottom > 0.0
-                || lyrics_clip_left > 0.0
-                || lyrics_clip_right > 0.0;
+        let inset_lyrics = content_top > 0.0
+            || content_bottom > 0.0
+            || lyrics_clip_left > 0.0
+            || lyrics_clip_right > 0.0;
         let player_scene = scene.player.is_some();
         let (player_lyrics_alpha, player_lyrics_scale) = if player_scene {
             player_transition.content_transform(player::PlayerScreenInput::Lyrics)
@@ -1930,10 +1943,13 @@ impl LyricsRenderer {
                 canvas,
                 &self.skia_typefaces,
                 self.mesh_gradient.as_ref().map(|mesh| mesh.thumbnail()),
+                &self.queue_artworks,
                 player,
                 &mut self.player_interaction,
                 player_transition,
                 bottom_chrome,
+                queue_scroll_y,
+                queue_reorder,
                 current_time_ms,
             )
         } else {
@@ -1988,6 +2004,7 @@ impl LyricsRenderer {
             || background_animating
             || focus_scale_animating
             || player_animating
+            || queue_scroll_animating
         {
             1
         } else {
@@ -2101,11 +2118,14 @@ impl LyricsRenderer {
             self.pending_lyric_click_seek = None;
             return -1;
         }
-        let content_bottom = scene.player.as_ref().map_or(scene.config.content_bottom, |player| {
-            self.player_interaction
-                .bottom_chrome_sample(self.player_screen, Instant::now())
-                .content_bottom(player.layout)
-        });
+        let content_bottom = scene
+            .player
+            .as_ref()
+            .map_or(scene.config.content_bottom, |player| {
+                self.player_interaction
+                    .bottom_chrome_sample(self.player_screen, Instant::now())
+                    .content_bottom(player.layout)
+            });
 
         if x < 0.0 || y < 0.0 || x > scene.config.width as f32 || y > scene.config.height as f32 {
             self.pending_lyric_click_seek = None;
@@ -3044,7 +3064,10 @@ mod tests {
         let visible_focus_y = layout::resolve_keep_alive(&chrome, &scene.style.spacing)
             + scene.style.spacing.line_padding * chrome.lyrics_layout_scale;
 
-        assert!(!chrome.landscape_player, "no desktop two-pane chrome without top bar");
+        assert!(
+            !chrome.landscape_player,
+            "no desktop two-pane chrome without top bar"
+        );
         assert!((chrome.lyrics_layout_scale - 1.2).abs() < 0.001);
         assert!((chrome.focus_y.expect("landscape focus") - 302.4).abs() < 0.01);
         assert!((visible_focus_y - 302.4).abs() < 0.01);
@@ -3477,21 +3500,24 @@ mod tests {
             .iter()
             .flat_map(|row| row.syllable_segments.iter())
             .collect::<Vec<_>>();
-        assert_eq!(segments.first().map(|segment| segment.progress_start), Some(0.0));
-        assert_eq!(segments.last().map(|segment| segment.progress_end), Some(1.0));
-        assert!(segments.windows(2).all(|pair| {
-            (pair[0].progress_end - pair[1].progress_start).abs() < 0.001
-        }));
+        assert_eq!(
+            segments.first().map(|segment| segment.progress_start),
+            Some(0.0)
+        );
+        assert_eq!(
+            segments.last().map(|segment| segment.progress_end),
+            Some(1.0)
+        );
+        assert!(segments
+            .windows(2)
+            .all(|pair| { (pair[0].progress_end - pair[1].progress_start).abs() < 0.001 }));
 
         let PreparedLineKind::Karaoke { text: short, .. } = &prepared.lines[1].kind else {
             panic!("short syllable should remain karaoke text");
         };
         assert_eq!(short.rows.len(), 1, "Ohh should not be split unnecessarily");
 
-        let PreparedLineKind::Karaoke {
-            text: unspaced, ..
-        } = &prepared.lines[2].kind
-        else {
+        let PreparedLineKind::Karaoke { text: unspaced, .. } = &prepared.lines[2].kind else {
             panic!("unspaced syllable should remain karaoke text");
         };
         assert!(
@@ -3715,12 +3741,8 @@ mod tests {
 
     #[test]
     fn mesh_loudness_filter_is_frame_rate_independent() {
-        let at_60_hz = (0..60).fold(0.0, |value, _| {
-            smooth_mesh_loudness(value, 1.0, 1.0 / 60.0)
-        });
-        let at_30_hz = (0..30).fold(0.0, |value, _| {
-            smooth_mesh_loudness(value, 1.0, 1.0 / 30.0)
-        });
+        let at_60_hz = (0..60).fold(0.0, |value, _| smooth_mesh_loudness(value, 1.0, 1.0 / 60.0));
+        let at_30_hz = (0..30).fold(0.0, |value, _| smooth_mesh_loudness(value, 1.0, 1.0 / 30.0));
         assert!((at_60_hz - at_30_hz).abs() < 1.0e-5);
 
         let released = smooth_mesh_loudness(at_60_hz, 0.0, 0.1);

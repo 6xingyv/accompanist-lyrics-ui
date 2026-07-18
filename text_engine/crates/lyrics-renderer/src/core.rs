@@ -347,6 +347,14 @@ impl TextEngine {
         self.renderer.clear_background();
     }
 
+    pub fn set_queue_artwork(&mut self, key: String, pixels: &[u32], width: usize, height: usize) {
+        self.renderer.set_queue_artwork(key, pixels, width, height);
+    }
+
+    pub fn clear_queue_artworks(&mut self) {
+        self.renderer.clear_queue_artworks();
+    }
+
     /// Update playback state driving the background (time flow + audio reactivity).
     pub fn set_playback_state(&mut self, playing: bool, reactive: bool) {
         self.renderer.set_playback_state(playing, reactive);
@@ -356,8 +364,7 @@ impl TextEngine {
     /// play/pause). Prefer this over host-wired isPlaying/duration when a
     /// process-local music engine is available.
     pub fn set_player_live_playback(&mut self, playing: bool, duration_ms: i32) {
-        self.renderer
-            .set_player_live_playback(playing, duration_ms);
+        self.renderer.set_player_live_playback(playing, duration_ms);
     }
 
     pub fn clear_player_live_playback(&mut self) {
@@ -397,6 +404,22 @@ impl TextEngine {
 
     pub fn cancel_player_pointer(&mut self) {
         self.renderer.cancel_player_pointer();
+    }
+
+    pub fn begin_queue_reorder(&mut self, x: f32, y: f32) -> i32 {
+        self.renderer.begin_queue_reorder(x, y)
+    }
+
+    pub fn update_queue_reorder(&mut self, y: f32) {
+        self.renderer.update_queue_reorder(y);
+    }
+
+    pub fn finish_queue_reorder(&mut self) -> i64 {
+        self.renderer.finish_queue_reorder()
+    }
+
+    pub fn cancel_queue_reorder(&mut self) {
+        self.renderer.cancel_queue_reorder();
     }
 
     pub fn begin_lyrics_scroll(&mut self) {

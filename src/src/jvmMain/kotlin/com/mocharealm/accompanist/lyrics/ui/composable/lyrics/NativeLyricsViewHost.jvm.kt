@@ -35,6 +35,7 @@ internal actual fun NativeLyricsViewHost(
     onControlsClick: (() -> Unit)?,
     playerChrome: NativePlayerChrome?,
     onPlayerAction: ((NativePlayerAction) -> Unit)?,
+    onQueueReordered: ((Int, Int) -> Unit)?,
 ) {
     val density = LocalDensity.current
     val fontResourceBytes = rememberFontResourceBytes(fontResource)

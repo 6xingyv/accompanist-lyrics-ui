@@ -174,6 +174,7 @@ internal data class PlayerWire(
 internal data class PlayerQueueItemWire(
     val title: String,
     val artist: String,
+    val artworkKey: String = "",
 )
 
 /** The player top bar rendered inside the surface: album thumbnail + title/artist +

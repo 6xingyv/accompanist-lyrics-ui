@@ -30,7 +30,7 @@ impl LyricsRenderer {
     /// Scroll spring + manual-scroll physics for the current scene, or the
     /// built-in defaults (identical to the original constants) when no scene is
     /// set — so unit tests on a bare `LyricsRenderer` behave exactly as before.
-    fn scroll_params(&self) -> ScrollParams {
+    pub(super) fn scroll_params(&self) -> ScrollParams {
         self.scene
             .as_ref()
             .map(|scene| scene.config.scroll_params)
@@ -62,6 +62,10 @@ impl LyricsRenderer {
     }
 
     pub fn begin_manual_scroll(&mut self) {
+        if self.player_screen == PlayerScreenInput::Queue {
+            self.begin_queue_scroll();
+            return;
+        }
         if !self.lyrics_input_enabled() {
             return;
         }
@@ -75,6 +79,10 @@ impl LyricsRenderer {
     }
 
     pub fn scroll_manual_by(&mut self, delta_y: f32) {
+        if self.player_screen == PlayerScreenInput::Queue {
+            self.scroll_queue_by(delta_y);
+            return;
+        }
         if !self.lyrics_input_enabled() || !delta_y.is_finite() {
             return;
         }
@@ -87,6 +95,10 @@ impl LyricsRenderer {
     }
 
     pub fn end_manual_scroll(&mut self, velocity_y: f32) {
+        if self.player_screen == PlayerScreenInput::Queue {
+            self.end_queue_scroll(velocity_y);
+            return;
+        }
         if !self.lyrics_input_enabled() {
             return;
         }
@@ -101,6 +113,10 @@ impl LyricsRenderer {
     }
 
     pub fn cancel_manual_scroll(&mut self) {
+        if self.player_screen == PlayerScreenInput::Queue {
+            self.cancel_queue_scroll();
+            return;
+        }
         let now = Instant::now();
         self.manual_scroll.dragging = false;
         self.manual_scroll.velocity = 0.0;

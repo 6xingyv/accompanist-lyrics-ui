@@ -144,6 +144,8 @@ class RustSkiaLyricsView @JvmOverloads constructor(
     private var onControlsClicked: (() -> Unit)? = null
     private var playerWire: PlayerWire? = null
     private var onPlayerAction: ((Int) -> Unit)? = null
+    private data class QueueArtworkPixels(val pixels: IntArray, val width: Int, val height: Int)
+    private val queueArtworkPixels = LinkedHashMap<String, QueueArtworkPixels>()
 
     // --- Dedicated render thread ---------------------------------------------
     // The EGL context is created, used (draw + blocking eglSwapBuffers), and
@@ -208,10 +210,12 @@ class RustSkiaLyricsView @JvmOverloads constructor(
     private var velocityTracker: VelocityTracker? = null
     private var activePointerId = MotionEvent.INVALID_POINTER_ID
     private var isDragging = false
+    private var isQueueReordering = false
     private var downY = 0f
     private var lastTouchY = 0f
     private var onLineClicked: ((Int) -> Unit)? = null
     private var onLinePressed: ((Int) -> Unit)? = null
+    private var onQueueReordered: ((Int, Int) -> Unit)? = null
 
     private val gestureDetector = GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
         override fun onDown(e: MotionEvent): Boolean = true
@@ -229,6 +233,15 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         }
 
         override fun onLongPress(e: MotionEvent) {
+            if (playerWire != null && !engineClosed) {
+                val index = engine.beginQueueReorder(e.x * renderScale, e.y * renderScale)
+                if (index >= 0) {
+                    isQueueReordering = true
+                    velocityTracker?.clear()
+                    requestRender()
+                    return
+                }
+            }
             hitTestLine(e.x, e.y)?.let { lineIndex ->
                 onLinePressed?.invoke(lineIndex)
             }
@@ -407,7 +420,7 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         queueTitle: String = "",
         queueSource: String = "",
         queueFilter: String = "upNext",
-        queueItems: List<Pair<String, String>> = emptyList(),
+        queueItems: List<Triple<String, String, String?>> = emptyList(),
     ) {
         require(screen == "lyrics" || screen == "artwork" || screen == "queue") {
             "screen must be lyrics, artwork, or queue"
@@ -426,8 +439,12 @@ class RustSkiaLyricsView @JvmOverloads constructor(
                 queueTitle = queueTitle,
                 queueSource = queueSource,
                 queueFilter = queueFilter,
-                queueItems = queueItems.map { (itemTitle, itemArtist) ->
-                    PlayerQueueItemWire(title = itemTitle, artist = itemArtist)
+                queueItems = queueItems.map { (itemTitle, itemArtist, artworkKey) ->
+                    PlayerQueueItemWire(
+                        title = itemTitle,
+                        artist = itemArtist,
+                        artworkKey = artworkKey.orEmpty(),
+                    )
                 },
             )
         }
@@ -441,6 +458,24 @@ class RustSkiaLyricsView @JvmOverloads constructor(
      * play/pause=4, next=5, lyrics=6, output=7, queue=8; queue filters=9..12. */
     fun setOnPlayerAction(callback: ((Int) -> Unit)?) {
         onPlayerAction = callback
+    }
+
+    fun setOnQueueReordered(callback: ((Int, Int) -> Unit)?) {
+        onQueueReordered = callback
+    }
+
+    fun clearQueueArtworks() {
+        queueArtworkPixels.clear()
+        if (!engineClosed) postPlayerCommand { engine.clearQueueArtworks() }
+    }
+
+    fun setQueueArtwork(key: String, pixels: IntArray, width: Int, height: Int) {
+        val current = queueArtworkPixels[key]
+        if (current?.pixels === pixels && current.width == width && current.height == height) return
+        queueArtworkPixels[key] = QueueArtworkPixels(pixels, width, height)
+        if (!engineClosed) postPlayerCommand {
+            engine.setQueueArtwork(key, pixels, width, height)
+        }
     }
 
     /**
@@ -820,6 +855,7 @@ class RustSkiaLyricsView @JvmOverloads constructor(
             MotionEvent.ACTION_DOWN -> {
                 parent?.requestDisallowInterceptTouchEvent(true)
                 isDragging = false
+                isQueueReordering = false
                 activePointerId = event.getPointerId(0)
                 downY = event.y
                 lastTouchY = event.y
@@ -845,6 +881,11 @@ class RustSkiaLyricsView @JvmOverloads constructor(
                 if (pointerIndex < 0) return false
                 velocityTracker?.addMovement(event)
                 val y = event.getY(pointerIndex)
+                if (isQueueReordering) {
+                    val renderY = y * renderScale
+                    postPlayerCommand { engine.updateQueueReorder(renderY) }
+                    return true
+                }
                 if (!isDragging && abs(y - downY) > touchSlop) {
                     isDragging = true
                     lastTouchY = y
@@ -868,6 +909,20 @@ class RustSkiaLyricsView @JvmOverloads constructor(
             }
 
             MotionEvent.ACTION_UP -> {
+                if (isQueueReordering) {
+                    isQueueReordering = false
+                    postPlayerCommand {
+                        val packed = engine.finishQueueReorder()
+                        if (packed >= 0L) {
+                            val from = (packed ushr 32).toInt()
+                            val to = packed.toInt()
+                            if (from != to) post { onQueueReordered?.invoke(from, to) }
+                        }
+                    }
+                    recycleTouchState()
+                    parent?.requestDisallowInterceptTouchEvent(false)
+                    return true
+                }
                 val wasDragging = isDragging
                 velocityTracker?.addMovement(event)
                 if (wasDragging) {
@@ -893,6 +948,10 @@ class RustSkiaLyricsView @JvmOverloads constructor(
             }
 
             MotionEvent.ACTION_CANCEL -> {
+                if (isQueueReordering) {
+                    isQueueReordering = false
+                    postPlayerCommand { engine.cancelQueueReorder() }
+                }
                 if (playerWire != null) postPlayerCommand { engine.cancelPlayerPointer() }
                 postScrollCommand {
                     applyPendingScrollOnRenderThread()
@@ -1160,6 +1219,9 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         // configureFonts recreates the native engine (nativeInit), which drops the
         // renderer's mesh-gradient background and playback state — re-apply them.
         applyBackgroundArt()
+        queueArtworkPixels.forEach { (key, art) ->
+            engine.setQueueArtwork(key, art.pixels, art.width, art.height)
+        }
         resetManualScroll()
         // Mark dirty BEFORE (re)binding so bindRenderSurface's ensureScene rebuilds
         // with the new font. configureFonts may have recreated the engine handle,

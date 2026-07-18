@@ -327,7 +327,7 @@ const THUMBNAIL_MIN_EDGE: usize = 32;
 
 /// Build an image of the original artwork (ARGB_8888 → RGBA8888) for the top-bar
 /// thumbnail. Large sources are box-downscaled so upload always succeeds.
-fn make_thumbnail_image(pixels: &[u32], width: usize, height: usize) -> Option<Image> {
+pub(crate) fn make_thumbnail_image(pixels: &[u32], width: usize, height: usize) -> Option<Image> {
     if width == 0 || height == 0 || pixels.len() < width * height {
         return None;
     }
@@ -996,10 +996,8 @@ mod tests {
         let preset = generate_control_points(42, 5, 5);
         let controls = control_points_from_preset(&preset, &processed);
         for raw in &preset.points {
-            let bx = (((raw.x + 1.0) * 0.5 * (TEX_SIZE - 1) as f32) as i32)
-                .clamp(0, TEX_SIZE - 1);
-            let by = (((raw.y + 1.0) * 0.5 * (TEX_SIZE - 1) as f32) as i32)
-                .clamp(0, TEX_SIZE - 1);
+            let bx = (((raw.x + 1.0) * 0.5 * (TEX_SIZE - 1) as f32) as i32).clamp(0, TEX_SIZE - 1);
+            let by = (((raw.y + 1.0) * 0.5 * (TEX_SIZE - 1) as f32) as i32).clamp(0, TEX_SIZE - 1);
             let index = ((by * TEX_SIZE + bx) * 4) as usize;
             let expected = [
                 processed[index] as f32 / 255.0,
@@ -1023,8 +1021,8 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(interior.iter().any(|point| point.u_tangent[1].abs() > 0.01));
         for point in interior {
-            let dot = point.u_tangent[0] * point.v_tangent[0]
-                + point.u_tangent[1] * point.v_tangent[1];
+            let dot =
+                point.u_tangent[0] * point.v_tangent[0] + point.u_tangent[1] * point.v_tangent[1];
             assert!(dot.abs() < 1.0e-5, "U/V tangents must remain orthogonal");
         }
     }

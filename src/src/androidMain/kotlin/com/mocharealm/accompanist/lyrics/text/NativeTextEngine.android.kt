@@ -190,6 +190,20 @@ actual class NativeTextEngine actual constructor(
         if (handle != 0L) nativeCancelPlayerPointer(handle)
     }
 
+    fun beginQueueReorder(x: Float, y: Float): Int =
+        if (handle != 0L) nativeBeginQueueReorder(handle, x, y) else -1
+
+    fun updateQueueReorder(y: Float) {
+        if (handle != 0L) nativeUpdateQueueReorder(handle, y)
+    }
+
+    fun finishQueueReorder(): Long =
+        if (handle != 0L) nativeFinishQueueReorder(handle) else -1L
+
+    fun cancelQueueReorder() {
+        if (handle != 0L) nativeCancelQueueReorder(handle)
+    }
+
     /**
      * Install album artwork (ARGB_8888 pixels, `width`×`height`) for the GPU
      * mesh-gradient background and enable the full-bleed background mode. `seed`
@@ -203,6 +217,16 @@ actual class NativeTextEngine actual constructor(
     /** Disable the mesh-gradient background (revert to a transparent overlay). */
     fun clearBackground() {
         if (handle != 0L) nativeClearBackground(handle)
+    }
+
+    fun setQueueArtwork(key: String, pixels: IntArray, width: Int, height: Int) {
+        if (handle != 0L && key.isNotEmpty()) {
+            nativeSetQueueArtwork(handle, key, pixels, width, height)
+        }
+    }
+
+    fun clearQueueArtworks() {
+        if (handle != 0L) nativeClearQueueArtworks(handle)
     }
 
     /** Drive the background: `playing` gates its time flow, `reactive` its audio reactivity. */
@@ -451,6 +475,10 @@ actual class NativeTextEngine actual constructor(
     private external fun nativePlayerPointerDown(handle: Long, x: Float, y: Float): Int
     private external fun nativePlayerPointerUp(handle: Long, x: Float, y: Float): Int
     private external fun nativeCancelPlayerPointer(handle: Long)
+    private external fun nativeBeginQueueReorder(handle: Long, x: Float, y: Float): Int
+    private external fun nativeUpdateQueueReorder(handle: Long, y: Float)
+    private external fun nativeFinishQueueReorder(handle: Long): Long
+    private external fun nativeCancelQueueReorder(handle: Long)
 
     private external fun nativeSetBackgroundArt(
         handle: Long,
@@ -461,5 +489,13 @@ actual class NativeTextEngine actual constructor(
     )
 
     private external fun nativeClearBackground(handle: Long)
+    private external fun nativeSetQueueArtwork(
+        handle: Long,
+        key: String,
+        pixels: IntArray,
+        width: Int,
+        height: Int,
+    )
+    private external fun nativeClearQueueArtworks(handle: Long)
     private external fun nativeSetPlaybackState(handle: Long, playing: Boolean, reactive: Boolean)
 }

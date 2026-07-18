@@ -993,9 +993,7 @@ pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeTextE
             state
                 .engine
                 .set_playback_state(playing, state.background_reactive);
-            state
-                .engine
-                .set_player_live_playback(playing, duration_ms);
+            state.engine.set_player_live_playback(playing, duration_ms);
         }
         if state.background_reactive {
             if let Some(rms) = music_foundation_audio_rms() {
@@ -1216,6 +1214,83 @@ pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeTextE
     with_engine_mut(handle, (), |engine| {
         engine.clear_background();
     });
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeTextEngine_nativeBeginQueueReorder(
+    _env: JNIEnv,
+    _this: JObject,
+    handle: jlong,
+    x: jfloat,
+    y: jfloat,
+) -> jint {
+    with_engine_mut(handle, -1, |engine| engine.begin_queue_reorder(x, y))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeTextEngine_nativeUpdateQueueReorder(
+    _env: JNIEnv,
+    _this: JObject,
+    handle: jlong,
+    y: jfloat,
+) {
+    with_engine_mut(handle, (), |engine| engine.update_queue_reorder(y));
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeTextEngine_nativeFinishQueueReorder(
+    _env: JNIEnv,
+    _this: JObject,
+    handle: jlong,
+) -> jlong {
+    with_engine_mut(handle, -1, |engine| engine.finish_queue_reorder())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeTextEngine_nativeCancelQueueReorder(
+    _env: JNIEnv,
+    _this: JObject,
+    handle: jlong,
+) {
+    with_engine_mut(handle, (), |engine| engine.cancel_queue_reorder());
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeTextEngine_nativeSetQueueArtwork(
+    env: JNIEnv,
+    _this: JObject,
+    handle: jlong,
+    key: JString,
+    pixels: jintArray,
+    width: jint,
+    height: jint,
+) {
+    if width <= 0 || height <= 0 {
+        return;
+    }
+    let Ok(key): Result<String, _> = env.get_string(key).map(Into::into) else {
+        return;
+    };
+    let expected = (width as usize) * (height as usize);
+    if (env.get_array_length(pixels).unwrap_or(0) as usize) < expected {
+        return;
+    }
+    let Ok(argb) = env.get_primitive_array_critical(pixels, ReleaseMode::NoCopyBack) else {
+        return;
+    };
+    let pixels = std::slice::from_raw_parts(argb.as_ptr() as *const u32, expected);
+    with_engine_mut(handle, (), |engine| {
+        engine.set_queue_artwork(key, pixels, width as usize, height as usize);
+    });
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeTextEngine_nativeClearQueueArtworks(
+    _env: JNIEnv,
+    _this: JObject,
+    handle: jlong,
+) {
+    with_engine_mut(handle, (), |engine| engine.clear_queue_artworks());
 }
 
 #[no_mangle]

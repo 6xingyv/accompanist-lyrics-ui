@@ -1,9 +1,13 @@
 package com.mocharealm.accompanist.lyrics.ui.composable.lyrics
 
+import android.content.Context
+import android.graphics.BitmapFactory
+import android.net.Uri
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -13,6 +17,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.mocharealm.accompanist.lyrics.core.model.ISyncedLine
 import com.mocharealm.accompanist.lyrics.core.model.SyncedLyrics
@@ -20,7 +25,9 @@ import com.mocharealm.accompanist.lyrics.ui.renderer.RustSkiaLyricsView
 import com.mocharealm.accompanist.lyrics.ui.renderer.toSceneStyle
 import org.jetbrains.compose.resources.FontResource
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @Composable
 internal actual fun NativeLyricsViewHost(
@@ -43,6 +50,7 @@ internal actual fun NativeLyricsViewHost(
     onControlsClick: (() -> Unit)?,
     playerChrome: NativePlayerChrome?,
     onPlayerAction: ((NativePlayerAction) -> Unit)?,
+    onQueueReordered: ((Int, Int) -> Unit)?,
 ) {
     val context = LocalContext.current
     val nativeView = remember(context) { NativeLyricsViewPool.acquire(context) }
@@ -65,6 +73,7 @@ internal actual fun NativeLyricsViewHost(
         with(density) { contentPadding.calculateRightPadding(layoutDirection).toPx() }
     val latestControlsClick by rememberUpdatedState(onControlsClick)
     val latestPlayerAction by rememberUpdatedState(onPlayerAction)
+    val latestQueueReordered by rememberUpdatedState(onQueueReordered)
     val latestLyrics by rememberUpdatedState(lyrics)
     val latestLineClicked by rememberUpdatedState(onLineClicked)
     val latestLinePressed by rememberUpdatedState(onLinePressed)
@@ -90,6 +99,30 @@ internal actual fun NativeLyricsViewHost(
         { index: Int ->
             latestLyrics.lines.getOrNull(index)?.let { latestLinePressed(it) }
             Unit
+        }
+    }
+    val nativeQueueReordered = remember {
+        { from: Int, to: Int ->
+            latestQueueReordered?.invoke(from, to)
+            Unit
+        }
+    }
+    val queueArtworkUris = remember(playerChrome?.queueItems) {
+        playerChrome?.queueItems
+            ?.mapNotNull { it.artworkUri?.takeIf(String::isNotBlank) }
+            ?.distinct()
+            .orEmpty()
+    }
+    val queueArtworkTargetPx = with(density) { 96.dp.roundToPx() }.coerceAtLeast(48)
+
+    LaunchedEffect(nativeView, queueArtworkUris, queueArtworkTargetPx) {
+        nativeView.clearQueueArtworks()
+        if (queueArtworkUris.isEmpty()) return@LaunchedEffect
+        queueArtworkUris.forEach { uri ->
+            val decoded = withContext(Dispatchers.IO) {
+                decodeQueueArtwork(context, uri, queueArtworkTargetPx)
+            } ?: return@forEach
+            nativeView.setQueueArtwork(uri, decoded.first, decoded.second, decoded.third)
         }
     }
 
@@ -139,12 +172,16 @@ internal actual fun NativeLyricsViewHost(
                 queueTitle = playerChrome.queueTitle,
                 queueSource = playerChrome.queueSource,
                 queueFilter = playerChrome.queueFilter.wireValue,
-                queueItems = playerChrome.queueItems.map { it.title to it.artist },
+                queueItems = playerChrome.queueItems.map {
+                    Triple(it.title, it.artist, it.artworkUri)
+                },
             )
             setOnPlayerAction(nativePlayerAction)
+            setOnQueueReordered(nativeQueueReordered)
         } else {
             setPlayerChrome(title = null)
             setOnPlayerAction(null)
+            setOnQueueReordered(null)
             setTopBar(title, artist)
             setOnControlsClicked(nativeControlsClick)
         }
@@ -166,3 +203,34 @@ internal actual fun NativeLyricsViewHost(
         modifier = modifier.fillMaxSize()
     )
 }
+
+private fun decodeQueueArtwork(
+    context: Context,
+    uriString: String,
+    targetPx: Int,
+): Triple<IntArray, Int, Int>? = runCatching {
+    val uri = Uri.parse(uriString)
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return@runCatching null
+    var sample = 1
+    while (bounds.outWidth / (sample * 2) >= targetPx &&
+        bounds.outHeight / (sample * 2) >= targetPx
+    ) {
+        sample *= 2
+    }
+    val options = BitmapFactory.Options().apply {
+        inSampleSize = sample
+        inPreferredConfig = android.graphics.Bitmap.Config.ARGB_8888
+    }
+    val bitmap = context.contentResolver.openInputStream(uri)?.use {
+        BitmapFactory.decodeStream(it, null, options)
+    } ?: return@runCatching null
+    try {
+        val pixels = IntArray(bitmap.width * bitmap.height)
+        bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
+        Triple(pixels, bitmap.width, bitmap.height)
+    } finally {
+        bitmap.recycle()
+    }
+}.getOrNull()

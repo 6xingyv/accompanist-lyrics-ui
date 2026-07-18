@@ -57,6 +57,7 @@ fun KaraokeLyricsView(
     onControlsClick: (() -> Unit)? = null,
     playerChrome: NativePlayerChrome? = null,
     onPlayerAction: ((NativePlayerAction) -> Unit)? = null,
+    onQueueReordered: ((fromIndex: Int, toIndex: Int) -> Unit)? = null,
 ) {
     NativeLyricsViewHost(
         lyrics = lyrics,
@@ -78,5 +79,6 @@ fun KaraokeLyricsView(
         onControlsClick = onControlsClick,
         playerChrome = playerChrome,
         onPlayerAction = onPlayerAction,
+        onQueueReordered = onQueueReordered,
     )
 }
