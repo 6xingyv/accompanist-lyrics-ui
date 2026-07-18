@@ -294,25 +294,16 @@ class RustSkiaLyricsView @JvmOverloads constructor(
 
     fun setLyrics(lyrics: SyncedLyrics?) {
         if (this.lyrics === lyrics) return
-        val oldLocale = this.lyrics?.detectNativeLyricsLocale()
-        val newLocale = lyrics?.detectNativeLyricsLocale()
         this.lyrics = lyrics
         resetManualScroll()
         sceneDirty = true
-        // Empty / null lyrics always detect as en-US. Reconfiguring fonts on that
-        // transient state (track change: clear → EmptyLyrics → real lyrics) tears
-        // down EGL and recreates the native engine mid-playback, which has been
-        // observed as SIGABRT on the lyrics-render thread when the next song starts.
-        // Only rebind fonts when non-empty lyrics actually change locale.
-        val shouldReconfigureFonts = lyrics != null &&
-            lyrics.lines.isNotEmpty() &&
-            oldLocale != null &&
-            oldLocale != newLocale
-        if (shouldReconfigureFonts) {
-            applyCurrentFontConfig()
-        } else {
-            rebuildSceneAndRender()
-        }
+        // Locale is part of the scene wire and Android system-font matching is
+        // performed lazily while shaping that scene. A locale change therefore
+        // does not require configureFonts(). Reinitialising fonts here replaced
+        // the complete native EngineState, tore down EGL, and exposed the black
+        // TextureView underlay for a frame on track changes (especially after the
+        // transient EmptyLyrics scene, whose detected locale is en-US).
+        rebuildSceneAndRender()
     }
 
     /**
