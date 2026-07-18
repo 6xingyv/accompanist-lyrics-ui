@@ -48,6 +48,9 @@ private const val FRAME_INTERVAL_TOLERANCE_NANOS = 1_000_000L
 private const val CHOREOGRAPHER_STALL_TIMEOUT_MS = 50L
 /** Recheck the native music-foundation clock without a Kotlin playback-state loop. */
 private const val NATIVE_CLOCK_IDLE_POLL_MS = 250L
+/** JNI result codes that specifically mean the EGL/window surface is unusable. */
+private const val RENDER_SURFACE_MISSING = -20
+private const val RENDER_PRESENT_FAILED = -21
 
 class RustSkiaLyricsView @JvmOverloads constructor(
     context: Context,
@@ -294,25 +297,14 @@ class RustSkiaLyricsView @JvmOverloads constructor(
 
     fun setLyrics(lyrics: SyncedLyrics?) {
         if (this.lyrics === lyrics) return
-        val oldLocale = this.lyrics?.detectNativeLyricsLocale()
-        val newLocale = lyrics?.detectNativeLyricsLocale()
         this.lyrics = lyrics
         resetManualScroll()
         sceneDirty = true
-        // Empty / null lyrics always detect as en-US. Reconfiguring fonts on that
-        // transient state (track change: clear → EmptyLyrics → real lyrics) tears
-        // down EGL and recreates the native engine mid-playback, which has been
-        // observed as SIGABRT on the lyrics-render thread when the next song starts.
-        // Only rebind fonts when non-empty lyrics actually change locale.
-        val shouldReconfigureFonts = lyrics != null &&
-            lyrics.lines.isNotEmpty() &&
-            oldLocale != null &&
-            oldLocale != newLocale
-        if (shouldReconfigureFonts) {
-            applyCurrentFontConfig()
-        } else {
-            rebuildSceneAndRender()
-        }
+        // set_scene_json applies the scene locale to cosmic-text and Android's
+        // AFontMatcher while retaining the already-loaded font database. Re-running
+        // configureFonts here would replace EngineState and EGL just as the valid
+        // empty loading scene is replaced by the new track's lyrics.
+        rebuildSceneAndRender()
     }
 
     /**
@@ -736,7 +728,7 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         } else {
             engine.renderLyricsFrameToSurface(frameTimeMs)
         }
-        if (result < 0) {
+        if (result == RENDER_SURFACE_MISSING || result == RENDER_PRESENT_FAILED) {
             LyricsUiDiagnostics.record(
                 "render",
                 "surface lost result=$result timeMs=$frameTimeMs handlerPump=$useHandlerFramePump",
@@ -746,6 +738,21 @@ class RustSkiaLyricsView @JvmOverloads constructor(
             surfaceReady = false
             cancelScheduledFrame()
             engine.clearRenderSurface()
+            return
+        }
+        if (result < 0) {
+            // Renderer/scene errors (for example the JNI panic guard's -22) do
+            // not invalidate EGL. Clearing the render surface here used to turn
+            // one bad transition frame into a permanent black screen because a
+            // still-alive TextureView does not emit another available callback.
+            LyricsUiDiagnostics.record(
+                "render",
+                "frame rejected result=$result timeMs=$frameTimeMs; retaining surface",
+            )
+            cancelScheduledFrame()
+            if (useMusicFoundationClock && surfaceReady) {
+                renderHandler?.postDelayed(nativeClockIdlePoll, NATIVE_CLOCK_IDLE_POLL_MS)
+            }
             return
         }
         val renderKind = result.coerceIn(0, 1)
@@ -1071,7 +1078,7 @@ class RustSkiaLyricsView @JvmOverloads constructor(
             } else {
                 null to 0f
             }
-            engine.setLyricsSceneDirect(
+            val sceneApplied = engine.setLyricsSceneDirect(
                 sceneLyrics.toSceneJson(
                     sceneWidth,
                     sceneHeight,
@@ -1089,6 +1096,16 @@ class RustSkiaLyricsView @JvmOverloads constructor(
                     player = playerWire,
                 )
             )
+            if (!sceneApplied) {
+                // Preserve the last valid native scene and retry on the next
+                // state/size update. Marking this clean used to hide a failed JNI
+                // submission indefinitely while the render surface showed black.
+                LyricsUiDiagnostics.record(
+                    "scene",
+                    "setLyricsSceneDirect rejected lines=${sceneLyrics.lines.size} size=${sceneWidth}x$sceneHeight",
+                )
+                return false
+            }
             sceneDirty = false
         }
         return true

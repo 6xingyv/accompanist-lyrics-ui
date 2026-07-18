@@ -2266,6 +2266,14 @@ impl PreparedScene {
     /// `end == next.start` as overlap would chain an entire gapless run into one
     /// group and freeze auto-scroll on its first line for the whole run.
     fn focus_group_range(&self, current_time_ms: i32) -> (usize, usize) {
+        // The Android player deliberately installs an empty lyrics scene while
+        // the next track's lyrics are loading so artwork and player chrome stay
+        // usable. Keep every focus query total for that valid scene: the range
+        // below indexes `self.lines`, so its usual saturating fallback is not
+        // sufficient when the collection itself is empty.
+        if self.lines.is_empty() {
+            return (0, 0);
+        }
         let (mut first, mut last) = self.focus_index_range(current_time_ms);
         // Cap the batch at `MAX_SCROLL_GROUP_ROWS` wrapped rows so a long run of
         // overlapping lines (a duet trade, or a main line plus a tall
@@ -2912,6 +2920,32 @@ mod tests {
             player: None,
         };
         assert_eq!(wide_scene.blur_radius_for_screen_y(far, 0.0), 0.0);
+    }
+
+    #[test]
+    fn empty_scene_has_an_empty_safe_focus_group() {
+        let scene = PreparedScene {
+            config: test_config(),
+            lines: vec![],
+            content_height: 0.0,
+            top_bar: None,
+            player: None,
+        };
+
+        assert_eq!(scene.focus_group_range(0), (0, 0));
+        assert_eq!(scene.focus_group_range(10_000), (0, 0));
+    }
+
+    #[test]
+    fn empty_lyrics_scene_renders_player_loading_frame_without_panicking() {
+        let mut renderer = LyricsRenderer::new();
+        renderer
+            .set_scene_json(r#"{"width":390,"height":844,"lines":[]}"#)
+            .expect("empty lyrics is a valid scene");
+        let mut surface =
+            skia_safe::surfaces::raster_n32_premul((390, 844)).expect("raster test surface");
+
+        assert!(renderer.render_frame_to_canvas(0, surface.canvas()) >= 0);
     }
 
     #[test]
