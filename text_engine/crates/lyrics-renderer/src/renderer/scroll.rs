@@ -62,6 +62,9 @@ impl LyricsRenderer {
     }
 
     pub fn begin_manual_scroll(&mut self) {
+        if !self.lyrics_input_enabled() {
+            return;
+        }
         let now = Instant::now();
         self.manual_scroll.dragging = true;
         self.manual_scroll.velocity = 0.0;
@@ -72,7 +75,7 @@ impl LyricsRenderer {
     }
 
     pub fn scroll_manual_by(&mut self, delta_y: f32) {
-        if !delta_y.is_finite() {
+        if !self.lyrics_input_enabled() || !delta_y.is_finite() {
             return;
         }
         self.manual_scroll.offset += delta_y;
@@ -84,6 +87,9 @@ impl LyricsRenderer {
     }
 
     pub fn end_manual_scroll(&mut self, velocity_y: f32) {
+        if !self.lyrics_input_enabled() {
+            return;
+        }
         let now = Instant::now();
         self.manual_scroll.dragging = false;
         let max_fling = self.scroll_params().max_fling_velocity;

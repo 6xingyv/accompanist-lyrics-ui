@@ -1228,6 +1228,10 @@ impl LyricsRenderer {
         self.player_screen = screen;
         self.player_screen_initialized = true;
         self.player_interaction.reveal();
+        if screen != PlayerScreenInput::Lyrics {
+            self.reset_manual_scroll();
+            self.pending_lyric_click_seek = None;
+        }
         if let Some(player) = self
             .scene
             .as_mut()
@@ -2093,6 +2097,10 @@ impl LyricsRenderer {
             self.pending_lyric_click_seek = None;
             return -1;
         };
+        if !self.lyrics_input_enabled() {
+            self.pending_lyric_click_seek = None;
+            return -1;
+        }
         let content_bottom = scene.player.as_ref().map_or(scene.config.content_bottom, |player| {
             self.player_interaction
                 .bottom_chrome_sample(self.player_screen, Instant::now())

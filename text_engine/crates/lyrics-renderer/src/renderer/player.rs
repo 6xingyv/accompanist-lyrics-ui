@@ -862,6 +862,14 @@ impl PlayerIcons {
 }
 
 impl LyricsRenderer {
+    pub(super) fn lyrics_input_enabled(&self) -> bool {
+        self.scene
+            .as_ref()
+            .and_then(|scene| scene.player.as_ref())
+            .is_none()
+            || self.player_screen == PlayerScreenInput::Lyrics
+    }
+
     pub(super) fn prepare_player(
         &mut self,
         input: Option<&PlayerInput>,
@@ -2120,6 +2128,25 @@ mod tests {
             state.press(&queue_ui, 153.0, 199.0),
             PlayerButton::QueueShuffle as i32
         );
+    }
+
+    #[test]
+    fn queue_ui_hit_test_matches_every_resolved_control_center() {
+        let layout = PlayerLayout::resolve(393.0, 852.0);
+        let ui = PlayerUiLayout::resolve(layout, PlayerScreenInput::Queue);
+        let visible = BottomChromeSample {
+            visibility: 1.0,
+            active: false,
+        };
+        assert_eq!(ui.controls.len(), 12);
+        for control in &ui.controls {
+            assert_eq!(
+                ui.hit_test(control.center, visible),
+                Some(control.button),
+                "center must hit {:?}",
+                control.button,
+            );
+        }
     }
 
     #[test]
