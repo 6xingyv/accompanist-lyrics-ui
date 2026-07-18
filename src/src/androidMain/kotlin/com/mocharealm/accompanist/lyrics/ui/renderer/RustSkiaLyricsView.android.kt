@@ -4,8 +4,6 @@ import android.animation.ValueAnimator
 import android.content.Context
 import android.graphics.Color
 import android.graphics.Outline
-import android.graphics.Path
-import android.graphics.RectF
 import android.graphics.SurfaceTexture
 import android.os.Handler
 import android.os.HandlerThread
@@ -163,8 +161,6 @@ class RustSkiaLyricsView @JvmOverloads constructor(
     private var playerExpansionAnimator: ValueAnimator? = null
     private var playerExpansionDragStartProgress = 0f
     private var playerExpansionGestureOwnsTarget = false
-    private val playerClipPath = Path()
-    private val playerClipRect = RectF()
     private var onPlayerAction: ((Int) -> Unit)? = null
     private data class QueueArtworkPixels(val pixels: IntArray, val width: Int, val height: Int)
     private val queueArtworkPixels = LinkedHashMap<String, QueueArtworkPixels>()
@@ -598,30 +594,24 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         val p = playerExpansionProgress.coerceIn(0f, 1f)
         val clipWidth = geometry.collapsedWidth + (width - geometry.collapsedWidth) * p
         val clipHeight = geometry.collapsedHeight + (height - geometry.collapsedHeight) * p
-        val collapsedRadius = geometry.collapsedHeight * 0.5f
-        fun radius(target: Float) = collapsedRadius + (target - collapsedRadius) * p
-        val topLeft = radius(geometry.expandedTopLeftRadius)
-        val topRight = radius(geometry.expandedTopRightRadius)
-        val bottomRight = radius(geometry.expandedBottomRightRadius)
-        val bottomLeft = radius(geometry.expandedBottomLeftRadius)
-        playerClipRect.set(0f, 0f, clipWidth, clipHeight)
-        playerClipPath.reset()
-        playerClipPath.addRoundRect(
-            playerClipRect,
-            floatArrayOf(
-                topLeft, topLeft,
-                topRight, topRight,
-                bottomRight, bottomRight,
-                bottomLeft, bottomLeft,
-            ),
-            Path.Direction.CW,
+        // TextureView + arbitrary Path outlines are expensive and have stalled
+        // some vendor renderers. Screen corners are symmetric on supported
+        // Android devices, so use the hardware round-rect outline fast path.
+        val expandedRadius = maxOf(
+            geometry.expandedTopLeftRadius,
+            geometry.expandedTopRightRadius,
+            geometry.expandedBottomRightRadius,
+            geometry.expandedBottomLeftRadius,
         )
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
-            outline.setPath(playerClipPath)
-        } else {
-            @Suppress("DEPRECATION")
-            outline.setConvexPath(playerClipPath)
-        }
+        val radius = geometry.collapsedRadius +
+            (expandedRadius - geometry.collapsedRadius) * p
+        outline.setRoundRect(
+            0,
+            0,
+            clipWidth.roundToInt().coerceAtLeast(1),
+            clipHeight.roundToInt().coerceAtLeast(1),
+            radius.coerceAtLeast(0f),
+        )
     }
 
     /** Stable native action codes: favorite=1, more=2, previous=3,

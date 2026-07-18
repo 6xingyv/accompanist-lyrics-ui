@@ -48,6 +48,7 @@ data class NativePlayerExpansionGeometry(
     val collapsedTop: Float,
     val collapsedWidth: Float,
     val collapsedHeight: Float,
+    val collapsedRadius: Float,
     val expandedTopLeftRadius: Float = 0f,
     val expandedTopRightRadius: Float = 0f,
     val expandedBottomRightRadius: Float = 0f,
