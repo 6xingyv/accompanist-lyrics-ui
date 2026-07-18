@@ -159,6 +159,8 @@ internal data class LyricsSceneWire(
 @Serializable
 internal data class PlayerWire(
     val presentation: String = "full",
+    val viewportWidth: Float? = null,
+    val viewportHeight: Float? = null,
     val screen: String = "artwork",
     val title: String,
     val artist: String,

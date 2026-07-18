@@ -418,6 +418,8 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         playing: Boolean = false,
         liked: Boolean = false,
         presentation: String = "full",
+        viewportWidth: Float? = null,
+        viewportHeight: Float? = null,
         screen: String = "artwork",
         queueTitle: String = "",
         queueSource: String = "",
@@ -436,6 +438,8 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         val next = title?.let {
             PlayerWire(
                 presentation = presentation,
+                viewportWidth = viewportWidth,
+                viewportHeight = viewportHeight,
                 screen = screen,
                 title = it,
                 artist = artist,
@@ -866,6 +870,7 @@ class RustSkiaLyricsView @JvmOverloads constructor(
 
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
+                if (playerWire != null && !isInsideVisiblePlayer(event.x, event.y)) return false
                 parent?.requestDisallowInterceptTouchEvent(true)
                 isDragging = false
                 isQueueReordering = false
@@ -976,6 +981,16 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         }
 
         return gestureDetector.onTouchEvent(event) || super.onTouchEvent(event)
+    }
+
+    private fun isInsideVisiblePlayer(x: Float, y: Float): Boolean {
+        val player = playerWire ?: return true
+        val collapsedWidth = player.viewportWidth ?: width.toFloat()
+        val collapsedHeight = player.viewportHeight ?: height.toFloat()
+        val progress = playerExpansionProgress.coerceIn(0f, 1f)
+        val visibleWidth = collapsedWidth + (width - collapsedWidth) * progress
+        val visibleHeight = collapsedHeight + (height - collapsedHeight) * progress
+        return x >= 0f && y >= 0f && x <= visibleWidth && y <= visibleHeight
     }
 
     override fun performClick(): Boolean {
@@ -1164,7 +1179,12 @@ class RustSkiaLyricsView @JvmOverloads constructor(
                     contentLeft = contentLeftPx * renderScale,
                     contentRight = contentRightPx * renderScale,
                     topBar = topBarWire,
-                    player = playerWire,
+                    player = playerWire?.let { player ->
+                        player.copy(
+                            viewportWidth = player.viewportWidth?.times(renderScale),
+                            viewportHeight = player.viewportHeight?.times(renderScale),
+                        )
+                    },
                 )
             )
             if (!sceneApplied) {

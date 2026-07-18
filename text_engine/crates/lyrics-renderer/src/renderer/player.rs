@@ -84,6 +84,8 @@ pub(crate) struct PlayerQueueItemInput {
 #[serde(default, rename_all = "camelCase")]
 pub(crate) struct PlayerInput {
     pub presentation: PlayerPresentationInput,
+    pub viewport_width: Option<f32>,
+    pub viewport_height: Option<f32>,
     pub screen: PlayerScreenInput,
     pub title: String,
     pub artist: String,
@@ -146,6 +148,7 @@ pub(super) struct PreparedPlayer {
     queue_items: Vec<PreparedQueueItem>,
     runtime_label_font: PreparedRuntimeLabelFont,
     pub layout: PlayerLayout,
+    mini_layout: PlayerLayout,
     icons: PlayerIcons,
 }
 
@@ -276,6 +279,11 @@ pub(super) struct PlayerLayout {
 impl PlayerLayout {
     pub(super) fn resolve(width: f32, height: f32) -> Self {
         let scale = (width / DESIGN_WIDTH).max(0.25);
+        Self::resolve_with_scale(width, height, scale)
+    }
+
+    fn resolve_with_scale(width: f32, height: f32, scale: f32) -> Self {
+        let scale = scale.max(0.25);
         flex_axis!(height;
             top => FlexItem::fixed((TOP_INSET + HANDLE_ROW) * scale),
             header => FlexItem::fixed(COMPACT_HEADER * scale),
@@ -1422,7 +1430,26 @@ impl LyricsRenderer {
         height: f32,
     ) -> Option<PreparedPlayer> {
         let input = input?;
-        let layout = PlayerLayout::resolve(width, height);
+        let viewport_width = input
+            .viewport_width
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .unwrap_or(width)
+            .clamp(1.0, width);
+        let viewport_height = input
+            .viewport_height
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .unwrap_or(height)
+            .clamp(1.0, height);
+        let mini_layout = PlayerLayout::resolve_with_scale(
+            viewport_width,
+            viewport_height,
+            (width / DESIGN_WIDTH).max(0.25),
+        );
+        let layout = if input.presentation == PlayerPresentationInput::Mini {
+            mini_layout
+        } else {
+            PlayerLayout::resolve(width, height)
+        };
         let saved = self.text_attrs;
         self.text_attrs = TextAttrs {
             weight: 700,
@@ -1560,6 +1587,7 @@ impl LyricsRenderer {
             queue_items,
             runtime_label_font,
             layout,
+            mini_layout,
             icons: PlayerIcons::new(),
         })
     }
@@ -1624,9 +1652,28 @@ pub(super) fn draw_player(
             interaction,
             now,
             current_time_ms,
+            1.0,
         );
     }
     let expansion = smooth_step(expansion_progress.clamp(0.0, 1.0));
+    if expansion < 0.999 {
+        let mini_ui = PlayerUiLayout::resolve(
+            player.mini_layout,
+            transition.to,
+            PlayerPresentationInput::Mini,
+        );
+        animating |= draw_mini_player(
+            canvas,
+            typefaces,
+            thumbnail,
+            player,
+            &mini_ui,
+            interaction,
+            now,
+            current_time_ms,
+            1.0 - expansion,
+        );
+    }
 
     // Drag handle — soft white pill (Plus).
     DrawCommand::RoundRect {
@@ -1798,8 +1845,9 @@ fn draw_mini_player(
     interaction: &mut PlayerInteractionState,
     now: Instant,
     current_time_ms: i32,
+    alpha: f32,
 ) -> bool {
-    let layout = player.layout;
+    let layout = ui.layout;
     let s = layout.scale;
     let mini = ui
         .mini
@@ -1807,11 +1855,11 @@ fn draw_mini_player(
     DrawCommand::RoundRect {
         rect: Rect::from_xywh(0.0, 0.0, layout.width, layout.height),
         radius: 16.0 * s,
-        color: Color4f::new(0.08, 0.08, 0.08, 0.82),
+        color: Color4f::new(0.08, 0.08, 0.08, 0.82 * alpha),
         blend: DrawBlend::SourceOver,
     }
     .draw(canvas);
-    draw_artwork(canvas, thumbnail, mini.artwork, 6.0 * s, 1.0);
+    draw_artwork(canvas, thumbnail, mini.artwork, 6.0 * s, alpha);
 
     let text_left = mini.text.left;
     let text_width = mini.text.width().max(1.0);
@@ -1825,7 +1873,7 @@ fn draw_mini_player(
         text_width,
         0.0,
         8.0 * s,
-        TEXT_PRIMARY_ALPHA,
+        TEXT_PRIMARY_ALPHA * alpha,
         current_time_ms,
     );
     animating |= draw_plus_marquee_text(
@@ -1837,7 +1885,7 @@ fn draw_mini_player(
         text_width,
         0.0,
         8.0 * s,
-        TEXT_SECONDARY_ALPHA,
+        TEXT_SECONDARY_ALPHA * alpha,
         current_time_ms,
     );
 
@@ -1863,7 +1911,7 @@ fn draw_mini_player(
             width * animation.scale,
             height * animation.scale,
             WHITE,
-            1.0,
+            alpha,
         );
     }
     animating
@@ -3114,6 +3162,17 @@ mod tests {
             serde_json::from_str(r#"{"screen":"artwork","title":"Jupiter","artist":"Coldplay"}"#)
                 .unwrap();
         assert_eq!(player.screen, PlayerScreenInput::Artwork);
+    }
+
+    #[test]
+    fn player_wire_deserializes_mini_viewport() {
+        let player: PlayerInput = serde_json::from_str(
+            r#"{"presentation":"mini","viewportWidth":361.0,"viewportHeight":60.0,"title":"Jupiter","artist":"Coldplay"}"#,
+        )
+        .unwrap();
+        assert_eq!(player.presentation, PlayerPresentationInput::Mini);
+        assert_eq!(player.viewport_width, Some(361.0));
+        assert_eq!(player.viewport_height, Some(60.0));
     }
 
     #[test]

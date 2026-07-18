@@ -12,6 +12,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -25,6 +26,7 @@ import com.mocharealm.accompanist.lyrics.ui.renderer.RustSkiaLyricsView
 import com.mocharealm.accompanist.lyrics.ui.renderer.toSceneStyle
 import org.jetbrains.compose.resources.FontResource
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -49,7 +51,7 @@ internal actual fun NativeLyricsViewHost(
     artist: String?,
     onControlsClick: (() -> Unit)?,
     playerChrome: NativePlayerChrome?,
-    playerExpansionProgress: Float,
+    playerExpansionProgress: () -> Float,
     onPlayerAction: ((NativePlayerAction) -> Unit)?,
     onQueueReordered: ((Int, Int) -> Unit)?,
 ) {
@@ -78,6 +80,7 @@ internal actual fun NativeLyricsViewHost(
     val latestLyrics by rememberUpdatedState(lyrics)
     val latestLineClicked by rememberUpdatedState(onLineClicked)
     val latestLinePressed by rememberUpdatedState(onLinePressed)
+    val latestExpansionProgress by rememberUpdatedState(playerExpansionProgress)
     val nativeControlsClick = remember {
         {
             latestControlsClick?.invoke()
@@ -148,6 +151,11 @@ internal actual fun NativeLyricsViewHost(
         }
         onDispose { playbackJob?.cancel() }
     }
+    LaunchedEffect(nativeView) {
+        snapshotFlow { latestExpansionProgress().coerceIn(0f, 1f) }
+            .distinctUntilChanged()
+            .collect(nativeView::setPlayerExpansionProgress)
+    }
 
     fun RustSkiaLyricsView.applyAll() {
         // Background art + insets + playback FIRST: a fresh view/engine picks them
@@ -156,7 +164,7 @@ internal actual fun NativeLyricsViewHost(
         setContentInsets(contentTopPx, contentBottomPx, contentLeftPx, contentRightPx)
         setMusicFoundationClockEnabled(useMusicFoundationClock)
         setPlaybackState(isPlaying, backgroundReactive)
-        setPlayerExpansionProgress(playerExpansionProgress)
+        setPlayerExpansionProgress(latestExpansionProgress())
         if (playerChrome != null) {
             // Full portrait player owns chrome geometry; clear the legacy top bar.
             // Screen/duration/playing: Rust keeps page selection after first paint
@@ -171,6 +179,8 @@ internal actual fun NativeLyricsViewHost(
                 playing = playerChrome.isPlaying,
                 liked = playerChrome.liked,
                 presentation = playerChrome.presentation.wireValue,
+                viewportWidth = playerChrome.viewportWidth,
+                viewportHeight = playerChrome.viewportHeight,
                 screen = playerChrome.initialScreen.wireValue,
                 queueTitle = playerChrome.queueTitle,
                 queueSource = playerChrome.queueSource,

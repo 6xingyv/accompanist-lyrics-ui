@@ -27,6 +27,9 @@ data class NativePlayerChrome(
     val isPlaying: Boolean = false,
     val liked: Boolean = false,
     val presentation: NativePlayerPresentation = NativePlayerPresentation.Full,
+    /** Logical mini-player viewport inside a fixed-size native surface, in px. */
+    val viewportWidth: Float? = null,
+    val viewportHeight: Float? = null,
     /**
      * Initial page only (default: full artwork with no mode chip selected).
      * After the first scene, Rust owns lyrics/queue toggles; subsequent host
