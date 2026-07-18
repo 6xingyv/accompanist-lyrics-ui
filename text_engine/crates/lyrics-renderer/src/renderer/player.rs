@@ -1653,9 +1653,12 @@ pub(super) fn draw_player(
             now,
             current_time_ms,
             1.0,
+            true,
         );
     }
-    let expansion = smooth_step(expansion_progress.clamp(0.0, 1.0));
+    // The host already eases settled animations. Keep this raw so interactive
+    // drags, the outer clip and the shared artwork all follow the same progress.
+    let expansion = expansion_progress.clamp(0.0, 1.0);
     if expansion < 0.999 {
         let mini_ui = PlayerUiLayout::resolve(
             player.mini_layout,
@@ -1672,6 +1675,7 @@ pub(super) fn draw_player(
             now,
             current_time_ms,
             1.0 - expansion,
+            false,
         );
     }
 
@@ -1797,7 +1801,11 @@ pub(super) fn draw_player(
         layout.full_artwork_rect(),
         artwork_progress,
     );
-    let shared_art = lerp_rect(layout.collapsed_artwork_rect(), expanded_art, expansion);
+    let shared_art = lerp_rect(
+        player.mini_layout.collapsed_artwork_rect(),
+        expanded_art,
+        expansion,
+    );
     let expanded_radius = lerp(12.0 * scale, 18.0 * scale, artwork_progress);
     let radius = lerp(6.0 * scale, expanded_radius, expansion);
     draw_artwork(canvas, thumbnail, shared_art, radius, 1.0);
@@ -1846,6 +1854,7 @@ fn draw_mini_player(
     now: Instant,
     current_time_ms: i32,
     alpha: f32,
+    draw_shared_artwork: bool,
 ) -> bool {
     let layout = ui.layout;
     let s = layout.scale;
@@ -1859,7 +1868,9 @@ fn draw_mini_player(
         blend: DrawBlend::SourceOver,
     }
     .draw(canvas);
-    draw_artwork(canvas, thumbnail, mini.artwork, 6.0 * s, alpha);
+    if draw_shared_artwork {
+        draw_artwork(canvas, thumbnail, mini.artwork, 6.0 * s, alpha);
+    }
 
     let text_left = mini.text.left;
     let text_width = mini.text.width().max(1.0);

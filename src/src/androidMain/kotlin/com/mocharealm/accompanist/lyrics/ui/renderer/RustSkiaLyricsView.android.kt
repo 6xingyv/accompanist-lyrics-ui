@@ -211,12 +211,16 @@ class RustSkiaLyricsView @JvmOverloads constructor(
     private var velocityTracker: VelocityTracker? = null
     private var activePointerId = MotionEvent.INVALID_POINTER_ID
     private var isDragging = false
+    private var isPlayerExpansionDragging = false
     private var isQueueReordering = false
     private var downY = 0f
     private var lastTouchY = 0f
     private var onLineClicked: ((Int) -> Unit)? = null
     private var onLinePressed: ((Int) -> Unit)? = null
     private var onQueueReordered: ((Int, Int) -> Unit)? = null
+    private var onPlayerExpansionDragStart: (() -> Unit)? = null
+    private var onPlayerExpansionDrag: ((Float) -> Unit)? = null
+    private var onPlayerExpansionDragEnd: ((Float) -> Unit)? = null
 
     private val gestureDetector = GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
         override fun onDown(e: MotionEvent): Boolean = true
@@ -475,6 +479,16 @@ class RustSkiaLyricsView @JvmOverloads constructor(
      * play/pause=4, next=5, lyrics=6, output=7, queue=8; queue filters=9..12. */
     fun setOnPlayerAction(callback: ((Int) -> Unit)?) {
         onPlayerAction = callback
+    }
+
+    fun setOnPlayerExpansionDragCallbacks(
+        onStart: (() -> Unit)?,
+        onDrag: ((Float) -> Unit)?,
+        onEnd: ((Float) -> Unit)?,
+    ) {
+        onPlayerExpansionDragStart = onStart
+        onPlayerExpansionDrag = onDrag
+        onPlayerExpansionDragEnd = onEnd
     }
 
     fun setOnQueueReordered(callback: ((Int, Int) -> Unit)?) {
@@ -873,6 +887,7 @@ class RustSkiaLyricsView @JvmOverloads constructor(
                 if (playerWire != null && !isInsideVisiblePlayer(event.x, event.y)) return false
                 parent?.requestDisallowInterceptTouchEvent(true)
                 isDragging = false
+                isPlayerExpansionDragging = false
                 isQueueReordering = false
                 activePointerId = event.getPointerId(0)
                 downY = event.y
@@ -904,6 +919,28 @@ class RustSkiaLyricsView @JvmOverloads constructor(
                     postPlayerCommand { engine.updateQueueReorder(renderY) }
                     return true
                 }
+                if (isPlayerExpansionDragging) {
+                    onPlayerExpansionDrag?.invoke(y - downY)
+                    lastTouchY = y
+                    return true
+                }
+                val miniCanExpand = playerWire?.presentation == "mini" &&
+                    playerExpansionProgress < 0.999f &&
+                    onPlayerExpansionDragStart != null
+                if (miniCanExpand) {
+                    val totalDy = y - downY
+                    if (totalDy < -touchSlop) {
+                        isPlayerExpansionDragging = true
+                        lastTouchY = y
+                        cancelTapDetection(event)
+                        postPlayerCommand { engine.cancelPlayerPointer() }
+                        onPlayerExpansionDragStart?.invoke()
+                        onPlayerExpansionDrag?.invoke(totalDy)
+                    }
+                    // A mini player has no scrollable content. Keep owning the
+                    // gesture while deciding between a tap and an upward expand.
+                    return true
+                }
                 if (!isDragging && abs(y - downY) > touchSlop) {
                     isDragging = true
                     lastTouchY = y
@@ -926,6 +963,16 @@ class RustSkiaLyricsView @JvmOverloads constructor(
             }
 
             MotionEvent.ACTION_UP -> {
+                if (isPlayerExpansionDragging) {
+                    velocityTracker?.addMovement(event)
+                    velocityTracker?.computeCurrentVelocity(1000, maxFlingVelocity.toFloat())
+                    val velocityY = velocityTracker?.getYVelocity(activePointerId) ?: 0f
+                    onPlayerExpansionDragEnd?.invoke(velocityY)
+                    postPlayerCommand { engine.cancelPlayerPointer() }
+                    recycleTouchState()
+                    parent?.requestDisallowInterceptTouchEvent(false)
+                    return true
+                }
                 if (isQueueReordering) {
                     isQueueReordering = false
                     postPlayerCommand {
@@ -965,6 +1012,7 @@ class RustSkiaLyricsView @JvmOverloads constructor(
             }
 
             MotionEvent.ACTION_CANCEL -> {
+                if (isPlayerExpansionDragging) onPlayerExpansionDragEnd?.invoke(0f)
                 if (isQueueReordering) {
                     isQueueReordering = false
                     postPlayerCommand { engine.cancelQueueReorder() }
@@ -1320,6 +1368,7 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         velocityTracker = null
         activePointerId = MotionEvent.INVALID_POINTER_ID
         isDragging = false
+        isPlayerExpansionDragging = false
     }
 
     private fun updateRenderTarget(width: Int, height: Int): Boolean {

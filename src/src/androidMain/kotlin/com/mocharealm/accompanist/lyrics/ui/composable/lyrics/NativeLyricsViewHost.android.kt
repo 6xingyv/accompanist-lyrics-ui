@@ -52,6 +52,9 @@ internal actual fun NativeLyricsViewHost(
     onControlsClick: (() -> Unit)?,
     playerChrome: NativePlayerChrome?,
     playerExpansionProgress: () -> Float,
+    onPlayerExpansionDragStart: (() -> Unit)?,
+    onPlayerExpansionDrag: ((Float) -> Unit)?,
+    onPlayerExpansionDragEnd: ((Float) -> Unit)?,
     onPlayerAction: ((NativePlayerAction) -> Unit)?,
     onQueueReordered: ((Int, Int) -> Unit)?,
 ) {
@@ -76,6 +79,9 @@ internal actual fun NativeLyricsViewHost(
         with(density) { contentPadding.calculateRightPadding(layoutDirection).toPx() }
     val latestControlsClick by rememberUpdatedState(onControlsClick)
     val latestPlayerAction by rememberUpdatedState(onPlayerAction)
+    val latestExpansionDragStart by rememberUpdatedState(onPlayerExpansionDragStart)
+    val latestExpansionDrag by rememberUpdatedState(onPlayerExpansionDrag)
+    val latestExpansionDragEnd by rememberUpdatedState(onPlayerExpansionDragEnd)
     val latestQueueReordered by rememberUpdatedState(onQueueReordered)
     val latestLyrics by rememberUpdatedState(lyrics)
     val latestLineClicked by rememberUpdatedState(onLineClicked)
@@ -102,6 +108,24 @@ internal actual fun NativeLyricsViewHost(
     val nativeLinePressed = remember {
         { index: Int ->
             latestLyrics.lines.getOrNull(index)?.let { latestLinePressed(it) }
+            Unit
+        }
+    }
+    val nativeExpansionDragStart = remember {
+        {
+            latestExpansionDragStart?.invoke()
+            Unit
+        }
+    }
+    val nativeExpansionDrag = remember {
+        { deltaY: Float ->
+            latestExpansionDrag?.invoke(deltaY)
+            Unit
+        }
+    }
+    val nativeExpansionDragEnd = remember {
+        { velocityY: Float ->
+            latestExpansionDragEnd?.invoke(velocityY)
             Unit
         }
     }
@@ -190,10 +214,16 @@ internal actual fun NativeLyricsViewHost(
                 },
             )
             setOnPlayerAction(nativePlayerAction)
+            setOnPlayerExpansionDragCallbacks(
+                nativeExpansionDragStart,
+                nativeExpansionDrag,
+                nativeExpansionDragEnd,
+            )
             setOnQueueReordered(nativeQueueReordered)
         } else {
             setPlayerChrome(title = null)
             setOnPlayerAction(null)
+            setOnPlayerExpansionDragCallbacks(null, null, null)
             setOnQueueReordered(null)
             setTopBar(title, artist)
             setOnControlsClicked(nativeControlsClick)

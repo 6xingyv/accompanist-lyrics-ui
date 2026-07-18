@@ -35,6 +35,9 @@ internal actual fun NativeLyricsViewHost(
     onControlsClick: (() -> Unit)?,
     playerChrome: NativePlayerChrome?,
     playerExpansionProgress: () -> Float,
+    onPlayerExpansionDragStart: (() -> Unit)?,
+    onPlayerExpansionDrag: ((Float) -> Unit)?,
+    onPlayerExpansionDragEnd: ((Float) -> Unit)?,
     onPlayerAction: ((NativePlayerAction) -> Unit)?,
     onQueueReordered: ((Int, Int) -> Unit)?,
 ) {
