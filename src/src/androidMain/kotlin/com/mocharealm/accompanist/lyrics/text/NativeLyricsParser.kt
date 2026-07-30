@@ -7,6 +7,7 @@ import com.mocharealm.accompanist.lyrics.core.model.karaoke.KaraokeAlignment
 import com.mocharealm.accompanist.lyrics.core.model.karaoke.KaraokeLine
 import com.mocharealm.accompanist.lyrics.core.model.karaoke.KaraokeSyllable
 import com.mocharealm.accompanist.lyrics.core.model.synced.SyncedLine
+import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.charset.StandardCharsets
@@ -27,6 +28,59 @@ object NativeLyricsParser {
     fun parseFd(fd: Int, onPlainText: ((ByteBuffer) -> Unit)?): SyncedLyrics? = runCatching {
         withNativeBuffer(nativeParseFdToWire(fd)) { decodeLyrics(it, onPlainText) }
     }.getOrNull()
+
+    /** Decode text_engine's stable LYR1 representation without parsing source text again. */
+    fun decodeWire(bytes: ByteArray): SyncedLyrics? = runCatching {
+        decodeLyrics(ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN), null)
+    }.getOrNull()
+
+    /**
+     * Encode an already parsed lyrics tree into text_engine's stable LYR1 wire format.
+     * This preserves karaoke syllables, accompaniment, phonetics and exact timings.
+     */
+    fun encodeWire(lyrics: SyncedLyrics): ByteArray {
+        val out = ByteArrayOutputStream()
+        out.write(byteArrayOf('L'.code.toByte(), 'Y'.code.toByte(), 'R'.code.toByte(), '1'.code.toByte()))
+        out.putString(lyrics.title)
+        out.putString(lyrics.id)
+        val artists = lyrics.artists.orEmpty()
+        out.putIntLe(artists.size)
+        artists.forEach { artist ->
+            out.putString(artist.type)
+            out.putString(artist.name)
+        }
+        out.putIntLe(lyrics.lines.size)
+        lyrics.lines.forEach { line ->
+            when (line) {
+                is SyncedLine -> {
+                    out.write(0)
+                    out.putString(line.content)
+                    out.putOptionalString(line.translation)
+                    out.putIntLe(line.start)
+                    out.putIntLe(line.end)
+                }
+                is KaraokeLine.MainKaraokeLine -> {
+                    out.write(1)
+                    out.putSyllables(line.syllables)
+                    out.putOptionalString(line.translation)
+                    out.putAlignment(line.alignment)
+                    out.putIntLe(line.start)
+                    out.putIntLe(line.end)
+                    out.putOptionalString(line.phonetic)
+                    val accompaniment = line.accompanimentLines.orEmpty()
+                    out.putIntLe(accompaniment.size)
+                    accompaniment.forEach { out.putAccompaniment(it) }
+                }
+                is KaraokeLine.AccompanimentKaraokeLine -> {
+                    out.write(2)
+                    out.putAccompaniment(line)
+                }
+            }
+        }
+        // The final field is the optional normalized search-text trailer.
+        out.putIntLe(0)
+        return out.toByteArray()
+    }
 
     fun <T> withPlainTextBuffer(content: String, block: (ByteBuffer) -> T): T? =
         withNativeBuffer(nativeParseToPlainText(content), block)
@@ -138,6 +192,54 @@ object NativeLyricsParser {
         slice.limit(length)
         position(position() + length)
         return StandardCharsets.UTF_8.decode(slice).toString()
+    }
+
+    private fun ByteArrayOutputStream.putIntLe(value: Int) {
+        write(value and 0xff)
+        write((value ushr 8) and 0xff)
+        write((value ushr 16) and 0xff)
+        write((value ushr 24) and 0xff)
+    }
+
+    private fun ByteArrayOutputStream.putString(value: String) {
+        val bytes = value.toByteArray(StandardCharsets.UTF_8)
+        putIntLe(bytes.size)
+        write(bytes)
+    }
+
+    private fun ByteArrayOutputStream.putOptionalString(value: String?) {
+        if (value == null) putIntLe(-1) else putString(value)
+    }
+
+    private fun ByteArrayOutputStream.putAlignment(value: KaraokeAlignment) {
+        write(
+            when (value) {
+                KaraokeAlignment.Start -> 0
+                KaraokeAlignment.End -> 1
+                KaraokeAlignment.Unspecified -> 2
+            },
+        )
+    }
+
+    private fun ByteArrayOutputStream.putSyllables(syllables: List<KaraokeSyllable>) {
+        putIntLe(syllables.size)
+        syllables.forEach { syllable ->
+            putString(syllable.content)
+            putIntLe(syllable.start)
+            putIntLe(syllable.end)
+            putOptionalString(syllable.phonetic)
+        }
+    }
+
+    private fun ByteArrayOutputStream.putAccompaniment(
+        line: KaraokeLine.AccompanimentKaraokeLine,
+    ) {
+        putSyllables(line.syllables)
+        putOptionalString(line.translation)
+        putAlignment(line.alignment)
+        putIntLe(line.start)
+        putIntLe(line.end)
+        putOptionalString(line.phonetic)
     }
 
     private external fun nativeParseToWire(content: String): ByteBuffer?

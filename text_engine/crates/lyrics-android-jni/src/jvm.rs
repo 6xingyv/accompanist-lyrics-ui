@@ -1339,6 +1339,15 @@ pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeTextE
     });
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn Java_com_mocharealm_accompanist_lyrics_text_NativeTextEngine_nativeClearPlayerLivePlayback(
+    _env: JNIEnv,
+    _this: JObject,
+    handle: jlong,
+) {
+    with_engine_mut(handle, (), |engine| engine.clear_player_live_playback());
+}
+
 // --- Process-global audio analysis (no engine handle) -----------------------
 // Fed from an ExoPlayer TeeAudioProcessor (same process) and read in-process by
 // the mesh-gradient renderer each frame.

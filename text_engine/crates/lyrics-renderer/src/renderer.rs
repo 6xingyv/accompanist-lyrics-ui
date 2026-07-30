@@ -1744,7 +1744,6 @@ impl LyricsRenderer {
                     .bounds(&bounds)
                     .paint(&layer_paint),
             );
-            canvas.clip_rect(bounds, skia_safe::ClipOp::Intersect, false);
             if player_scene {
                 let center_x = (band_left + band_right) * 0.5;
                 let center_y = (band_top + band_bottom) * 0.5;
@@ -1752,6 +1751,12 @@ impl LyricsRenderer {
                 canvas.scale((player_lyrics_scale, player_lyrics_scale));
                 canvas.translate((-center_x, -center_y));
             }
+            // Clip AFTER the page-switch scale so the band edges shrink with
+            // the glyphs. A screen-space clip stays put while the content
+            // scales to 0.94, exposing a border strip where ink the band
+            // normally cuts (side clip-bleed overflow, blur bloom, lines past
+            // the top/bottom fades) popped in with a hard edge mid-transition.
+            canvas.clip_rect(bounds, skia_safe::ClipOp::Intersect, false);
         } else if inset_lyrics {
             canvas.save();
             canvas.clip_rect(
@@ -2004,7 +2009,9 @@ impl LyricsRenderer {
         // Fade the top and bottom edges of the content band so lines dissolve as
         // they scroll off. The top fade stays inside the keep-alive gap so the
         // active line (anchored at keep_alive from the top) is never touched. The
-        // band collapses to the whole surface when no insets are set.
+        // band collapses to the whole surface when no insets are set. This runs
+        // inside the page-switch transform above, so the fade (like the clip)
+        // tracks the scaled content instead of the fixed screen band.
         let band_height = (band_bottom - band_top).max(1.0);
         let inner_keep_alive = (keep_alive - band_top).max(0.0);
         if player_lyrics_alpha > 0.001 {
@@ -2125,7 +2132,9 @@ impl LyricsRenderer {
             return 0;
         };
         let ui = player::PlayerUiLayout::resolve(layout, self.player_screen, presentation);
-        self.player_interaction.press(&ui, x, y)
+        // Pointer coords are surface px; the full-player chrome lives in the
+        // centered design column (no-op offset until the chrome clamp engages).
+        self.player_interaction.press(&ui, x - layout.column_left, y)
     }
 
     /// Finish a native-player button gesture.
@@ -2147,7 +2156,9 @@ impl LyricsRenderer {
             return 0;
         };
         let ui = player::PlayerUiLayout::resolve(layout, self.player_screen, presentation);
-        let action = self.player_interaction.release(&ui, x, y);
+        let action = self
+            .player_interaction
+            .release(&ui, x - layout.column_left, y);
         match action {
             code if code == PlayerButton::Lyrics as i32 => {
                 let next = if self.player_screen == PlayerScreenInput::Lyrics {
@@ -2219,6 +2230,19 @@ impl LyricsRenderer {
             self.pending_lyric_click_seek = None;
             return -1;
         }
+        // Mirror the draw pass's visibility gate: in the mini presentation the
+        // lyric layer is forced to alpha 0, and mid-expansion it fades with
+        // `player_expansion_progress` (draw keeps the mini overlay until 0.999).
+        // Without this a tap on the mini player body — or during the expand
+        // animation — would seek an invisible lyric.
+        if let Some(player) = scene.player.as_ref() {
+            let expanded = player.presentation != player::PlayerPresentationInput::Mini
+                && self.player_expansion_progress >= 0.999;
+            if !expanded {
+                self.pending_lyric_click_seek = None;
+                return -1;
+            }
+        }
         let content_bottom = scene
             .player
             .as_ref()
@@ -2243,6 +2267,27 @@ impl LyricsRenderer {
             return -1;
         }
 
+        // The draw pass scales the lyric band about its center during the
+        // Lyrics/Artwork/Queue page transition (`content_transform`, 0.94↔1.0).
+        // Undo that scale here so the tested y matches the on-screen glyphs
+        // mid-transition (lines span the band, so only y matters for the hit).
+        let y = if scene.player.is_some() {
+            let (_, page_scale) = self
+                .player_transition
+                .sample(Instant::now())
+                .content_transform(player::PlayerScreenInput::Lyrics);
+            if page_scale > 0.0 && (page_scale - 1.0).abs() > 0.0001 {
+                let band_top = scene.config.content_top.round();
+                let band_bottom = (scene.config.height as f32 - content_bottom).round();
+                let center_y = (band_top + band_bottom) * 0.5;
+                center_y + (y - center_y) / page_scale
+            } else {
+                y
+            }
+        } else {
+            y
+        };
+
         let dynamic_layouts = scene.dynamic_line_layouts(current_time_ms);
         let auto_scroll_y = scene.scroll_y_for_time_with_layouts(current_time_ms, &dynamic_layouts);
         let scroll_y = self.manual_scroll_projected_scroll(
@@ -2251,8 +2296,10 @@ impl LyricsRenderer {
         );
         // Prefer the on-screen spring layouts when available (match what the user
         // sees). Fall back to content-space targets + scroll for the first frame.
+        // Draw paints later indices on top of earlier ones, so where layouts
+        // overlap the LAST matching index is the visible line — search reversed.
         let hit = if self.frame_layouts.len() == scene.lines.len() {
-            scene.lines.iter().enumerate().find(|(index, _)| {
+            scene.lines.iter().enumerate().rev().find(|(index, _)| {
                 self.frame_layouts.get(*index).is_some_and(|layout| {
                     layout.text_visibility > 0.001
                         && y >= layout.top
@@ -2261,7 +2308,7 @@ impl LyricsRenderer {
             })
         } else {
             let content_y = y + scroll_y;
-            scene.lines.iter().enumerate().find(|(index, _)| {
+            scene.lines.iter().enumerate().rev().find(|(index, _)| {
                 dynamic_layouts.get(*index).is_some_and(|layout| {
                     layout.text_visibility > 0.001
                         && content_y >= layout.top
@@ -3276,9 +3323,11 @@ mod tests {
     }
 
     #[test]
-    fn wide_player_requires_decompiled_minimum_width() {
+    fn wide_player_requires_minimum_dp_width() {
+        // 1000px at density 2 is only 500dp — under the 600dp Wide gate even
+        // though the raw pixel width is large and the aspect ratio qualifies.
         let json = r#"{
-            "width":1000,"height":500,
+            "width":1000,"height":500,"layoutDensity":2.0,
             "topBar":{
                 "title":"Title","artist":"Artist",
                 "thumbLeft":28,"thumbTop":28,"thumbSize":68,"thumbRadius":14,

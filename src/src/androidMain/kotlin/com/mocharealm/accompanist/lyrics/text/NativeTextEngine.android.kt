@@ -248,6 +248,11 @@ actual class NativeTextEngine actual constructor(
         if (handle != 0L) nativeSetPlaybackState(handle, playing, reactive)
     }
 
+    /** Drop transport chrome values previously sampled from music-foundation. */
+    fun clearPlayerLivePlayback() {
+        if (handle != 0L) nativeClearPlayerLivePlayback(handle)
+    }
+
     actual fun close() {
         val currentHandle = handle
         if (currentHandle != 0L) {
@@ -518,4 +523,5 @@ actual class NativeTextEngine actual constructor(
     )
     private external fun nativeClearQueueArtworks(handle: Long)
     private external fun nativeSetPlaybackState(handle: Long, playing: Boolean, reactive: Boolean)
+    private external fun nativeClearPlayerLivePlayback(handle: Long)
 }

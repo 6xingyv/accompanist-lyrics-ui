@@ -39,6 +39,12 @@ impl LyricsRenderer {
 
     pub(super) fn reset_layout_animation_state(&mut self) {
         self.spring_layouts.clear();
+        // Drop the last drawn frame's screen-space layouts too: after a scene
+        // rebuild (rotation, render-scale or style change) they describe the OLD
+        // scene's geometry, and the length-match check in `hit_test_line` can
+        // still pass — so the first tap would hit-test against stale line tops.
+        // Clearing forces the content-space fallback until the next drawn frame.
+        self.frame_layouts.clear();
         self.focus_scale_states.clear();
         self.last_spring_frame_at = None;
         self.last_spring_playback_ms = None;

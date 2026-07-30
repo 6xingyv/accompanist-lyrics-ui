@@ -4,8 +4,16 @@
 
 use super::*;
 
-const WIDE_MIN_ASPECT_RATIO: f32 = 1.3;
-const WIDE_MIN_WIDTH: f32 = 1024.0;
+pub(super) const WIDE_MIN_ASPECT_RATIO: f32 = 1.3;
+/// Wide gate is density-independent: a landscape window at least this many dp
+/// wide gets the two-pane layout. (The old raw-px 1024 threshold silently
+/// excluded small/low-DPI landscape windows while every modern phone passed.)
+/// Shared with the native player, whose landscape split uses the same gate.
+pub(super) const WIDE_MIN_WIDTH_DP: f32 = 600.0;
+/// Non-wide (portrait) text column cap, the counterpart of Wide's 500dp
+/// `max_text_width` — keeps 34sp lyrics from spanning a whole portrait tablet.
+const NARROW_MAX_TEXT_WIDTH_DP: f32 = 600.0;
+const WIDE_MIN_SCALE_WIDTH: f32 = 1024.0;
 const WIDE_MAX_SCALE_WIDTH: f32 = 1600.0;
 const WIDE_MIN_SCALE_HEIGHT: f32 = 512.0;
 const WIDE_MAX_SCALE_HEIGHT: f32 = 1000.0;
@@ -15,7 +23,8 @@ const WIDE_FOCUS_Y_RATIO: f32 = 0.4;
 
 #[inline]
 pub(super) fn wide_lyrics_layout_scale(width: f32, height: f32) -> f32 {
-    let width_progress = ((width - WIDE_MIN_WIDTH) / (WIDE_MAX_SCALE_WIDTH - WIDE_MIN_WIDTH))
+    let width_progress = ((width - WIDE_MIN_SCALE_WIDTH)
+        / (WIDE_MAX_SCALE_WIDTH - WIDE_MIN_SCALE_WIDTH))
         .clamp(0.0, 1.0);
     let height_progress =
         ((height - WIDE_MIN_SCALE_HEIGHT) / (WIDE_MAX_SCALE_HEIGHT - WIDE_MIN_SCALE_HEIGHT))
@@ -68,7 +77,8 @@ pub(super) fn resolve_player_chrome(scene: &mut LyricsScene) -> ResolvedPlayerCh
     // Android intentionally may omit the in-surface top bar, but its Rust-rendered
     // landscape lyrics must still use the same dynamic 1.0→1.4 scale. The top-bar
     // condition remains only on the two-pane cover/metadata layout below.
-    let landscape_lyrics = aspect_ratio >= WIDE_MIN_ASPECT_RATIO && width >= WIDE_MIN_WIDTH;
+    let landscape_lyrics =
+        aspect_ratio >= WIDE_MIN_ASPECT_RATIO && scale_basis_width >= WIDE_MIN_WIDTH_DP;
     let landscape_player = scene.top_bar.is_some() && landscape_lyrics;
     let mut chrome = ResolvedPlayerChrome {
         content_top: scene.content_top.unwrap_or(0.0).max(0.0),
@@ -86,6 +96,22 @@ pub(super) fn resolve_player_chrome(scene: &mut LyricsScene) -> ResolvedPlayerCh
         focus_y: landscape_lyrics.then_some(height * WIDE_FOCUS_Y_RATIO),
         thumb_border_width: 0.0,
     };
+    // Non-wide surfaces used to wrap at (nearly) the full width, so a portrait
+    // tablet got 34sp lines spanning the whole screen. Mirror Wide mode's text
+    // cap: limit the column and grow both content insets symmetrically so it
+    // stays centered. Per-line Start/End alignment resolves against the content
+    // insets, so it keeps working inside the capped column.
+    if !landscape_lyrics {
+        let line_padding_x = scene.style.spacing.horizontal_padding.max(0.0);
+        let max_text_width = NARROW_MAX_TEXT_WIDTH_DP * layout_density;
+        let text_width =
+            width - chrome.content_left - chrome.content_right - line_padding_x * 2.0;
+        if text_width > max_text_width {
+            let inset = (text_width - max_text_width) * 0.5;
+            chrome.content_left += inset;
+            chrome.content_right += inset;
+        }
+    }
     if !chrome.landscape_player {
         return chrome;
     }
@@ -187,12 +213,16 @@ impl LyricsRenderer {
         if scene.player.is_some() {
             let width = scene.width.unwrap_or(DEFAULT_WIDTH).max(DEFAULT_WIDTH) as f32;
             let height = scene.height.unwrap_or(DEFAULT_HEIGHT).max(DEFAULT_HEIGHT) as f32;
-            let player_layout = player::PlayerLayout::resolve(width, height);
+            let density = scene.layout_density.unwrap_or(1.0).clamp(0.25, 8.0);
+            let player_layout = player::PlayerLayout::resolve(width, height, density);
             scene.top_bar = None;
             scene.content_top = Some(player_layout.lyrics_content_top());
             scene.content_bottom = Some(player_layout.lyrics_content_bottom());
-            scene.content_left = Some(0.0);
-            scene.content_right = Some(0.0);
+            // Landscape splits the surface: artwork pane on the left, control
+            // column plus the lyric band on the right (0 insets in portrait,
+            // where lyrics share the chrome's full width).
+            scene.content_left = Some(player_layout.lyrics_content_left());
+            scene.content_right = Some(player_layout.lyrics_content_right());
             scene.style.spacing.horizontal_padding = 32.0 * player_layout.scale;
             scene.style.spacing.focus_top_offset = 48.0 * player_layout.scale;
         }
@@ -604,6 +634,7 @@ impl LyricsRenderer {
             scene.player.as_ref(),
             config.width as f32,
             config.height as f32,
+            scene.layout_density.unwrap_or(1.0).clamp(0.25, 8.0),
         );
 
         Ok(PreparedScene {

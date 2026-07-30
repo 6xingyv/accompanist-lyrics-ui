@@ -230,8 +230,15 @@ class RustSkiaLyricsView @JvmOverloads constructor(
     private var isDragging = false
     private var isPlayerExpansionDragging = false
     private var isQueueReordering = false
+    private var downX = 0f
     private var downY = 0f
     private var lastTouchY = 0f
+    /** Set once a swallowed expansion-candidate move commits to being a non-tap,
+     * so the gesture detector is cancelled exactly once for the gesture. */
+    private var swallowedGestureCancelledTap = false
+    /** Set when a top-grab-region gesture moves upward past slop: the collapse
+     * capture is released and the gesture falls through to the scroll path. */
+    private var collapseGrabReleased = false
     private var onLineClicked: ((Int) -> Unit)? = null
     private var onLinePressed: ((Int) -> Unit)? = null
     private var onQueueReordered: ((Int, Int) -> Unit)? = null
@@ -271,6 +278,8 @@ class RustSkiaLyricsView @JvmOverloads constructor(
 
     init {
         surfaceTextureListener = this
+        // Start non-opaque (mini pill / transitions need alpha); updateSurfaceOpacity
+        // flips this to true whenever the renderer is known full-bleed opaque.
         isOpaque = false
         isClickable = true
         isLongClickable = true
@@ -372,6 +381,7 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         if (pixels == null || width <= 0 || height <= 0) {
             if (backgroundPixels != null) {
                 backgroundPixels = null
+                updateSurfaceOpacity()
                 if (!engineClosed) engine.clearBackground()
                 requestRender()
             }
@@ -392,6 +402,7 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         backgroundWidth = width
         backgroundHeight = height
         backgroundSeed = seed
+        updateSurfaceOpacity()
         applyBackgroundArt()
         requestRender()
     }
@@ -482,6 +493,8 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         }
         if (playerWire == next) return
         playerWire = next
+        // presentation mini <-> full flips whether the renderer clears transparent.
+        updateSurfaceOpacity()
         sceneDirty = true
         rebuildSceneAndRender()
     }
@@ -490,9 +503,15 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         val next = progress.coerceIn(0f, 1f)
         cancelPlayerExpansionAnimator()
         playerExpansionTarget = next
-        if (playerExpansionProgress == next) return
+        if (playerExpansionProgress == next) {
+            // No visual change, but the animator was just cancelled (and the
+            // geometry-null host has no applyPlayerExpansionVisual pass).
+            updateSurfaceOpacity()
+            return
+        }
         playerExpansionProgress = next
         applyPlayerExpansionVisual(next)
+        updateSurfaceOpacity()
         if (!engineClosed) postPlayerCommand { engine.setPlayerExpansionProgress(next) }
     }
 
@@ -512,6 +531,7 @@ class RustSkiaLyricsView @JvmOverloads constructor(
             translationX = 0f
             translationY = 0f
             clipToOutline = false
+            updateSurfaceOpacity()
             return
         }
         if (firstConfiguration) {
@@ -562,6 +582,9 @@ class RustSkiaLyricsView @JvmOverloads constructor(
             })
             start()
         }
+        // The animator is now live: drop opacity BEFORE its first tick so the
+        // renderer's transparent transition clear never lands on an opaque layer.
+        updateSurfaceOpacity()
     }
 
     private fun cancelPlayerExpansionAnimator() {
@@ -588,6 +611,33 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         elevation = 0f
         clipToOutline = p < 1f || playerExpansionAnimator != null || isPlayerExpansionDragging
         invalidateOutline()
+        updateSurfaceOpacity()
+    }
+
+    /**
+     * Keep [isOpaque] in sync with whether the renderer actually fills every pixel.
+     * A full-screen non-opaque TextureView forces HWUI to alpha-blend the whole
+     * texture every frame, so flip opaque whenever the surface is known full-bleed:
+     * the Rust renderer clears the canvas to opaque BLACK + mesh only when the
+     * mesh-gradient background is enabled AND the player is not in mini
+     * presentation AND the (engine-side) expansion is >= 0.999 — in every other
+     * case (mini pill, expansion transition, no background art) it clears
+     * transparent, so the view must stay non-opaque. The Kotlin-side steady-state
+     * condition (progress == 1, no animator, no drag) is the inverse of the
+     * `clipToOutline` condition above (clip on ⇒ rounded corners ⇒ non-opaque).
+     * Toggling isOpaque on a live TextureView takes effect on the next
+     * layer/buffer update, so we invalidate() to apply it promptly.
+     */
+    private fun updateSurfaceOpacity() {
+        val fullBleed = backgroundPixels != null &&
+            playerWire?.presentation != "mini" &&
+            playerExpansionProgress >= 1f &&
+            playerExpansionAnimator == null &&
+            !isPlayerExpansionDragging
+        if (isOpaque != fullBleed) {
+            isOpaque = fullBleed
+            invalidate()
+        }
     }
 
     private fun updatePlayerOutline(outline: Outline) {
@@ -713,7 +763,15 @@ class RustSkiaLyricsView @JvmOverloads constructor(
 
     /** Drive the background: `playing` gates the time flow, `reactive` the audio reactivity. */
     fun setPlaybackState(playing: Boolean, reactive: Boolean) {
-        if (isPlaying == playing && backgroundReactive == reactive) return
+        if (isPlaying == playing && backgroundReactive == reactive) {
+            // Under the native music-foundation clock the render loop parks fully
+            // while (host-paused AND engine-idle). The native clock can start
+            // slightly before the Kotlin `playing` flag lands, so ANY playback push
+            // still kicks exactly one frame, letting the engine re-report activity
+            // and un-park; if nothing changed the frame goes idle and re-parks.
+            if (useMusicFoundationClock) requestRender()
+            return
+        }
         LyricsUiDiagnostics.record(
             "playback-input",
             "playing=$playing reactive=$reactive nativeClock=$useMusicFoundationClock",
@@ -742,6 +800,17 @@ class RustSkiaLyricsView @JvmOverloads constructor(
     fun setMusicFoundationClockEnabled(enabled: Boolean) {
         if (useMusicFoundationClock == enabled) return
         useMusicFoundationClock = enabled
+        if (!enabled && !engineClosed) {
+            // The last native-clock frame may have stored local pause/duration
+            // overrides in Rust. A remote route is host-clocked, so retaining
+            // those values would override its playing state and progress.
+            engine.clearPlayerLivePlayback()
+            // The prepared player itself already contains the last override.
+            // Rebuild from playerWire even when its host value stayed `true`
+            // across the route switch and would otherwise be deduplicated.
+            sceneDirty = true
+            rebuildSceneAndRender()
+        }
         LyricsUiDiagnostics.record("clock", "musicFoundationClockEnabled=$enabled")
         requestRender()
     }
@@ -956,10 +1025,7 @@ class RustSkiaLyricsView @JvmOverloads constructor(
                 "render",
                 "frame rejected result=$result timeMs=$frameTimeMs; retaining surface",
             )
-            cancelScheduledFrame()
-            if (useMusicFoundationClock && surfaceReady) {
-                renderHandler?.postDelayed(nativeClockIdlePoll, NATIVE_CLOCK_IDLE_POLL_MS)
-            }
+            parkOrPollIdle()
             return
         }
         val renderKind = result.coerceIn(0, 1)
@@ -978,16 +1044,33 @@ class RustSkiaLyricsView @JvmOverloads constructor(
             )
         }
         if (result == 0) {
-            // Engine idle — cancel the optimistically-armed callback. A standalone
-            // renderer parks until requestRender(); the native music-foundation path
-            // polls slowly while paused/unavailable so playback can start the 60 FPS
-            // loop without a Kotlin playback-state round trip.
-            cancelScheduledFrame()
-            if (useMusicFoundationClock && surfaceReady) {
-                renderHandler?.postDelayed(nativeClockIdlePoll, NATIVE_CLOCK_IDLE_POLL_MS)
-            }
+            // Engine idle — cancel the optimistically-armed callback and park or
+            // slow-poll depending on the host-pushed playback state.
+            parkOrPollIdle()
         }
         // result > 0: the callback armed above IS the next frame — keep it.
+    }
+
+    /**
+     * Render thread only: the engine reported idle (or rejected a frame without
+     * losing the surface). A standalone renderer always parks until
+     * [requestRender]. Under the native music-foundation clock we slow-poll
+     * (250 ms) ONLY while the host-pushed state says we are playing — the native
+     * clock can start slightly before the Kotlin `isPlaying` push lands, so the
+     * poll bridges that gap without a Kotlin round trip. When the host says
+     * paused too, park COMPLETELY instead of burning ~4 render+present per
+     * second forever: every push that could change output already funnels
+     * through [requestRender] (setPlaybackState on play/pause, setCurrentPosition
+     * on seeks, scene/style/chrome rebuilds, touch/scroll/expansion commands,
+     * and the visibility rebind's post-bind scheduleFrame), and each such kick
+     * runs one full frame in which the engine can re-report activity and restart
+     * the 60 FPS loop.
+     */
+    private fun parkOrPollIdle() {
+        cancelScheduledFrame()
+        if (useMusicFoundationClock && surfaceReady && isPlaying) {
+            renderHandler?.postDelayed(nativeClockIdlePoll, NATIVE_CLOCK_IDLE_POLL_MS)
+        }
     }
 
     /** Main thread: accumulate a drag delta without touching the engine lock. */
@@ -1030,7 +1113,10 @@ class RustSkiaLyricsView @JvmOverloads constructor(
                 isDragging = false
                 isPlayerExpansionDragging = false
                 isQueueReordering = false
+                swallowedGestureCancelledTap = false
+                collapseGrabReleased = false
                 activePointerId = event.getPointerId(0)
+                downX = event.x
                 downY = event.y
                 lastTouchY = event.y
                 velocityTracker?.recycle()
@@ -1073,9 +1159,11 @@ class RustSkiaLyricsView @JvmOverloads constructor(
                     onPlayerExpansionDragStart != null
                 val fullCanCollapse = playerWire?.presentation == "full" &&
                     playerExpansionProgress >= 0.999f &&
+                    !collapseGrabReleased &&
                     downY <= 80f * resources.displayMetrics.density
                 if (miniCanExpand || fullCanCollapse) {
                     val totalDy = y - downY
+                    val totalDx = event.getX(pointerIndex) - downX
                     val startsExpansion = miniCanExpand && totalDy < -touchSlop
                     val startsCollapse = fullCanCollapse && totalDy > touchSlop
                     if (startsExpansion || startsCollapse) {
@@ -1090,10 +1178,30 @@ class RustSkiaLyricsView @JvmOverloads constructor(
                         val next = playerExpansionDragStartProgress -
                             totalDy / height.coerceAtLeast(1)
                         applyInteractivePlayerExpansion(next)
+                        return true
                     }
-                    // The mini player and the fullscreen top grab region own the
-                    // gesture while deciding between a tap and expansion drag.
-                    return true
+                    if (fullCanCollapse && totalDy < -touchSlop) {
+                        // An upward move from the top grab region is a lyric
+                        // scroll, not a collapse: release the capture and fall
+                        // through to the normal scroll path below for the rest
+                        // of the gesture.
+                        collapseGrabReleased = true
+                    } else {
+                        // The mini player and the fullscreen top grab region own
+                        // the gesture while deciding between a tap and expansion
+                        // drag. Once a swallowed move commits to a non-tap
+                        // (past slop in a direction we don't turn into a drag),
+                        // kill tap detection too — otherwise a sideways swipe
+                        // would end with onSingleTapUp firing at the release
+                        // point.
+                        if (!swallowedGestureCancelledTap &&
+                            (abs(totalDx) > touchSlop || abs(totalDy) > touchSlop)
+                        ) {
+                            swallowedGestureCancelledTap = true
+                            cancelTapDetection(event)
+                        }
+                        return true
+                    }
                 }
                 if (!isDragging && abs(y - downY) > touchSlop) {
                     isDragging = true
@@ -1516,6 +1624,7 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         }
 
         activePointerId = event.getPointerId(nextPointerIndex)
+        downX = event.getX(nextPointerIndex)
         downY = event.getY(nextPointerIndex)
         lastTouchY = downY
         velocityTracker?.clear()

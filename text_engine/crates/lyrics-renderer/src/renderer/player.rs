@@ -1,8 +1,12 @@
-//! Native portrait player chrome.
+//! Native player chrome.
 //!
 //! Geometry is resolved from the 393×852 Penpot reference as a vertical flex
 //! stack. Fixed rows scale with the surface width; the lyrics/artwork/queue body
-//! receives the remaining height. All interaction and press feedback lives in
+//! receives the remaining height. On a landscape surface (the shared Wide gate)
+//! the LEFT half becomes an artwork pane — large cover with the Artwork-page
+//! metadata row below it — while the control column (handle, body, progress,
+//! transport, mode nav; no compact header) moves to the RIGHT pane together with
+//! the lyrics and the queue list. All interaction and press feedback lives in
 //! Rust so a host only forwards pointer events and consumes action codes.
 
 use super::scroll::{advance_fling, spring_step};
@@ -13,6 +17,10 @@ use skia_safe::{
 };
 
 const DESIGN_WIDTH: f32 = 393.0;
+// Chrome scales from the 393dp reference width but stops growing at ~1.15× the
+// density (i.e. ~452dp of design width). Past that the design column is simply
+// centered, so tablets get a phone-width player instead of giant chrome.
+const MAX_CHROME_SCALE: f32 = 1.15;
 const TOP_INSET: f32 = 44.0;
 const HANDLE_ROW: f32 = 36.0;
 const COMPACT_HEADER: f32 = 92.0;
@@ -22,6 +30,20 @@ const MODE_NAV_ROW: f32 = 90.0;
 const ARTWORK_METADATA_ROW: f32 = 96.0;
 const QUEUE_FILTER_ROW: f32 = 54.0;
 const QUEUE_METADATA_ROW: f32 = 56.0;
+/// Sum of the landscape stack's fixed rows. The compact 92dp header is excluded
+/// — landscape metadata lives in the left artwork pane — and the height cap
+/// keeps the remaining stack at its full basis (no 0.7-floor squash pushing
+/// transport/mode-nav off screen) plus a usable body.
+const FIXED_ROWS_DP: f32 = TOP_INSET + HANDLE_ROW + PROGRESS_ROW + TRANSPORT_ROW + MODE_NAV_ROW;
+/// Body space (dp × scale) the landscape height cap reserves above the fixed
+/// rows — enough for the queue filter + metadata rows plus a few visible list
+/// rows or lyric lines.
+const LANDSCAPE_BODY_RESERVE: f32 = 160.0;
+/// Breathing room (dp × density) between the chrome column and its pane edges.
+const LANDSCAPE_COLUMN_MARGIN: f32 = 16.0;
+/// Side padding (dp × density) between the pane edges and the right-pane
+/// lyric band.
+const LANDSCAPE_LYRICS_GUTTER: f32 = 16.0;
 const BOTTOM_CHROME_IDLE_SECONDS: f32 = 3.0;
 const BOTTOM_CHROME_EXIT_SECONDS: f32 = 0.36;
 const RUNTIME_LABEL_GLYPHS: &str = "0123456789:−";
@@ -263,8 +285,23 @@ macro_rules! flex_axis {
 #[derive(Debug, Clone, Copy)]
 pub(super) struct PlayerLayout {
     pub scale: f32,
+    /// Design-column width. Equals the surface width until the chrome-scale
+    /// clamp engages; then the column is narrower and centered at `column_left`.
     pub width: f32,
     pub height: f32,
+    /// Left edge of the centered design column on the surface (0 unclamped).
+    /// Draw translates by this; pointer entry points subtract it. Landscape
+    /// centers the column in the RIGHT pane instead of the whole surface.
+    pub column_left: f32,
+    /// Two-pane landscape split (shared Wide gate): artwork pane left, control
+    /// column plus the lyrics / queue body in the right pane.
+    pub landscape: bool,
+    /// Full surface width; equals `width` until the chrome clamp or the
+    /// landscape split narrows the design column.
+    pub surface_width: f32,
+    /// Clamped px-per-dp density, kept for the landscape safe insets (which are
+    /// device dp, not chrome-scale units).
+    pub density: f32,
     pub header_top: f32,
     pub body_top: f32,
     pub progress_top: f32,
@@ -279,16 +316,65 @@ pub(super) struct PlayerLayout {
 }
 
 impl PlayerLayout {
-    pub(super) fn resolve(width: f32, height: f32) -> Self {
-        let scale = (width / DESIGN_WIDTH).max(0.25);
-        Self::resolve_with_scale(width, height, scale)
+    /// Chrome scale for a surface: 393dp-reference growth, clamped so wide
+    /// surfaces stop inflating the chrome (see `MAX_CHROME_SCALE`).
+    pub(super) fn chrome_scale(width: f32, density: f32) -> f32 {
+        let density = density.clamp(0.25, 8.0);
+        (width / DESIGN_WIDTH)
+            .max(0.25)
+            .min(MAX_CHROME_SCALE * density)
+    }
+
+    pub(super) fn resolve(width: f32, height: f32, density: f32) -> Self {
+        let density = density.clamp(0.25, 8.0);
+        // Same gate as the desktop two-pane layout: landscape aspect AND enough
+        // dp of width for two useful panes.
+        let landscape = width / height.max(1.0) >= super::layout::WIDE_MIN_ASPECT_RATIO
+            && width / density >= super::layout::WIDE_MIN_WIDTH_DP;
+        let mut scale = Self::chrome_scale(width, density);
+        // Landscape gives the chrome only the right half. Cap the scale so the
+        // column fits that pane with margins AND the header-less fixed row stack
+        // plus a usable body fits the (short) height without the flex shrink
+        // floor.
+        let pane_left = if landscape { width * 0.5 } else { 0.0 };
+        let pane_width = width - pane_left;
+        if landscape {
+            let pane_fit =
+                (pane_width - 2.0 * LANDSCAPE_COLUMN_MARGIN * density) / DESIGN_WIDTH;
+            let height_fit = height / (FIXED_ROWS_DP + LANDSCAPE_BODY_RESERVE);
+            scale = scale.min(pane_fit).min(height_fit).max(0.25);
+        }
+        // When the clamp engages the design column no longer fills its pane;
+        // lay out inside the column and remember its centered offset.
+        let column_width = (DESIGN_WIDTH * scale).min(pane_width);
+        let mut layout = Self::resolve_stack(column_width, height, scale, landscape);
+        layout.column_left = pane_left + ((pane_width - column_width) * 0.5).max(0.0);
+        layout.landscape = landscape;
+        layout.surface_width = width;
+        layout.density = density;
+        if landscape {
+            // The Artwork-page metadata row re-anchors under the left-pane
+            // cover; the empty column body keeps no metadata of its own.
+            let cover = layout.landscape_artwork_rect_surface();
+            layout.artwork_metadata_top = cover.bottom;
+            layout.artwork_action_center_y =
+                cover.bottom + ARTWORK_METADATA_ROW * layout.scale * 0.5;
+        }
+        layout
     }
 
     fn resolve_with_scale(width: f32, height: f32, scale: f32) -> Self {
+        Self::resolve_stack(width, height, scale, false)
+    }
+
+    fn resolve_stack(width: f32, height: f32, scale: f32, landscape: bool) -> Self {
         let scale = scale.max(0.25);
+        // Landscape drops the compact 92dp header row entirely — title/artist
+        // and the Favorite/More pair live in the left artwork pane instead.
+        let header_row = if landscape { 0.0 } else { COMPACT_HEADER };
         flex_axis!(height;
             top => FlexItem::fixed((TOP_INSET + HANDLE_ROW) * scale),
-            header => FlexItem::fixed(COMPACT_HEADER * scale),
+            header => FlexItem::fixed(header_row * scale),
             body => FlexItem::grow(1.0),
             _progress => FlexItem::fixed(PROGRESS_ROW * scale),
             transport => FlexItem::fixed(TRANSPORT_ROW * scale),
@@ -310,6 +396,10 @@ impl PlayerLayout {
             scale,
             width,
             height,
+            column_left: 0.0,
+            landscape: false,
+            surface_width: width,
+            density: 1.0,
             header_top,
             body_top,
             progress_top,
@@ -324,12 +414,59 @@ impl PlayerLayout {
         }
     }
 
+    /// Top of the lyric band (surface y). Landscape drops the header row, so
+    /// `body_top` already sits right below the drag handle in both orientations.
     pub(super) fn lyrics_content_top(self) -> f32 {
         self.body_top
     }
 
+    /// Bottom inset of the lyric band: the portrait-style 292dp-scaled reserve
+    /// for progress + transport + mode nav, which landscape shares now that the
+    /// bottom chrome lives in the same right-pane column.
     pub(super) fn lyrics_content_bottom(self) -> f32 {
         self.height - self.progress_top
+    }
+
+    pub(super) fn lyrics_content_left(self) -> f32 {
+        if self.landscape {
+            self.surface_width * 0.5 + LANDSCAPE_LYRICS_GUTTER * self.density
+        } else {
+            0.0
+        }
+    }
+
+    /// Right inset of the lyric band — the landscape side padding mirrors the
+    /// pane gutter on the left; portrait keeps the full width.
+    pub(super) fn lyrics_content_right(self) -> f32 {
+        if self.landscape {
+            LANDSCAPE_LYRICS_GUTTER * self.density
+        } else {
+            0.0
+        }
+    }
+
+    /// Surface-space left edge of the left-pane metadata column. It mirrors the
+    /// right-pane design column one pane to the left, so left-pane items reuse
+    /// the Artwork-page design coordinates shifted by half the surface.
+    fn landscape_metadata_column_left(self) -> f32 {
+        self.column_left - self.surface_width * 0.5
+    }
+
+    /// Landscape left-pane cover (surface space): centered in the artwork pane
+    /// above its metadata row, capped to the pane minus generous margins.
+    fn landscape_artwork_rect_surface(self) -> Rect {
+        let pane_width = self.surface_width * 0.5;
+        let metadata_row = ARTWORK_METADATA_ROW * self.scale;
+        let top_inset = TOP_INSET * self.density;
+        let region_height = (self.height - top_inset - metadata_row).max(1.0);
+        // Double the portrait 24dp side margin — the pane is generous, so the
+        // cover keeps clear air on every side.
+        let size = (pane_width - 96.0 * self.scale)
+            .min(region_height - 24.0 * self.scale)
+            .max(1.0);
+        let group_height = size + metadata_row;
+        let top = top_inset + ((self.height - top_inset - group_height) * 0.5).max(0.0);
+        Rect::from_xywh((pane_width - size) * 0.5, top, size, size)
     }
 
     fn rect(self, x: f32, y: f32, width: f32, height: f32) -> Rect {
@@ -346,6 +483,14 @@ impl PlayerLayout {
     }
 
     fn full_artwork_rect(self) -> Rect {
+        if self.landscape {
+            // Column space like the portrait rect (draw re-applies
+            // `column_left`); the pane sits left of the column, so x is
+            // negative.
+            return self
+                .landscape_artwork_rect_surface()
+                .with_offset((-self.column_left, 0.0));
+        }
         let region_top = self.header_top;
         let region_height = (self.artwork_metadata_top - region_top).max(1.0);
         let size = (self.width - 48.0 * self.scale)
@@ -732,7 +877,9 @@ impl PlayerUiLayout {
                 mini: Some(mini),
             };
         }
-        let action_y = if screen == PlayerScreenInput::Artwork {
+        // Landscape metadata is persistent in the left artwork pane, so every
+        // screen anchors the action pair to that metadata row.
+        let action_y = if layout.landscape || screen == PlayerScreenInput::Artwork {
             layout.artwork_action_center_y
         } else {
             layout.action_center_y
@@ -744,6 +891,18 @@ impl PlayerUiLayout {
             Favorite, 301.0, 20.0;
             More, 345.0, 20.0;
         );
+        if layout.landscape {
+            // Favorite/More anchor to the LEFT-pane metadata row. Points and
+            // draws share column space (entry points subtract `column_left`
+            // globally), so express the pair one pane to the left.
+            let shift = layout.landscape_metadata_column_left() - layout.column_left;
+            for control in controls.iter_mut().filter(|control| {
+                matches!(control.button, PlayerButton::Favorite | PlayerButton::More)
+            }) {
+                control.hit_rect = control.hit_rect.with_offset((shift, 0.0));
+                control.center.x += shift;
+            }
+        }
         push_player_controls!(controls, s, transport_y, transport;
             Previous, 101.5, 42.0, 35.0;
             PlayPause, 196.5, 42.0, 42.0;
@@ -822,14 +981,30 @@ impl PlayerUiLayout {
         }
 
         let scroll_top = match self.screen {
-            PlayerScreenInput::Lyrics => self.layout.body_top,
+            PlayerScreenInput::Lyrics => self.layout.lyrics_content_top(),
             PlayerScreenInput::Queue => self.layout.queue_content_top,
             PlayerScreenInput::Artwork => return None,
         };
+        // Points arrive in column space. Portrait scroll spans the whole
+        // surface, not just the design column — extend past the column edges by
+        // its offset. Landscape scroll spans the RIGHT-pane body, where the
+        // control column, lyric band and queue list live; the left artwork pane
+        // never scrolls.
+        let (scroll_left, scroll_right) = if self.layout.landscape {
+            (
+                self.layout.surface_width * 0.5 - self.layout.column_left,
+                self.layout.surface_width - self.layout.column_left,
+            )
+        } else {
+            (
+                -self.layout.column_left,
+                self.layout.width + self.layout.column_left,
+            )
+        };
         Rect::new(
-            0.0,
+            scroll_left,
             scroll_top,
-            self.layout.width,
+            scroll_right,
             bottom_chrome.content_end(self.layout),
         )
         .contains(point)
@@ -1013,6 +1188,8 @@ impl QueueReorderState {
 
 impl BottomChromeSample {
     pub(super) fn content_bottom(self, layout: PlayerLayout) -> f32 {
+        // Landscape shares the portrait reserve: the bottom chrome lives in the
+        // right-pane column, so the body reclaims its space as it idle-hides.
         (layout.height - layout.progress_top).max(0.0) * self.visibility
     }
 
@@ -1275,6 +1452,9 @@ impl LyricsRenderer {
             return -1;
         };
         let scale = player.layout.scale;
+        // Map the surface point into the design column that holds the queue
+        // list (the right-pane column in landscape; no-op unclamped portrait).
+        let x = x - player.layout.column_left;
         let list_top = player.layout.queue_content_top;
         let list_bottom = self
             .player_interaction
@@ -1430,6 +1610,7 @@ impl LyricsRenderer {
         input: Option<&PlayerInput>,
         width: f32,
         height: f32,
+        density: f32,
     ) -> Option<PreparedPlayer> {
         let input = input?;
         let viewport_width = input
@@ -1442,15 +1623,17 @@ impl LyricsRenderer {
             .filter(|value| value.is_finite() && *value > 0.0)
             .unwrap_or(height)
             .clamp(1.0, height);
+        // The mini bar flexes across its viewport, so it keeps the full width and
+        // only shares the (clamped) chrome scale — no centered column there.
         let mini_layout = PlayerLayout::resolve_with_scale(
             viewport_width,
             viewport_height,
-            (width / DESIGN_WIDTH).max(0.25),
+            PlayerLayout::chrome_scale(width, density),
         );
         let layout = if input.presentation == PlayerPresentationInput::Mini {
             mini_layout
         } else {
-            PlayerLayout::resolve(width, height)
+            PlayerLayout::resolve(width, height, density)
         };
         let saved = self.text_attrs;
         self.text_attrs = TextAttrs {
@@ -1682,6 +1865,13 @@ pub(super) fn draw_player(
         );
     }
 
+    // Full-player chrome lays out in the design column; shift it to the column's
+    // centered position (no-op until the chrome-scale clamp engages). Pointer
+    // entry points subtract the same offset, so draw and hit stay consistent.
+    let column_left = layout.column_left;
+    canvas.save();
+    canvas.translate((column_left, 0.0));
+
     // Drag handle — soft white pill (Plus).
     DrawCommand::RoundRect {
         rect: Rect::from_xywh(166.5 * scale, 59.5 * scale, 60.0 * scale, 5.0 * scale),
@@ -1691,15 +1881,28 @@ pub(super) fn draw_player(
     }
     .draw(canvas);
 
-    let page_bounds = Rect::from_xywh(
-        0.0,
-        layout.header_top,
-        layout.width,
-        bottom_chrome.content_end(layout) - layout.header_top,
-    );
+    let page_bounds = if layout.landscape {
+        // Landscape pages live in the right-pane body between the drag handle
+        // and the bottom chrome; the left artwork pane holds no paged content.
+        Rect::new(
+            layout.surface_width * 0.5 - column_left,
+            layout.body_top,
+            layout.surface_width - column_left,
+            bottom_chrome.content_end(layout),
+        )
+    } else {
+        Rect::from_xywh(
+            0.0,
+            layout.header_top,
+            layout.width,
+            bottom_chrome.content_end(layout) - layout.header_top,
+        )
+    };
+    // Landscape has no compact header at all — title/artist and the action pair
+    // are persistent in the left pane and drawn once, outside the page layers.
     let shares_compact_header = transition.shares_compact_header();
     let (lyrics_alpha, lyrics_scale) = transition.content_transform(PlayerScreenInput::Lyrics);
-    if lyrics_alpha > 0.001 && !shares_compact_header {
+    if lyrics_alpha > 0.001 && !shares_compact_header && !layout.landscape {
         draw_content_layer(
             canvas,
             page_bounds,
@@ -1721,7 +1924,7 @@ pub(super) fn draw_player(
         );
     }
     let (artwork_alpha, artwork_scale) = transition.content_transform(PlayerScreenInput::Artwork);
-    if artwork_alpha > 0.001 {
+    if artwork_alpha > 0.001 && !layout.landscape {
         draw_content_layer(
             canvas,
             page_bounds,
@@ -1750,7 +1953,7 @@ pub(super) fn draw_player(
             queue_alpha * expansion,
             queue_scale,
             |canvas, alpha| {
-                if !shares_compact_header {
+                if !shares_compact_header && !layout.landscape {
                     draw_compact_header(
                         canvas,
                         typefaces,
@@ -1781,7 +1984,7 @@ pub(super) fn draw_player(
             },
         );
     }
-    if shares_compact_header {
+    if shares_compact_header && !layout.landscape {
         draw_compact_header(
             canvas,
             typefaces,
@@ -1794,28 +1997,60 @@ pub(super) fn draw_player(
             &mut animating,
         );
     }
+    if layout.landscape {
+        // Persistent left pane: the Artwork-page metadata row plus Favorite and
+        // More below the cover on every screen (the cover itself is the shared
+        // artwork drawn after the column restore).
+        draw_artwork_metadata(
+            canvas,
+            typefaces,
+            player,
+            &active_ui,
+            interaction,
+            now,
+            current_time_ms,
+            expansion,
+            &mut animating,
+        );
+    }
+    canvas.restore();
 
     // One image participates in the transition. Its geometry is interpolated;
     // compact and full cover copies are never cross-faded over one another.
-    // Normal blend (not Plus) so the cover keeps true colour.
+    // Normal blend (not Plus) so the cover keeps true colour. The mini rect is
+    // in surface space while the expanded rects are column space, so this runs
+    // outside the column translate with the expanded rects shifted explicitly.
     let artwork_progress = transition.artwork_progress();
-    let expanded_art = lerp_rect(
-        layout.compact_artwork_rect(),
-        layout.full_artwork_rect(),
-        artwork_progress,
-    );
+    let (expanded_art, expanded_radius) = if layout.landscape {
+        // Landscape has no compact thumb: the cover always sits in the left
+        // artwork pane, so the mini→full lerp targets that rect directly.
+        (
+            layout.full_artwork_rect().with_offset((column_left, 0.0)),
+            18.0 * scale,
+        )
+    } else {
+        (
+            lerp_rect(
+                layout
+                    .compact_artwork_rect()
+                    .with_offset((column_left, 0.0)),
+                layout.full_artwork_rect().with_offset((column_left, 0.0)),
+                artwork_progress,
+            ),
+            lerp(12.0 * scale, 18.0 * scale, artwork_progress),
+        )
+    };
     let shared_art = lerp_rect(
         player.mini_layout.collapsed_artwork_rect(),
         expanded_art,
         expansion,
     );
-    let expanded_radius = lerp(12.0 * scale, 18.0 * scale, artwork_progress);
     let radius = lerp(6.0 * scale, expanded_radius, expansion);
     draw_artwork(canvas, thumbnail, shared_art, radius, 1.0);
 
     if bottom_chrome.visibility > 0.001 {
         canvas.save();
-        canvas.translate((0.0, bottom_chrome.slide_offset(layout)));
+        canvas.translate((column_left, bottom_chrome.slide_offset(layout)));
         draw_progress(
             canvas,
             typefaces,
@@ -2115,11 +2350,19 @@ fn draw_artwork_metadata(
     let layout = player.layout;
     let scale = layout.scale;
     let top = layout.artwork_metadata_top;
+    // The canvas sits at the (right-pane) design column in landscape; shift the
+    // texts into the left-pane metadata column. The Favorite/More controls are
+    // already expressed there by `PlayerUiLayout::resolve`.
+    let metadata_left = if layout.landscape {
+        layout.landscape_metadata_column_left() - layout.column_left
+    } else {
+        0.0
+    };
     *animating |= draw_plus_marquee_text(
         canvas,
         typefaces,
         &player.artwork_title,
-        32.0 * scale,
+        metadata_left + 32.0 * scale,
         top + 24.0 * scale,
         241.0 * scale,
         8.0 * scale,
@@ -2131,7 +2374,7 @@ fn draw_artwork_metadata(
         canvas,
         typefaces,
         &player.artwork_artist,
-        32.0 * scale,
+        metadata_left + 32.0 * scale,
         top + 51.0 * scale,
         241.0 * scale,
         8.0 * scale,
@@ -2250,22 +2493,10 @@ fn draw_queue_body(
 
     let list_top = layout.queue_content_top;
     let list_bottom = bottom_chrome.content_end(layout);
-    canvas.save();
-    canvas.clip_rect(
-        Rect::from_xywh(
-            32.0 * scale,
-            list_top,
-            (layout.width - 64.0 * scale).max(1.0),
-            (list_bottom - list_top).max(1.0),
-        ),
-        ClipOp::Intersect,
-        true,
-    );
-    canvas.translate((0.0, -queue_scroll_y));
-
+    // Cull to the visible band once; the reorder row is lifted to the pointer.
+    let mut rows: Vec<(usize, f32)> = Vec::new();
     for visual_index in 0..player.queue_items.len() {
         let item_index = reordered_item_index(visual_index, queue_reorder);
-        let item = &player.queue_items[item_index];
         let mut top = list_top + visual_index as f32 * 56.0 * scale;
         if queue_reorder.active && item_index == queue_reorder.from {
             top = queue_reorder.pointer_y + queue_scroll_y - 28.0 * scale;
@@ -2276,48 +2507,88 @@ fn draw_queue_body(
         if top + 56.0 * scale - queue_scroll_y <= list_top {
             continue;
         }
-        draw_artwork(
-            canvas,
-            if item.artwork_key.is_empty() {
-                thumbnail
-            } else {
-                queue_artworks.get(&item.artwork_key)
-            },
-            Rect::from_xywh(32.0 * scale, top + 4.0 * scale, 48.0 * scale, 48.0 * scale),
-            8.0 * scale,
-            page_alpha,
-        );
+        rows.push((item_index, top));
+    }
+
+    // The list shares the lyric band's edge treatment: rows dissolve at the top
+    // and bottom instead of hard-clipping at the band. Artwork keeps true
+    // colour (SourceOver) while text and handles stay additive (Plus), so each
+    // blend group is isolated in its own layer and the same `DstIn` fade is
+    // multiplied in before compositing. Both passes run inside the page layer's
+    // transform, so the fade tracks the page-switch scale like the lyrics do.
+    let list_bounds = Rect::from_xywh(
+        32.0 * scale,
+        list_top,
+        (layout.width - 64.0 * scale).max(1.0),
+        (list_bottom - list_top).max(1.0),
+    );
+    let fade_px = (list_bottom - list_top).max(1.0) * 0.12;
+    for plus_pass in [false, true] {
+        let mut layer = Paint::default();
+        if plus_pass {
+            layer.set_blend_mode(BlendMode::Plus);
+        }
+        canvas.save_layer(&SaveLayerRec::default().bounds(&list_bounds).paint(&layer));
+        canvas.clip_rect(list_bounds, ClipOp::Intersect, true);
         canvas.save();
-        canvas.clip_rect(
-            Rect::from_xywh(92.0 * scale, top, 238.0 * scale, 56.0 * scale),
-            ClipOp::Intersect,
-            true,
-        );
-        draw_plus_text(
+        canvas.translate((0.0, -queue_scroll_y));
+        for &(item_index, top) in &rows {
+            let item = &player.queue_items[item_index];
+            if !plus_pass {
+                draw_artwork(
+                    canvas,
+                    if item.artwork_key.is_empty() {
+                        thumbnail
+                    } else {
+                        queue_artworks.get(&item.artwork_key)
+                    },
+                    Rect::from_xywh(32.0 * scale, top + 4.0 * scale, 48.0 * scale, 48.0 * scale),
+                    8.0 * scale,
+                    page_alpha,
+                );
+                continue;
+            }
+            canvas.save();
+            canvas.clip_rect(
+                Rect::from_xywh(92.0 * scale, top, 238.0 * scale, 56.0 * scale),
+                ClipOp::Intersect,
+                true,
+            );
+            draw_plus_text(
+                canvas,
+                typefaces,
+                &item.title,
+                92.0 * scale,
+                top + 8.0 * scale,
+                TEXT_PRIMARY_ALPHA * page_alpha,
+            );
+            draw_plus_text(
+                canvas,
+                typefaces,
+                &item.artist,
+                92.0 * scale,
+                top + 30.0 * scale,
+                TEXT_SECONDARY_ALPHA * page_alpha,
+            );
+            canvas.restore();
+            draw_reorder_handle(
+                canvas,
+                Point::new(349.0 * scale, top + 28.0 * scale),
+                scale,
+                page_alpha,
+            );
+        }
+        canvas.restore();
+        super::draw::apply_vertical_fade_skia_band(
             canvas,
-            typefaces,
-            &item.title,
-            92.0 * scale,
-            top + 8.0 * scale,
-            TEXT_PRIMARY_ALPHA * page_alpha,
-        );
-        draw_plus_text(
-            canvas,
-            typefaces,
-            &item.artist,
-            92.0 * scale,
-            top + 30.0 * scale,
-            TEXT_SECONDARY_ALPHA * page_alpha,
+            layout.width,
+            list_top,
+            list_bottom,
+            fade_px,
+            fade_px,
         );
         canvas.restore();
-        draw_reorder_handle(
-            canvas,
-            Point::new(349.0 * scale, top + 28.0 * scale),
-            scale,
-            page_alpha,
-        );
     }
-    canvas.restore();
 }
 
 fn reordered_item_index(visual_index: usize, reorder: QueueReorderSample) -> usize {
@@ -2448,27 +2719,22 @@ fn draw_transport(
     let (play_width, play_height) = play.transport_size();
     let play_animation = interaction.animation_for(PlayerButton::PlayPause, now);
     *animating |= play_animation.active;
-    if player.is_playing {
-        draw_icon(
-            canvas,
-            &player.icons.pause,
-            play.center,
-            play_width * (32.0 / 42.0) * play_animation.scale,
-            play_height * play_animation.scale,
-            WHITE,
-            chrome_alpha,
-        );
-    } else {
-        draw_icon(
-            canvas,
-            &player.icons.play,
-            play.center,
-            play_width * play_animation.scale,
-            play_height * play_animation.scale,
-            WHITE,
-            chrome_alpha,
-        );
-    }
+    // Play and pause share the same 32×32 viewbox and the same 42×42 transport
+    // box; the icon command's uniform fit keeps the glyphs the same size, so the
+    // toggle never appears to shrink.
+    draw_icon(
+        canvas,
+        if player.is_playing {
+            &player.icons.pause
+        } else {
+            &player.icons.play
+        },
+        play.center,
+        play_width * play_animation.scale,
+        play_height * play_animation.scale,
+        WHITE,
+        chrome_alpha,
+    );
 }
 
 fn draw_mode_navigation(
@@ -2602,7 +2868,6 @@ fn draw_content_layer(
     draw: impl FnOnce(&skia_safe::Canvas, f32),
 ) {
     canvas.save();
-    canvas.clip_rect(bounds, ClipOp::Intersect, true);
     let center = Point::new(
         (bounds.left + bounds.right) * 0.5,
         (bounds.top + bounds.bottom) * 0.5,
@@ -2610,6 +2875,10 @@ fn draw_content_layer(
     canvas.translate(center);
     canvas.scale((scale, scale));
     canvas.translate((-center.x, -center.y));
+    // Clip INSIDE the page transform so the bounds shrink with the content —
+    // a screen-space clip would expose normally-clipped ink in the border strip
+    // while the page scales (see the lyric band's transition clip).
+    canvas.clip_rect(bounds, ClipOp::Intersect, true);
     draw(canvas, alpha.clamp(0.0, 1.0));
     canvas.restore();
 }
@@ -2917,7 +3186,7 @@ mod tests {
 
     #[test]
     fn penpot_reference_layout_matches_393_by_852() {
-        let layout = PlayerLayout::resolve(393.0, 852.0);
+        let layout = PlayerLayout::resolve(393.0, 852.0, 1.0);
         assert_eq!(layout.header_top, 80.0);
         assert_eq!(layout.body_top, 172.0);
         assert_eq!(layout.progress_top, 560.0);
@@ -2930,7 +3199,7 @@ mod tests {
 
     #[test]
     fn compressed_flex_rows_remain_ordered() {
-        let layout = PlayerLayout::resolve(393.0, 400.0);
+        let layout = PlayerLayout::resolve(393.0, 400.0, 1.0);
         assert!(layout.header_top <= layout.body_top);
         assert!(layout.body_top <= layout.progress_top);
         assert!(layout.progress_top <= layout.transport_center_y);
@@ -2940,7 +3209,7 @@ mod tests {
 
     #[test]
     fn mini_player_uses_horizontal_flex_slots() {
-        let layout = PlayerLayout::resolve(393.0, 60.0);
+        let layout = PlayerLayout::resolve(393.0, 60.0, 1.0);
         let mini = MiniPlayerLayout::resolve(layout);
         assert_eq!(mini.artwork, Rect::from_xywh(8.0, 8.0, 44.0, 44.0));
         assert_eq!(mini.text.left, 60.0);
@@ -2951,7 +3220,7 @@ mod tests {
 
     #[test]
     fn artwork_geometry_matches_penpot_reference() {
-        let layout = PlayerLayout::resolve(393.0, 852.0);
+        let layout = PlayerLayout::resolve(393.0, 852.0, 1.0);
         assert_eq!(layout.artwork_metadata_top, 464.0);
         let artwork = layout.full_artwork_rect();
         assert_eq!(artwork, Rect::from_xywh(24.0, 99.5, 345.0, 345.0));
@@ -2959,15 +3228,15 @@ mod tests {
 
     #[test]
     fn flexible_body_absorbs_extra_height() {
-        let short = PlayerLayout::resolve(393.0, 852.0);
-        let tall = PlayerLayout::resolve(393.0, 932.0);
+        let short = PlayerLayout::resolve(393.0, 852.0, 1.0);
+        let tall = PlayerLayout::resolve(393.0, 932.0, 1.0);
         assert_eq!(short.body_top, tall.body_top);
         assert_eq!(tall.progress_top - short.progress_top, 80.0);
     }
 
     #[test]
     fn transport_hit_targets_follow_visual_order() {
-        let layout = PlayerLayout::resolve(393.0, 852.0);
+        let layout = PlayerLayout::resolve(393.0, 852.0, 1.0);
         let ui = PlayerUiLayout::resolve(
             layout,
             PlayerScreenInput::Lyrics,
@@ -3008,7 +3277,7 @@ mod tests {
 
     #[test]
     fn lyrics_and_queue_bottom_chrome_hide_after_three_seconds() {
-        let layout = PlayerLayout::resolve(393.0, 852.0);
+        let layout = PlayerLayout::resolve(393.0, 852.0, 1.0);
         let now = Instant::now();
         let state = PlayerInteractionState {
             last_activity_at: now - std::time::Duration::from_millis(3_180),
@@ -3105,7 +3374,7 @@ mod tests {
 
     #[test]
     fn queue_filter_hit_targets_only_exist_on_queue_screen() {
-        let layout = PlayerLayout::resolve(393.0, 852.0);
+        let layout = PlayerLayout::resolve(393.0, 852.0, 1.0);
         let mut state = PlayerInteractionState::default();
         let lyrics_ui = PlayerUiLayout::resolve(
             layout,
@@ -3126,7 +3395,7 @@ mod tests {
 
     #[test]
     fn queue_ui_hit_test_matches_every_resolved_control_center() {
-        let layout = PlayerLayout::resolve(393.0, 852.0);
+        let layout = PlayerLayout::resolve(393.0, 852.0, 1.0);
         let ui = PlayerUiLayout::resolve(
             layout,
             PlayerScreenInput::Queue,
@@ -3149,7 +3418,7 @@ mod tests {
 
     #[test]
     fn scroll_regions_share_the_player_hit_test_and_controls_take_precedence() {
-        let layout = PlayerLayout::resolve(393.0, 852.0);
+        let layout = PlayerLayout::resolve(393.0, 852.0, 1.0);
         let visible = BottomChromeSample {
             visibility: 1.0,
             active: false,
@@ -3178,7 +3447,7 @@ mod tests {
 
     #[test]
     fn mini_player_hit_test_exposes_open_behind_transport_controls() {
-        let layout = PlayerLayout::resolve(393.0, 60.0);
+        let layout = PlayerLayout::resolve(393.0, 60.0, 1.0);
         let ui = PlayerUiLayout::resolve(
             layout,
             PlayerScreenInput::Artwork,
@@ -3253,6 +3522,148 @@ mod tests {
         assert_eq!(player.queue_items.len(), 1);
         assert_eq!(player.queue_items[0].title, "Moon Music");
         assert_eq!(player.queue_items[0].artwork_key, "content://cover/1");
+    }
+
+    #[test]
+    fn pause_and_play_share_the_transport_icon_box() {
+        // Regression: pause used to draw in a 32/42-scaled box, so it rendered
+        // ~24% smaller than play. Both glyphs share the 32×32 viewbox and must
+        // share the full 42×42 transport box.
+        let icons = PlayerIcons::new();
+        assert_eq!(
+            (icons.pause.view_width, icons.pause.view_height),
+            (icons.play.view_width, icons.play.view_height),
+        );
+        let layout = PlayerLayout::resolve(393.0, 852.0, 1.0);
+        let ui = PlayerUiLayout::resolve(
+            layout,
+            PlayerScreenInput::Lyrics,
+            PlayerPresentationInput::Full,
+        );
+        assert_eq!(
+            ui.control(PlayerButton::PlayPause).transport_size(),
+            (42.0, 42.0),
+        );
+    }
+
+    #[test]
+    fn landscape_phone_keeps_bottom_chrome_on_screen_with_a_lyric_band() {
+        // 2340×1080 @ density 2.75 — the layout that used to squash the flex
+        // stack to its 0.7 floor and push transport/mode-nav off screen.
+        let layout = PlayerLayout::resolve(2340.0, 1080.0, 2.75);
+        assert!(layout.landscape);
+        // Height cap won: the header-less fixed rows keep their full basis (no
+        // squash), so the progress row starts exactly 292dp×scale above the
+        // bottom — the same reserve as portrait.
+        assert!((layout.scale - 1080.0 / (FIXED_ROWS_DP + LANDSCAPE_BODY_RESERVE)).abs() < 1e-3);
+        assert!((layout.height - layout.progress_top - 292.0 * layout.scale).abs() < 0.5);
+        // Control column is centered inside the RIGHT pane.
+        let pane_width = 2340.0 * 0.5;
+        assert!(layout.column_left >= pane_width);
+        assert!(layout.column_left + layout.width <= 2340.0 + 0.5);
+
+        let ui = PlayerUiLayout::resolve(
+            layout,
+            PlayerScreenInput::Lyrics,
+            PlayerPresentationInput::Full,
+        );
+        for button in [
+            PlayerButton::Previous,
+            PlayerButton::PlayPause,
+            PlayerButton::Next,
+            PlayerButton::Lyrics,
+            PlayerButton::Output,
+            PlayerButton::Queue,
+        ] {
+            let rect = ui.control(button).hit_rect;
+            assert!(rect.top >= 0.0, "{button:?} must start on-screen");
+            assert!(rect.bottom <= layout.height, "{button:?} must end on-screen");
+            assert!(rect.left + layout.column_left >= pane_width - 0.5);
+            assert!(rect.right + layout.column_left <= 2340.0 + 0.5);
+        }
+
+        // Cover + metadata + Favorite/More live in the LEFT artwork pane, with
+        // the action pair anchored to the metadata row under the cover.
+        let cover = layout.full_artwork_rect();
+        assert!(cover.left + layout.column_left >= 0.0);
+        assert!(cover.right + layout.column_left <= pane_width + 0.5);
+        assert!(cover.top >= TOP_INSET * layout.density - 0.5);
+        assert!((layout.artwork_metadata_top - cover.bottom).abs() < 0.5);
+        for button in [PlayerButton::Favorite, PlayerButton::More] {
+            let control = ui.control(button);
+            assert!(control.center.x + layout.column_left < pane_width);
+            assert!(control.hit_rect.left + layout.column_left >= 0.0);
+            assert_eq!(control.center.y, layout.artwork_action_center_y);
+            assert!(control.hit_rect.bottom <= layout.height);
+        }
+
+        // Lyric band: the right-pane body between the handle and the portrait
+        // 292dp bottom reserve, padded off both pane edges.
+        assert!(layout.lyrics_content_left() >= pane_width);
+        assert!(layout.lyrics_content_left() < 2340.0);
+        assert!(layout.lyrics_content_right() > 0.0);
+        assert_eq!(layout.lyrics_content_top(), layout.body_top);
+        let band_height =
+            layout.height - layout.lyrics_content_top() - layout.lyrics_content_bottom();
+        assert!(band_height > 300.0, "lyric band must not collapse");
+
+        // Scroll hits live in the right-pane body (points arrive in column
+        // space); the left artwork pane is not a scroll region.
+        let visible = BottomChromeSample {
+            visibility: 1.0,
+            active: false,
+        };
+        assert_eq!(
+            ui.hit_test(Point::new(1700.0 - layout.column_left, 300.0), visible),
+            Some(PlayerHit::Scroll),
+        );
+        assert_eq!(
+            ui.hit_test(Point::new(400.0 - layout.column_left, 300.0), visible),
+            None,
+        );
+
+        // The queue list shares the right-pane column and body.
+        let queue = PlayerUiLayout::resolve(
+            layout,
+            PlayerScreenInput::Queue,
+            PlayerPresentationInput::Full,
+        );
+        assert!(layout.queue_content_top >= layout.body_top);
+        assert_eq!(
+            queue.hit_test(
+                Point::new(1700.0 - layout.column_left, layout.queue_content_top + 10.0),
+                visible,
+            ),
+            Some(PlayerHit::Scroll),
+        );
+        // The idle-hide reclaims the bottom reserve, like portrait.
+        let hidden = BottomChromeSample {
+            visibility: 0.0,
+            active: false,
+        };
+        assert_eq!(hidden.content_bottom(layout), 0.0);
+    }
+
+    #[test]
+    fn landscape_tablet_keeps_the_density_clamped_chrome_scale() {
+        // 2560×1600 @ density 2.0 — both landscape caps are looser than the
+        // existing 1.15×density clamp, which must keep winning.
+        let layout = PlayerLayout::resolve(2560.0, 1600.0, 2.0);
+        assert!(layout.landscape);
+        assert!((layout.scale - MAX_CHROME_SCALE * 2.0).abs() < 1e-3);
+        assert!(layout.column_left >= 1280.0);
+        assert!(layout.column_left + layout.width <= 2560.0 + 0.5);
+        assert!((layout.height - layout.progress_top - 292.0 * layout.scale).abs() < 0.5);
+    }
+
+    #[test]
+    fn portrait_layout_is_unchanged_by_the_landscape_split() {
+        let layout = PlayerLayout::resolve(393.0, 852.0, 1.0);
+        assert!(!layout.landscape);
+        assert_eq!(layout.lyrics_content_left(), 0.0);
+        assert_eq!(layout.lyrics_content_right(), 0.0);
+        assert_eq!(layout.lyrics_content_top(), layout.body_top);
+        assert_eq!(layout.lyrics_content_bottom(), 292.0);
     }
 
     #[test]
