@@ -13,6 +13,8 @@ import android.renderscript.RenderScript
 import android.renderscript.ScriptIntrinsicBlur
 import androidx.compose.foundation.Image
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -30,6 +32,8 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.util.fastRoundToInt
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlin.math.ceil
 import kotlin.math.sqrt
 
@@ -97,6 +101,48 @@ fun blurBitmapUnbounded(context: Context, bitmap: Bitmap, radius: Float): Bitmap
     return blurBitmapWithRenderScriptMultiPass(context, paddedBitmap, radius)
 }
 
+/** Working copies never need to exceed this on their longest edge — at the large
+ *  radii the flowing background asks for, blurring a small copy at a proportionally
+ *  reduced radius and upscaling is visually identical to blurring at full size. */
+private const val MAX_BLUR_INPUT_DIMENSION = 128
+
+/**
+ * Large radii made [blurBitmapWithRenderScriptMultiPass] explode: passes grow with
+ * (radius / 25)^2, so a 150.dp radius meant hundreds of sequential RenderScript
+ * passes. Instead, downscale so the scaled radius fits a single <= 25px pass
+ * (also capping the input size), blur once, and upscale back to the exact padded
+ * size the full-resolution path would have produced.
+ */
+fun blurBitmapUnboundedDownscaled(context: Context, bitmap: Bitmap, radius: Float): Bitmap {
+    if (radius <= 0f) return bitmap
+
+    val maxDimension = maxOf(bitmap.width, bitmap.height)
+    val scale = minOf(
+        1f,
+        MAX_BLUR_INPUT_DIMENSION.toFloat() / maxDimension,
+        25f / radius
+    )
+    if (scale >= 1f) return blurBitmapUnbounded(context, bitmap, radius)
+
+    val scaledInput = Bitmap.createScaledBitmap(
+        bitmap,
+        (bitmap.width * scale).fastRoundToInt().coerceAtLeast(1),
+        (bitmap.height * scale).fastRoundToInt().coerceAtLeast(1),
+        true
+    )
+    val blurred = blurBitmapUnbounded(context, scaledInput, radius * scale)
+
+    // Match the geometry of the un-scaled path so painters/layout see the same
+    // intrinsic size: original bounds plus the full-resolution blur padding.
+    val padding = ceil(radius.toDouble()).fastRoundToInt()
+    return Bitmap.createScaledBitmap(
+        blurred,
+        bitmap.width + padding * 2,
+        bitmap.height + padding * 2,
+        true
+    )
+}
+
 
 @Composable
 actual fun CompatBlurImage(
@@ -125,12 +171,19 @@ actual fun CompatBlurImage(
     else {
         val context = LocalContext.current
         val blurRadiusPx = with(LocalDensity.current) {blurRadius.toPx()}
-        val blurredBitmap = remember(bitmap) {
-            blurBitmapUnbounded(
-                context,
-                bitmap.asAndroidBitmap(),
-                blurRadiusPx
-            ).asImageBitmap()
+        // Blur off the main thread (the synchronous remember{} version froze the UI
+        // for the whole multipass run). Until the blurred copy is ready — or while a
+        // bitmap/radius change is being recomputed — the previous value is shown
+        // (initially the sharp bitmap). Keyed on the radius too: remember(bitmap)
+        // alone missed radius changes.
+        val blurredBitmap by produceState(initialValue = bitmap, bitmap, blurRadiusPx) {
+            value = withContext(Dispatchers.Default) {
+                blurBitmapUnboundedDownscaled(
+                    context,
+                    bitmap.asAndroidBitmap(),
+                    blurRadiusPx
+                ).asImageBitmap()
+            }
         }
         val bitmapPainter = remember(blurredBitmap) { BitmapPainter(blurredBitmap, filterQuality = filterQuality) }
         Image(

@@ -73,6 +73,14 @@ class PlayerViewModel(
 
     private val _uiState = MutableStateFlow(PlayerUiState())
     val uiState = _uiState.asStateFlow()
+
+    // Authoritative playback sample, deliberately OUTSIDE uiState (clef's model):
+    // pushing the 250ms position tick through uiState recomposed the whole screen
+    // (ModalScaffold + AndroidView update) four times a second. The UI never
+    // collects this flow — `currentPositionProvider` reads `.value` on demand, so
+    // steady-state playback causes zero recomposition.
+    private val _playbackSample = MutableStateFlow(PlaybackState())
+    val playbackSample = _playbackSample.asStateFlow()
     private var mediaController: MediaController? = null
     private var positionUpdateJob: Job? = null
     private var artworkClearJob: Job? = null
@@ -141,14 +149,16 @@ class PlayerViewModel(
             }
         }
 
+        val newPlaybackState = PlaybackState(
+            isPlaying = controller.isPlaying,
+            position = controller.currentPosition,
+            duration = controller.duration.takeIf { it != C.TIME_UNSET } ?: 0L,
+            lastUpdateTime = System.currentTimeMillis()
+        )
+        _playbackSample.value = newPlaybackState
         updateState { currentState ->
             currentState.copy(
-                playbackState = currentState.playbackState.copy(
-                    isPlaying = controller.isPlaying,
-                    position = controller.currentPosition,
-                    duration = controller.duration.takeIf { it != C.TIME_UNSET } ?: 0L,
-                    lastUpdateTime = System.currentTimeMillis()
-                ),
+                playbackState = newPlaybackState,
                 isReady = true
             )
         }
@@ -303,12 +313,12 @@ class PlayerViewModel(
         val controller = mediaController ?: return
         positionUpdateJob = viewModelScope.launch {
             while (isActive) {
-                updateState { currentState ->
-                    currentState.copy(
-                        playbackState = currentState.playbackState.copy(
-                            position = controller.currentPosition,
-                            lastUpdateTime = System.currentTimeMillis()
-                        )
+                // Resync only the out-of-band sample — never uiState — so the
+                // 250ms tick does not recompose anything.
+                _playbackSample.update {
+                    it.copy(
+                        position = controller.currentPosition,
+                        lastUpdateTime = System.currentTimeMillis()
                     )
                 }
                 delay(250)
@@ -334,12 +344,10 @@ class PlayerViewModel(
         val controller = mediaController ?: return
         val position = position.toLong()
         controller.seekTo(position)
-        updateState { currentState ->
-            currentState.copy(
-                playbackState = currentState.playbackState.copy(
-                    position = position,
-                    lastUpdateTime = System.currentTimeMillis()
-                )
+        _playbackSample.update {
+            it.copy(
+                position = position,
+                lastUpdateTime = System.currentTimeMillis()
             )
         }
     }

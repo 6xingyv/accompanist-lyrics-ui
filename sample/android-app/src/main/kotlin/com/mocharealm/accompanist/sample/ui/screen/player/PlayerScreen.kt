@@ -36,7 +36,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -78,17 +77,18 @@ fun PlayerScreen(
     shareViewModel: ShareViewModel = koinViewModel(),
 ) {
     val uiState by playerViewModel.uiState.collectAsState()
-    val latestPlaybackState by rememberUpdatedState(uiState.playbackState)
 
     // Playback position is no longer interpolated frame-by-frame in Compose (which
     // pushed a new value through recomposition every frame and froze on overshoot).
     // This provider just reports the AUTHORITATIVE sample the player publishes
-    // (~every 250ms, plus seeks), projected to "now". The native view smoothly
-    // interpolates between samples on its render thread and decelerates to reconcile
-    // when a sample lands behind it — so the read path is one hop, not a frame loop.
-    val currentPositionProvider = remember {
+    // (~every 250ms, plus seeks), projected to "now". The sample lives OUTSIDE
+    // uiState (playbackSample is read on demand, never collected), so the 250ms
+    // resync tick causes zero recomposition. The native view smoothly interpolates
+    // between samples on its render thread and decelerates to reconcile when a
+    // sample lands behind it — so the read path is one hop, not a frame loop.
+    val currentPositionProvider = remember(playerViewModel) {
         {
-            val ps = latestPlaybackState
+            val ps = playerViewModel.playbackSample.value
             val elapsed = if (ps.isPlaying) System.currentTimeMillis() - ps.lastUpdateTime else 0L
             val projected = ps.position + elapsed
             val bounded = if (ps.duration > 0) projected.coerceAtMost(ps.duration) else projected
@@ -178,7 +178,6 @@ fun NativePlayerScreen(
                     cover = cover
                 )
                 shareViewModel.prepareForSharing(context)
-                playerViewModel.onShareRequested()
             }
         },
         backgroundArtwork = uiState.backgroundState.bitmap,

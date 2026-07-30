@@ -31,10 +31,15 @@ val LocalWindowLayoutType = staticCompositionLocalOf<WindowLayoutType> {
     error("No WindowLayoutType provided. Did you forget to wrap your app in AdaptiveLayoutProvider?")
 }
 
+/** Whether the app is running on a television (leanback) device. */
+@Composable
+expect fun isTelevision(): Boolean
+
 @Composable
 fun AdaptiveLayoutProvider(
     content: @Composable () -> Unit
 ) {
+    val isTv = isTelevision()
     BoxWithConstraints {
         // Classify by the SHORTER edge (smallest width), not just the width, so a
         // phone stays `Phone` in landscape too — otherwise a phone turned sideways
@@ -42,6 +47,7 @@ fun AdaptiveLayoutProvider(
         // fluid-mesh player. A real tablet's shorter edge is still ≥ the breakpoint.
         val shortestEdge = minOf(maxWidth, maxHeight)
         val layoutType = when {
+            isTv -> WindowLayoutType.Tv
             shortestEdge < WindowBreakpoints.Tablet -> WindowLayoutType.Phone
             shortestEdge < WindowBreakpoints.Desktop -> WindowLayoutType.Tablet
             else -> WindowLayoutType.Desktop

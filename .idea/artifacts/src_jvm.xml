@@ -1,8 +1,6 @@
 <component name="ArtifactManager">
   <artifact type="jar" name="src-jvm">
     <output-path>$PROJECT_DIR$/src/build/libs</output-path>
-    <root id="archive" name="src-jvm.jar">
-      <element id="module-output" name="lyrics-ui.src.jvmMain" />
-    </root>
+    <root id="archive" name="src-jvm.jar" />
   </artifact>
 </component>

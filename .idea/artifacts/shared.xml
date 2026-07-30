@@ -1,8 +1,6 @@
 <component name="ArtifactManager">
   <artifact type="jar" name="shared">
     <output-path>$PROJECT_DIR$/sample/shared/build/libs</output-path>
-    <root id="archive" name="shared.jar">
-      <element id="module-output" name="lyrics-ui.sample.shared.androidMain" />
-    </root>
+    <root id="archive" name="shared.jar" />
   </artifact>
 </component>
