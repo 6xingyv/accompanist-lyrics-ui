@@ -312,11 +312,11 @@ fun KaraokeLyricsView(
                     try {
                         scrollInCode.value = true
                         if (scrollOffset != null) {
-                            listState.scrollBy(scrollOffset.toFloat())
+                            listState.scrollBy(scrollOffset)
                         } else {
                             listState.animateScrollToItem(
                                 firstIndex,
-                                (-stableOffsetPx - keepAliveZonePx).toInt()
+                                0
                             )
                         }
                     } catch (_: Exception) {
