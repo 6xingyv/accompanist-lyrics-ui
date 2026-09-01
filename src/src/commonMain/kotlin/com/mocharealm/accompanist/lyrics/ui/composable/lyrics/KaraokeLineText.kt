@@ -248,7 +248,7 @@ private fun DrawScope.drawRowText(
             val charLayouts = syllableLayout.charLayouts ?: emptyList()
             val charBounds = syllableLayout.charOriginalBounds ?: emptyList()
 
-            val numCharsInWord = wordAnimInfo.wordContent.length
+            val numCharsInWord = wordAnimInfo.animationUnitCount
             val earliestStartTime = wordAnimInfo.wordStartTime
             val latestStartTime = wordAnimInfo.wordEndTime - awesomeDuration
             val animationIntensityBase =
@@ -256,9 +256,7 @@ private fun DrawScope.drawRowText(
             val dipAndRise = DipAndRise(dip = (0.5 * animationIntensityBase).coerceIn(0.0, 0.5))
             val swell = Swell((0.1 * animationIntensityBase).coerceIn(0.0, 0.1))
 
-            syllableLayout.syllable.content.forEachIndexed { charIndex, _ ->
-                val singleCharLayoutResult =
-                    charLayouts.getOrNull(charIndex) ?: return@forEachIndexed
+            charLayouts.forEachIndexed { charIndex, singleCharLayoutResult ->
                 val charBox = charBounds.getOrNull(charIndex) ?: return@forEachIndexed
 
                 val absoluteCharIndex = syllableLayout.charOffsetInWord + charIndex
@@ -304,7 +302,7 @@ private fun DrawScope.drawRowText(
             if (showPhonetic) {
                 syllableLayout.phoneticLayoutResult?.let { phoneticLayout ->
                     val syllableMidIndex =
-                        syllableLayout.charOffsetInWord + (syllableLayout.syllable.content.length - 1) / 2f
+                        syllableLayout.charOffsetInWord + (charLayouts.size - 1) / 2f
                     val syllableRatio =
                         if (numCharsInWord > 1) syllableMidIndex / (numCharsInWord - 1) else 0.5f
                     val awesomeStartTime =
