@@ -128,6 +128,8 @@ fun KaraokeLyricsView(
     useBlurEffect: Boolean = true,
     showTranslation: Boolean = true,
     showPhonetic: Boolean = true,
+    enableSyllableBounce: Boolean = true,
+    enableIndicSyllableBounce: Boolean = true,
     offset: Dp = 32.dp,
     keepAliveZone: Dp = 100.dp,
     blurDelta: Float = 3f,
@@ -151,7 +153,9 @@ fun KaraokeLyricsView(
         lyrics,
         stableNormalTextStyle,
         stableAccompanimentTextStyle,
-        stablePhoneticTextStyle
+        stablePhoneticTextStyle,
+        enableSyllableBounce,
+        enableIndicSyllableBounce
     ) {
         layoutCache.clear()
         withContext(Dispatchers.Default) {
@@ -184,7 +188,9 @@ fun KaraokeLyricsView(
                         style = style,
                         phoneticStyle = phoneticStyle,
                         isAccompanimentLine = line is KaraokeLine.AccompanimentKaraokeLine,
-                        spaceWidth = spaceWidth
+                        spaceWidth = spaceWidth,
+                        enableSyllableBounce = enableSyllableBounce,
+                        enableIndicSyllableBounce = enableIndicSyllableBounce
                     )
 
                     withContext(Dispatchers.Main) {
@@ -471,6 +477,8 @@ fun KaraokeLyricsView(
                                                 showDebugRectangles = showDebugRectangles,
                                                 showTranslation = showTranslation,
                                                 showPhonetic = showPhonetic,
+                                                enableSyllableBounce = enableSyllableBounce,
+                                                enableIndicSyllableBounce = enableIndicSyllableBounce,
                                                 precalculatedLayouts = layoutCache[index]
                                             )
                                         }

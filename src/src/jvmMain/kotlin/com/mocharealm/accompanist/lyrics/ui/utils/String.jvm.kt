@@ -32,10 +32,20 @@ private val arabicBlocks: Set<Character.UnicodeBlock> by lazy {
     )
 }
 
-private val devanagariBlocks: Set<Character.UnicodeBlock> by lazy {
+private val indicBlocks: Set<Character.UnicodeBlock> by lazy {
     setOf(
         Character.UnicodeBlock.DEVANAGARI,
-        Character.UnicodeBlock.DEVANAGARI_EXTENDED
+        Character.UnicodeBlock.DEVANAGARI_EXTENDED,
+        Character.UnicodeBlock.BENGALI,
+        Character.UnicodeBlock.GURMUKHI,
+        Character.UnicodeBlock.GUJARATI,
+        Character.UnicodeBlock.ORIYA,
+        Character.UnicodeBlock.TAMIL,
+        Character.UnicodeBlock.TELUGU,
+        Character.UnicodeBlock.KANNADA,
+        Character.UnicodeBlock.MALAYALAM,
+        Character.UnicodeBlock.SINHALA,
+        Character.UnicodeBlock.VEDIC_EXTENSIONS
     )
 }
 
@@ -47,6 +57,6 @@ actual fun Char.isArabic(): Boolean {
     return Character.UnicodeBlock.of(this) in arabicBlocks
 }
 
-actual fun Char.isDevanagari(): Boolean {
-    return Character.UnicodeBlock.of(this) in devanagariBlocks
+actual fun Char.isIndic(): Boolean {
+    return Character.UnicodeBlock.of(this) in indicBlocks
 }

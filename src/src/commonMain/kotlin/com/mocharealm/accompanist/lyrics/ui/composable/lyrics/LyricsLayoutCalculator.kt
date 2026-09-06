@@ -7,8 +7,9 @@ import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.TextStyle
 import com.mocharealm.accompanist.lyrics.core.model.karaoke.KaraokeSyllable
+import com.mocharealm.accompanist.lyrics.ui.utils.getGraphemeClusters
 import com.mocharealm.accompanist.lyrics.ui.utils.isArabic
-import com.mocharealm.accompanist.lyrics.ui.utils.isDevanagari
+import com.mocharealm.accompanist.lyrics.ui.utils.isIndic
 import com.mocharealm.accompanist.lyrics.ui.utils.isPunctuation
 import com.mocharealm.accompanist.lyrics.ui.utils.isPureCjk
 import kotlin.math.pow
@@ -36,7 +37,8 @@ data class WordAnimationInfo(
     val wordStartTime: Long,
     val wordEndTime: Long,
     val wordContent: String,
-    val wordDuration: Long = wordEndTime - wordStartTime
+    val wordDuration: Long = wordEndTime - wordStartTime,
+    val totalClusters: Int = wordContent.getGraphemeClusters().size
 )
 
 @Stable
@@ -96,10 +98,15 @@ fun calculateRowRenderData(
     }
 }
 
-fun String.shouldUseSimpleAnimation(): Boolean {
+fun String.shouldUseSimpleAnimation(
+    enableSyllableBounce: Boolean = true,
+    enableIndicSyllableBounce: Boolean = true
+): Boolean {
+    if (!enableSyllableBounce) return true
     val cleanedStr = this.filter { !it.isWhitespace() && !it.toString().isPunctuation() }
     if (cleanedStr.isEmpty()) return false
-    return cleanedStr.isPureCjk() || cleanedStr.any { it.isArabic() || it.isDevanagari() }
+    if (!enableIndicSyllableBounce && cleanedStr.any { it.isIndic() }) return true
+    return cleanedStr.isPureCjk() || cleanedStr.any { it.isArabic() }
 }
 
 fun groupIntoWords(syllables: List<KaraokeSyllable>): List<List<KaraokeSyllable>> {
@@ -125,23 +132,29 @@ fun measureSyllablesAndDetermineAnimation(
     style: TextStyle,
     phoneticStyle: TextStyle,
     isAccompanimentLine: Boolean,
-    spaceWidth: Float
+    spaceWidth: Float,
+    enableSyllableBounce: Boolean = true,
+    enableIndicSyllableBounce: Boolean = true
 ): List<SyllableLayout> {
     val words = groupIntoWords(syllables)
     val fastCharAnimationThresholdMs = 200f
 
     return words.flatMapIndexed { wordIndex, word ->
         val wordContent = word.joinToString("") { it.content }
+        val wordClusters = wordContent.getGraphemeClusters()
         val wordDuration = if (word.isNotEmpty()) word.last().end - word.first().start else 0
-        val perCharDuration = if (wordContent.isNotEmpty() && wordDuration > 0) {
-            wordDuration.toFloat() / wordContent.length
+        val perCharDuration = if (wordClusters.isNotEmpty() && wordDuration > 0) {
+            wordDuration.toFloat() / wordClusters.size
         } else {
             0f
         }
 
         val useAwesomeAnimation =
             perCharDuration > fastCharAnimationThresholdMs && wordDuration >= 1000
-                    && !wordContent.shouldUseSimpleAnimation()
+                    && !wordContent.shouldUseSimpleAnimation(
+                        enableSyllableBounce = enableSyllableBounce,
+                        enableIndicSyllableBounce = enableIndicSyllableBounce
+                    )
                     && !isAccompanimentLine
 
         word.map { syllable ->
@@ -164,13 +177,22 @@ fun measureSyllablesAndDetermineAnimation(
             // Ensure width is at least phonetic width
             val finalWidth = maxOf(layoutWidth, phoneticLayout?.size?.width?.toFloat() ?: 0f)
 
-            // 新增：如果需要高级动画，预先测量每个字符
+            // 如果需要高级动画，按字形簇（Grapheme Cluster）预先测量每个字符
             val (charLayouts, charBounds) = if (useAwesomeAnimation) {
-                val layouts = syllable.content.map { char ->
-                    textMeasurer.measure(char.toString(), style)
+                val clusters = syllable.content.getGraphemeClusters()
+                val layouts = clusters.map { cluster ->
+                    textMeasurer.measure(cluster.text, style)
                 }
-                val bounds = syllable.content.indices.map { index ->
-                    layoutResult.getBoundingBox(index)
+                val bounds = clusters.map { cluster ->
+                    val boxes = (cluster.startIndex until cluster.endIndex).map { index ->
+                        layoutResult.getBoundingBox(index)
+                    }
+                    Rect(
+                        left = boxes.minOf { it.left },
+                        top = boxes.minOf { it.top },
+                        right = boxes.maxOf { it.right },
+                        bottom = boxes.maxOf { it.bottom }
+                    )
                 }
                 layouts to bounds
             } else {
@@ -387,7 +409,7 @@ fun calculateStaticLineLayout(
             var runningCharOffset = 0
             layouts.forEach { layout ->
                 charOffsetsBySyllable[layout] = runningCharOffset
-                runningCharOffset += layout.syllable.content.length
+                runningCharOffset += layout.charLayouts?.size ?: layout.syllable.content.getGraphemeClusters().size
             }
         }
     }
