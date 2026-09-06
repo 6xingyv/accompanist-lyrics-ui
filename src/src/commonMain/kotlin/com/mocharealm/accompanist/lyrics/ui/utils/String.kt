@@ -1,5 +1,28 @@
 package com.mocharealm.accompanist.lyrics.ui.utils
 
+import java.text.BreakIterator
+
+data class GraphemeCluster(
+    val text: String,
+    val startIndex: Int,
+    val endIndex: Int
+)
+
+fun String.getGraphemeClusters(): List<GraphemeCluster> {
+    if (isEmpty()) return emptyList()
+    val iterator = BreakIterator.getCharacterInstance()
+    iterator.setText(this)
+    val clusters = mutableListOf<GraphemeCluster>()
+    var start = iterator.first()
+    var end = iterator.next()
+    while (end != BreakIterator.DONE) {
+        clusters.add(GraphemeCluster(substring(start, end), start, end))
+        start = end
+        end = iterator.next()
+    }
+    return clusters
+}
+
 expect fun Char.isCjk(): Boolean
 
 fun Char.isJapanese(): Boolean {
@@ -10,7 +33,7 @@ fun Char.isKorean(): Boolean {
     return this.code in 0xAC00..0xD7AF || this.code in 0x1100..0x11FF
 }
 expect fun Char.isArabic(): Boolean
-expect fun Char.isDevanagari(): Boolean
+expect fun Char.isIndic(): Boolean
 
 fun String.isPureCjk(): Boolean {
     val cleanedStr = this.filter { it != ' ' && it != ',' && it != '\n' && it != '\r' }

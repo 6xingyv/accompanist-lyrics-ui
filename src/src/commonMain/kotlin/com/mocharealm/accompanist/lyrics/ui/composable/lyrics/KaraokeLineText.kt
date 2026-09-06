@@ -248,24 +248,24 @@ private fun DrawScope.drawRowText(
             val charLayouts = syllableLayout.charLayouts ?: emptyList()
             val charBounds = syllableLayout.charOriginalBounds ?: emptyList()
 
-            val numCharsInWord = wordAnimInfo.wordContent.length
+            val numClustersInWord = wordAnimInfo.totalClusters
             val earliestStartTime = wordAnimInfo.wordStartTime
             val latestStartTime = wordAnimInfo.wordEndTime - awesomeDuration
             val animationIntensityBase =
-                ((wordAnimInfo.wordDuration - fastCharAnimationThresholdMs * numCharsInWord) / 1000)
+                ((wordAnimInfo.wordDuration - fastCharAnimationThresholdMs * numClustersInWord) / 1000)
             val dipAndRise = DipAndRise(dip = (0.5 * animationIntensityBase).coerceIn(0.0, 0.5))
             val swell = Swell((0.1 * animationIntensityBase).coerceIn(0.0, 0.1))
 
-            syllableLayout.syllable.content.forEachIndexed { charIndex, _ ->
-                val singleCharLayoutResult =
-                    charLayouts.getOrNull(charIndex) ?: return@forEachIndexed
-                val charBox = charBounds.getOrNull(charIndex) ?: return@forEachIndexed
+            charLayouts.indices.forEach { clusterIndex ->
+                val singleClusterLayoutResult =
+                    charLayouts.getOrNull(clusterIndex) ?: return@forEach
+                val clusterBox = charBounds.getOrNull(clusterIndex) ?: return@forEach
 
-                val absoluteCharIndex = syllableLayout.charOffsetInWord + charIndex
-                val charRatio =
-                    if (numCharsInWord > 1) absoluteCharIndex.toFloat() / (numCharsInWord - 1) else 0.5f
+                val absoluteClusterIndex = syllableLayout.charOffsetInWord + clusterIndex
+                val clusterRatio =
+                    if (numClustersInWord > 1) absoluteClusterIndex.toFloat() / (numClustersInWord - 1) else 0.5f
                 val awesomeStartTime =
-                    (earliestStartTime + (latestStartTime - earliestStartTime) * charRatio).toLong()
+                    (earliestStartTime + (latestStartTime - earliestStartTime) * clusterRatio).toLong()
                 val awesomeProgress =
                     ((currentTimeMs - awesomeStartTime).toFloat() / awesomeDuration).coerceIn(
                         0f, 1f
@@ -274,9 +274,9 @@ private fun DrawScope.drawRowText(
                 val floatOffset = 4f * dipAndRise.transform(1.0f - awesomeProgress)
                 val scale = 1f + swell.transform(awesomeProgress)
 
-                val centeredOffsetX = (charBox.width - singleCharLayoutResult.size.width) / 2f
-                val xPos = syllableLayout.position.x + charBox.left + centeredOffsetX
-                val yPos = syllableLayout.position.y + charBox.top + floatOffset
+                val centeredOffsetX = (clusterBox.width - singleClusterLayoutResult.size.width) / 2f
+                val xPos = syllableLayout.position.x + clusterBox.left + centeredOffsetX
+                val yPos = syllableLayout.position.y + clusterBox.top + floatOffset
 
                 val blurRadius = 10f * Bounce.transform(awesomeProgress)
                 val shadow = Shadow(
@@ -284,7 +284,7 @@ private fun DrawScope.drawRowText(
                 )
                 withTransform({ scale(scale = scale, pivot = syllableLayout.wordPivot) }) {
                     drawText(
-                        textLayoutResult = singleCharLayoutResult,
+                        textLayoutResult = singleClusterLayoutResult,
                         color = drawColor,
                         topLeft = Offset(xPos, yPos),
                         shadow = shadow,
@@ -293,8 +293,8 @@ private fun DrawScope.drawRowText(
                     if (showDebugRectangles) {
                         drawRect(
                             color = Color.Red, topLeft = Offset(xPos, yPos), size = Size(
-                                singleCharLayoutResult.size.width.toFloat(),
-                                singleCharLayoutResult.size.height.toFloat()
+                                singleClusterLayoutResult.size.width.toFloat(),
+                                singleClusterLayoutResult.size.height.toFloat()
                             ), style = Stroke(1f)
                         )
                     }
@@ -303,10 +303,11 @@ private fun DrawScope.drawRowText(
 
             if (showPhonetic) {
                 syllableLayout.phoneticLayoutResult?.let { phoneticLayout ->
+                    val syllableClusterCount = charLayouts.size
                     val syllableMidIndex =
-                        syllableLayout.charOffsetInWord + (syllableLayout.syllable.content.length - 1) / 2f
+                        syllableLayout.charOffsetInWord + (syllableClusterCount - 1) / 2f
                     val syllableRatio =
-                        if (numCharsInWord > 1) syllableMidIndex / (numCharsInWord - 1) else 0.5f
+                        if (numClustersInWord > 1) syllableMidIndex / (numClustersInWord - 1) else 0.5f
                     val awesomeStartTime =
                         (earliestStartTime + (latestStartTime - earliestStartTime) * syllableRatio).toLong()
                     val awesomeProgress =
@@ -423,6 +424,8 @@ fun KaraokeLineText(
     showDebugRectangles: Boolean = false,
     showTranslation: Boolean = true,
     showPhonetic: Boolean = true,
+    enableSyllableBounce: Boolean = true,
+    enableIndicSyllableBounce: Boolean = true,
     precalculatedLayouts: List<SyllableLayout>? = null,
     isDuoView: Boolean = false,
     textMeasurer: TextMeasurer = rememberTextMeasurer()
@@ -543,7 +546,7 @@ fun KaraokeLineText(
                 }
             }
 
-            val initialLayouts by remember(precalculatedLayouts) {
+            val initialLayouts by remember(precalculatedLayouts, enableSyllableBounce, enableIndicSyllableBounce) {
                 derivedStateOf {
                     precalculatedLayouts ?: measureSyllablesAndDetermineAnimation(
                         syllables = processedSyllables,
@@ -551,7 +554,9 @@ fun KaraokeLineText(
                         style = textStyle,
                         phoneticStyle = phoneticTextStyle,
                         isAccompanimentLine = line is KaraokeLine.AccompanimentKaraokeLine,
-                        spaceWidth = spaceWidth
+                        spaceWidth = spaceWidth,
+                        enableSyllableBounce = enableSyllableBounce,
+                        enableIndicSyllableBounce = enableIndicSyllableBounce
                     )
                 }
             }
