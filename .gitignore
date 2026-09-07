@@ -10,6 +10,11 @@
 /.idea/assetWizardSettings.xml
 .DS_Store
 /build
+/dist/
+/sample/*/build/
+/src/src/androidMain/jniLibs/
+/src/src/jvmMain/resources/natives/
+/text_engine/target/
 /captures
 .externalNativeBuild
 .cxx
