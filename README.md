@@ -8,9 +8,9 @@
 
 Accompanist released a group of artifacts, including: 
 
-- [`lyrics-core`](https://github.com/6xingyv/Accompanist-Lyrics) - Parsing lyrics file, holding data and exporting to other formats.
+- [`lyrics-core`](https://github.com/6xingyv/accompanist-lyrics-core) - Parsing lyrics file, holding data and exporting to other formats.
 
-- [`lyrics-ui`](https://github.com/6xingyv/Accompanist) - Standard lyrics interface built on Jetpack Compose
+- [`lyrics-ui`](https://github.com/6xingyv/accompanist-lyrics-ui) - Standard lyrics interface built on Jetpack Compose
 
 This repository hosts the `lyrics-ui` code.
 
