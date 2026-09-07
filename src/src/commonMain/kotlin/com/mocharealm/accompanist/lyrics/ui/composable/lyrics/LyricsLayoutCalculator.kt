@@ -36,6 +36,7 @@ data class WordAnimationInfo(
     val wordStartTime: Long,
     val wordEndTime: Long,
     val wordContent: String,
+    val animationUnitCount: Int = wordContent.length,
     val wordDuration: Long = wordEndTime - wordStartTime
 )
 
@@ -96,10 +97,36 @@ fun calculateRowRenderData(
     }
 }
 
+private fun Char.isTamil(): Boolean = code in 0x0B80..0x0BFF
+
+private fun Char.isTamilCombiningMark(): Boolean = code in 0x0BBE..0x0BCD
+
+/** Splits text into animated visual units without separating Tamil marks. */
+internal fun String.toAnimationUnits(): List<String> {
+    if (!any(Char::isTamil)) return map(Char::toString)
+
+    val units = mutableListOf<String>()
+    var index = 0
+    while (index < length) {
+        val start = index++
+        while (index < length && this[index].isTamilCombiningMark()) index++
+        if (index < length && substring(start, index).contains('\u0BCD')) {
+            index++
+            while (index < length && this[index].isTamilCombiningMark()) index++
+        }
+        units += substring(start, index)
+    }
+    return units
+}
+
 fun String.shouldUseSimpleAnimation(): Boolean {
     val cleanedStr = this.filter { !it.isWhitespace() && !it.toString().isPunctuation() }
     if (cleanedStr.isEmpty()) return false
-    return cleanedStr.isPureCjk() || cleanedStr.any { it.isArabic() || it.isDevanagari() }
+    // Tamil remains on the bouncy animation path; its animation units are shaped
+    // visual clusters rather than raw UTF-16 code points.
+    return cleanedStr.isPureCjk() || cleanedStr.any {
+        it.isArabic() || it.isDevanagari()
+    }
 }
 
 fun groupIntoWords(syllables: List<KaraokeSyllable>): List<List<KaraokeSyllable>> {
@@ -133,8 +160,9 @@ fun measureSyllablesAndDetermineAnimation(
     return words.flatMapIndexed { wordIndex, word ->
         val wordContent = word.joinToString("") { it.content }
         val wordDuration = if (word.isNotEmpty()) word.last().end - word.first().start else 0
-        val perCharDuration = if (wordContent.isNotEmpty() && wordDuration > 0) {
-            wordDuration.toFloat() / wordContent.length
+        val animationUnitCount = wordContent.toAnimationUnits().size
+        val perCharDuration = if (animationUnitCount > 0 && wordDuration > 0) {
+            wordDuration.toFloat() / animationUnitCount
         } else {
             0f
         }
@@ -164,13 +192,27 @@ fun measureSyllablesAndDetermineAnimation(
             // Ensure width is at least phonetic width
             val finalWidth = maxOf(layoutWidth, phoneticLayout?.size?.width?.toFloat() ?: 0f)
 
-            // 新增：如果需要高级动画，预先测量每个字符
+            // Measure visual animation units. Tamil vowel signs and pulli marks
+            // stay attached to their consonant while each unit still bounces.
             val (charLayouts, charBounds) = if (useAwesomeAnimation) {
-                val layouts = syllable.content.map { char ->
-                    textMeasurer.measure(char.toString(), style)
+                val units = syllable.content.toAnimationUnits()
+                var unitOffset = 0
+                val layouts = units.map { unit ->
+                    textMeasurer.measure(unit, style)
                 }
-                val bounds = syllable.content.indices.map { index ->
-                    layoutResult.getBoundingBox(index)
+                val bounds = units.map { unit ->
+                    val start = unitOffset
+                    val end = unitOffset + unit.length
+                    unitOffset = end
+                    val boxes = (start until end).map { index ->
+                        layoutResult.getBoundingBox(index)
+                    }
+                    Rect(
+                        left = boxes.minOf { it.left },
+                        top = boxes.minOf { it.top },
+                        right = boxes.maxOf { it.right },
+                        bottom = boxes.maxOf { it.bottom },
+                    )
                 }
                 layouts to bounds
             } else {
@@ -383,11 +425,16 @@ fun calculateStaticLineLayout(
             animInfoByWord[wordId] = WordAnimationInfo(
                 wordStartTime = layouts.minOf { it.syllable.start }.toLong(),
                 wordEndTime = layouts.maxOf { it.syllable.end }.toLong(),
-                wordContent = layouts.joinToString("") { it.syllable.content })
+                wordContent = layouts.joinToString("") { it.syllable.content },
+                animationUnitCount = layouts
+                    .joinToString("") { it.syllable.content }
+                    .toAnimationUnits()
+                    .size,
+            )
             var runningCharOffset = 0
             layouts.forEach { layout ->
                 charOffsetsBySyllable[layout] = runningCharOffset
-                runningCharOffset += layout.syllable.content.length
+                runningCharOffset += layout.syllable.content.toAnimationUnits().size
             }
         }
     }
