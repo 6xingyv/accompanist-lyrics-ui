@@ -34,13 +34,6 @@ dependencies {
 
 *Replace `VERSION` with the latest version from Maven Central.*
 
-## ✅ Todo
-
-- [ ] Spring animations for `LazyList` items when scrolling
-- [ ] Extract animation parameters from `KaraokeLineText`
-- [ ] More precise animation parameters from Apple
-- [ ] Mesh gradient/Image distortion `FlowingLightBackground` animation
-
 ## 🤝 Contributing
 
 Contributions are welcome! Please feel free to submit a pull request or open an issue to discuss your ideas. For major changes, please open an issue first.
