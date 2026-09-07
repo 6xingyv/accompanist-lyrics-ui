@@ -1,0 +1,327 @@
+    Building arm64-v8a (aarch64-linux-android)
+   Compiling lyrics-renderer v0.1.0 (E:\mocha\accompanist\lyrics-ui\text_engine\crates\lyrics-renderer)
+warning: unused imports: `CropRect` and `self`
+  --> crates\lyrics-renderer\src\mesh.rs:16:21
+   |
+16 |     image_filters::{self, CropRect},
+   |                     ^^^^  ^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: use of deprecated associated function `skia_safe::image::<impl skia_safe::RCHandle<skia_bindings::SkImage>>::from_raster_data`: use images::raster_from_data()
+   --> crates\lyrics-renderer\src\mesh.rs:388:12
+    |
+388 |     Image::from_raster_data(&info, Data::new_copy(&rgba), out_w * 4)
+    |            ^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated associated function `skia_safe::image::<impl skia_safe::RCHandle<skia_bindings::SkImage>>::from_raster_data`: use images::raster_from_data()
+   --> crates\lyrics-renderer\src\mesh.rs:399:24
+    |
+399 |     let image = Image::from_raster_data(&info, data, (TEX_SIZE * 4) as usize)?;
+    |                        ^^^^^^^^^^^^^^^^
+
+warning: `lyrics-renderer` (lib) generated 3 warnings (run `cargo fix --lib -p lyrics-renderer` to apply 1 suggestion)
+   Compiling text_engine v0.1.0 (E:\mocha\accompanist\lyrics-ui\text_engine\crates\lyrics-android-jni)
+warning: unused import: `log::warn`
+ --> crates\lyrics-android-jni\src\android_gpu.rs:5:5
+  |
+5 | use log::warn;
+  |     ^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: variant `Vulkan` is never constructed
+  --> crates\lyrics-android-jni\src\android_gpu.rs:34:5
+   |
+33 | enum AndroidGpuBackend {
+   |      ----------------- variant in this enum
+34 |     Vulkan(vulkan::AndroidVulkanRenderer),
+   |     ^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: associated function `from_native_window` is never used
+  --> crates\lyrics-android-jni\src\android_gpu\vulkan.rs:45:26
+   |
+41 | impl AndroidVulkanRenderer {
+   | -------------------------- associated function in this implementation
+...
+45 |     pub(super) unsafe fn from_native_window(
+   |                          ^^^^^^^^^^^^^^^^^^
+
+warning: struct `SwapchainBundle` is never constructed
+   --> crates\lyrics-android-jni\src\android_gpu\vulkan.rs:292:8
+    |
+292 | struct SwapchainBundle {
+    |        ^^^^^^^^^^^^^^^
+
+warning: function `select_physical_device` is never used
+   --> crates\lyrics-android-jni\src\android_gpu\vulkan.rs:300:11
+    |
+300 | unsafe fn select_physical_device(
+    |           ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `supports_device_extension` is never used
+   --> crates\lyrics-android-jni\src\android_gpu\vulkan.rs:332:11
+    |
+332 | unsafe fn supports_device_extension(
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `create_swapchain` is never used
+   --> crates\lyrics-android-jni\src\android_gpu\vulkan.rs:347:11
+    |
+347 | unsafe fn create_swapchain(
+    |           ^^^^^^^^^^^^^^^^
+
+warning: function `make_skia_direct_context` is never used
+   --> crates\lyrics-android-jni\src\android_gpu\vulkan.rs:423:11
+    |
+423 | unsafe fn make_skia_direct_context(
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `choose_surface_format` is never used
+   --> crates\lyrics-android-jni\src\android_gpu\vulkan.rs:461:4
+    |
+461 | fn choose_surface_format(
+    |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `choose_present_mode` is never used
+   --> crates\lyrics-android-jni\src\android_gpu\vulkan.rs:496:11
+    |
+496 | unsafe fn choose_present_mode(
+    |           ^^^^^^^^^^^^^^^^^^^
+
+warning: function `choose_extent` is never used
+   --> crates\lyrics-android-jni\src\android_gpu\vulkan.rs:514:4
+    |
+514 | fn choose_extent(
+    |    ^^^^^^^^^^^^^
+
+warning: function `choose_composite_alpha` is never used
+   --> crates\lyrics-android-jni\src\android_gpu\vulkan.rs:535:4
+    |
+535 | fn choose_composite_alpha(flags: vk::CompositeAlphaFlagsKHR) -> vk::CompositeAlphaFlagsKHR {
+    |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `text_engine` (lib) generated 12 warnings (run `cargo fix --lib -p text_engine` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 12.86s
+    Building armeabi-v7a (armv7-linux-androideabi)
+   Compiling lyrics-renderer v0.1.0 (E:\mocha\accompanist\lyrics-ui\text_engine\crates\lyrics-renderer)
+warning: unused imports: `CropRect` and `self`
+  --> crates\lyrics-renderer\src\mesh.rs:16:21
+   |
+16 |     image_filters::{self, CropRect},
+   |                     ^^^^  ^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: use of deprecated associated function `skia_safe::image::<impl skia_safe::RCHandle<skia_bindings::SkImage>>::from_raster_data`: use images::raster_from_data()
+   --> crates\lyrics-renderer\src\mesh.rs:388:12
+    |
+388 |     Image::from_raster_data(&info, Data::new_copy(&rgba), out_w * 4)
+    |            ^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated associated function `skia_safe::image::<impl skia_safe::RCHandle<skia_bindings::SkImage>>::from_raster_data`: use images::raster_from_data()
+   --> crates\lyrics-renderer\src\mesh.rs:399:24
+    |
+399 |     let image = Image::from_raster_data(&info, data, (TEX_SIZE * 4) as usize)?;
+    |                        ^^^^^^^^^^^^^^^^
+
+warning: `lyrics-renderer` (lib) generated 3 warnings (run `cargo fix --lib -p lyrics-renderer` to apply 1 suggestion)
+   Compiling text_engine v0.1.0 (E:\mocha\accompanist\lyrics-ui\text_engine\crates\lyrics-android-jni)
+warning: unused import: `log::warn`
+ --> crates\lyrics-android-jni\src\android_gpu.rs:5:5
+  |
+5 | use log::warn;
+  |     ^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: variant `Vulkan` is never constructed
+  --> crates\lyrics-android-jni\src\android_gpu.rs:34:5
+   |
+33 | enum AndroidGpuBackend {
+   |      ----------------- variant in this enum
+34 |     Vulkan(vulkan::AndroidVulkanRenderer),
+   |     ^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: associated function `from_native_window` is never used
+  --> crates\lyrics-android-jni\src\android_gpu\vulkan.rs:45:26
+   |
+41 | impl AndroidVulkanRenderer {
+   | -------------------------- associated function in this implementation
+...
+45 |     pub(super) unsafe fn from_native_window(
+   |                          ^^^^^^^^^^^^^^^^^^
+
+warning: struct `SwapchainBundle` is never constructed
+   --> crates\lyrics-android-jni\src\android_gpu\vulkan.rs:292:8
+    |
+292 | struct SwapchainBundle {
+    |        ^^^^^^^^^^^^^^^
+
+warning: function `select_physical_device` is never used
+   --> crates\lyrics-android-jni\src\android_gpu\vulkan.rs:300:11
+    |
+300 | unsafe fn select_physical_device(
+    |           ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `supports_device_extension` is never used
+   --> crates\lyrics-android-jni\src\android_gpu\vulkan.rs:332:11
+    |
+332 | unsafe fn supports_device_extension(
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `create_swapchain` is never used
+   --> crates\lyrics-android-jni\src\android_gpu\vulkan.rs:347:11
+    |
+347 | unsafe fn create_swapchain(
+    |           ^^^^^^^^^^^^^^^^
+
+warning: function `make_skia_direct_context` is never used
+   --> crates\lyrics-android-jni\src\android_gpu\vulkan.rs:423:11
+    |
+423 | unsafe fn make_skia_direct_context(
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `choose_surface_format` is never used
+   --> crates\lyrics-android-jni\src\android_gpu\vulkan.rs:461:4
+    |
+461 | fn choose_surface_format(
+    |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `choose_present_mode` is never used
+   --> crates\lyrics-android-jni\src\android_gpu\vulkan.rs:496:11
+    |
+496 | unsafe fn choose_present_mode(
+    |           ^^^^^^^^^^^^^^^^^^^
+
+warning: function `choose_extent` is never used
+   --> crates\lyrics-android-jni\src\android_gpu\vulkan.rs:514:4
+    |
+514 | fn choose_extent(
+    |    ^^^^^^^^^^^^^
+
+warning: function `choose_composite_alpha` is never used
+   --> crates\lyrics-android-jni\src\android_gpu\vulkan.rs:535:4
+    |
+535 | fn choose_composite_alpha(flags: vk::CompositeAlphaFlagsKHR) -> vk::CompositeAlphaFlagsKHR {
+    |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `text_engine` (lib) generated 12 warnings (run `cargo fix --lib -p text_engine` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 7.30s
+    Building x86_64 (x86_64-linux-android)
+   Compiling lyrics-renderer v0.1.0 (E:\mocha\accompanist\lyrics-ui\text_engine\crates\lyrics-renderer)
+warning: unused imports: `CropRect` and `self`
+  --> crates\lyrics-renderer\src\mesh.rs:16:21
+   |
+16 |     image_filters::{self, CropRect},
+   |                     ^^^^  ^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: use of deprecated associated function `skia_safe::image::<impl skia_safe::RCHandle<skia_bindings::SkImage>>::from_raster_data`: use images::raster_from_data()
+   --> crates\lyrics-renderer\src\mesh.rs:388:12
+    |
+388 |     Image::from_raster_data(&info, Data::new_copy(&rgba), out_w * 4)
+    |            ^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated associated function `skia_safe::image::<impl skia_safe::RCHandle<skia_bindings::SkImage>>::from_raster_data`: use images::raster_from_data()
+   --> crates\lyrics-renderer\src\mesh.rs:399:24
+    |
+399 |     let image = Image::from_raster_data(&info, data, (TEX_SIZE * 4) as usize)?;
+    |                        ^^^^^^^^^^^^^^^^
+
+warning: `lyrics-renderer` (lib) generated 3 warnings (run `cargo fix --lib -p lyrics-renderer` to apply 1 suggestion)
+   Compiling text_engine v0.1.0 (E:\mocha\accompanist\lyrics-ui\text_engine\crates\lyrics-android-jni)
+warning: unused import: `log::warn`
+ --> crates\lyrics-android-jni\src\android_gpu.rs:5:5
+  |
+5 | use log::warn;
+  |     ^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: variant `Vulkan` is never constructed
+  --> crates\lyrics-android-jni\src\android_gpu.rs:34:5
+   |
+33 | enum AndroidGpuBackend {
+   |      ----------------- variant in this enum
+34 |     Vulkan(vulkan::AndroidVulkanRenderer),
+   |     ^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: associated function `from_native_window` is never used
+  --> crates\lyrics-android-jni\src\android_gpu\vulkan.rs:45:26
+   |
+41 | impl AndroidVulkanRenderer {
+   | -------------------------- associated function in this implementation
+...
+45 |     pub(super) unsafe fn from_native_window(
+   |                          ^^^^^^^^^^^^^^^^^^
+
+warning: struct `SwapchainBundle` is never constructed
+   --> crates\lyrics-android-jni\src\android_gpu\vulkan.rs:292:8
+    |
+292 | struct SwapchainBundle {
+    |        ^^^^^^^^^^^^^^^
+
+warning: function `select_physical_device` is never used
+   --> crates\lyrics-android-jni\src\android_gpu\vulkan.rs:300:11
+    |
+300 | unsafe fn select_physical_device(
+    |           ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `supports_device_extension` is never used
+   --> crates\lyrics-android-jni\src\android_gpu\vulkan.rs:332:11
+    |
+332 | unsafe fn supports_device_extension(
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `create_swapchain` is never used
+   --> crates\lyrics-android-jni\src\android_gpu\vulkan.rs:347:11
+    |
+347 | unsafe fn create_swapchain(
+    |           ^^^^^^^^^^^^^^^^
+
+warning: function `make_skia_direct_context` is never used
+   --> crates\lyrics-android-jni\src\android_gpu\vulkan.rs:423:11
+    |
+423 | unsafe fn make_skia_direct_context(
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `choose_surface_format` is never used
+   --> crates\lyrics-android-jni\src\android_gpu\vulkan.rs:461:4
+    |
+461 | fn choose_surface_format(
+    |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `choose_present_mode` is never used
+   --> crates\lyrics-android-jni\src\android_gpu\vulkan.rs:496:11
+    |
+496 | unsafe fn choose_present_mode(
+    |           ^^^^^^^^^^^^^^^^^^^
+
+warning: function `choose_extent` is never used
+   --> crates\lyrics-android-jni\src\android_gpu\vulkan.rs:514:4
+    |
+514 | fn choose_extent(
+    |    ^^^^^^^^^^^^^
+
+warning: function `choose_composite_alpha` is never used
+   --> crates\lyrics-android-jni\src\android_gpu\vulkan.rs:535:4
+    |
+535 | fn choose_composite_alpha(flags: vk::CompositeAlphaFlagsKHR) -> vk::CompositeAlphaFlagsKHR {
+    |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `text_engine` (lib) generated 12 warnings (run `cargo fix --lib -p text_engine` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 13.91s

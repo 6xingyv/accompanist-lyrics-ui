@@ -87,6 +87,17 @@ pub(crate) fn continuous_rounded_rect(rect: Rect, radius: f32) -> Path {
     )
 }
 
+/// Build Capsule's default G2-continuous rounded rectangle with independent
+/// physical corner radii (used for asymmetric system display corners).
+pub(crate) fn continuous_rounded_rect_with_radii(rect: Rect, radii: CornerRadii) -> Path {
+    continuous_rounded_rect_with_profile(
+        rect,
+        radii,
+        G2Profile::ROUNDED_RECTANGLE,
+        G2Profile::CAPSULE,
+    )
+}
+
 pub(crate) fn continuous_rounded_rect_with_profile(
     rect: Rect,
     radii: CornerRadii,

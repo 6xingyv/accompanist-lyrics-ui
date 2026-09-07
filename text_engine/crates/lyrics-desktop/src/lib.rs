@@ -223,9 +223,7 @@ pub fn run() -> Result<(), String> {
 
     let timing_enabled = config.frame_timing || frame_timing_enabled();
     if timing_enabled {
-        eprintln!(
-            "[frame] timing enabled; logging 1s averages to stderr"
-        );
+        eprintln!("[frame] timing enabled; logging 1s averages to stderr");
     }
 
     let mut app = DesktopLyricsApp::new(
@@ -610,10 +608,8 @@ impl DesktopLyricsApp {
     ) -> Self {
         let mut engine = TextEngine::new(2048, 2048);
         engine.load_system_fonts();
-        let initial_size = PhysicalSize::new(
-            config.window.width.max(1),
-            config.window.height.max(1),
-        );
+        let initial_size =
+            PhysicalSize::new(config.window.width.max(1), config.window.height.max(1));
 
         Self {
             config,
@@ -727,8 +723,8 @@ impl DesktopLyricsApp {
 
         let track_key = track_key(&snapshot);
         let track_changed = self.current_track_key.as_deref() != Some(track_key.as_str());
-        let top_bar_changed = self.top_bar_title != snapshot.title
-            || self.top_bar_artist != snapshot.artist;
+        let top_bar_changed =
+            self.top_bar_title != snapshot.title || self.top_bar_artist != snapshot.artist;
         let accept_clock_sample = if track_changed {
             self.pending_seek = None;
             true
@@ -934,7 +930,10 @@ impl DesktopLyricsApp {
     /// Returns true when a seek was issued (optimistic local clock updated).
     fn try_lyric_tap_seek(&mut self) -> bool {
         // Don't steal clicks that started on the caption bar.
-        if self.caption_pressed.is_some_and(|hit| hit != CaptionHit::None) {
+        if self
+            .caption_pressed
+            .is_some_and(|hit| hit != CaptionHit::None)
+        {
             self.caption_pressed = None;
             self.pointer_down = None;
             return false;
@@ -1167,7 +1166,9 @@ fn draw_caption_bar(
         height,
         density,
         hover == CaptionHit::AlwaysOnTop,
-        CaptionGlyph::Pin { active: always_on_top },
+        CaptionGlyph::Pin {
+            active: always_on_top,
+        },
     );
     draw_caption_button(
         canvas,
@@ -1199,7 +1200,9 @@ fn caption_bar_visible(hover: CaptionHit) -> bool {
 #[derive(Clone, Copy)]
 enum CaptionGlyph {
     /// Pushpin: filled when always-on-top is active.
-    Pin { active: bool },
+    Pin {
+        active: bool,
+    },
     Minimize,
     Close,
 }
@@ -1264,11 +1267,7 @@ fn draw_caption_button(
             );
         }
         CaptionGlyph::Minimize => {
-            canvas.draw_line(
-                Point::new(cx - s, cy),
-                Point::new(cx + s, cy),
-                &icon,
-            );
+            canvas.draw_line(Point::new(cx - s, cy), Point::new(cx + s, cy), &icon);
         }
         CaptionGlyph::Close => {
             canvas.draw_line(
@@ -1525,8 +1524,7 @@ impl AppleMusicClock {
     ) -> (i32, bool) {
         let current = self.position_at(now);
         let state_changed = self.is_playing != is_playing;
-        let discontinuity =
-            (position_ms as f64 - current as f64).abs() >= APPLE_MUSIC_SEEK_SNAP_MS;
+        let discontinuity = (position_ms as f64 - current as f64).abs() >= APPLE_MUSIC_SEEK_SNAP_MS;
         if state_changed || !is_playing || discontinuity {
             self.reset_at(position_ms, update_ticks, is_playing, now);
             return (position_ms.max(0), true);
@@ -1549,8 +1547,8 @@ impl AppleMusicClock {
     }
 
     fn position_at(&self, now: Instant) -> i32 {
-        let average_base = self.base_samples_ms.iter().sum::<f64>()
-            / self.base_samples_ms.len().max(1) as f64;
+        let average_base =
+            self.base_samples_ms.iter().sum::<f64>() / self.base_samples_ms.len().max(1) as f64;
         let elapsed_ms = if self.is_playing {
             now.saturating_duration_since(self.reference_clock)
                 .as_secs_f64()
@@ -1650,9 +1648,8 @@ impl PlaybackClock {
         update_ticks: i64,
     ) {
         let now = Instant::now();
-        self.apple_music = is_apple_music_source(source_app_id).then(|| {
-            AppleMusicClock::new(position_ms, update_ticks, is_playing, now)
-        });
+        self.apple_music = is_apple_music_source(source_app_id)
+            .then(|| AppleMusicClock::new(position_ms, update_ticks, is_playing, now));
         self.force_sample_at(position_ms, is_playing, now);
     }
 
@@ -1774,7 +1771,10 @@ impl AppConfig {
             bootstrap_default_config(&cwd, &config_path)?;
         }
         if config_path_explicit && !config_path.is_file() {
-            return Err(format!("config file does not exist: {}", config_path.display()));
+            return Err(format!(
+                "config file does not exist: {}",
+                config_path.display()
+            ));
         }
 
         let config_exists = config_path.is_file();
@@ -2298,8 +2298,7 @@ fn current_playback_snapshot(
         .ok()
         .map(|updated| updated.UniversalTime)
         .unwrap_or(0);
-    let sample_age_ms = windows_datetime_age_ms(smtc_update_ticks)
-        .unwrap_or(0);
+    let sample_age_ms = windows_datetime_age_ms(smtc_update_ticks).unwrap_or(0);
     let position_ms = project_smtc_position_ms(
         raw_position_ms,
         sample_age_ms,
@@ -2603,9 +2602,8 @@ mod tests {
         let mut fade = CaptionFade::default();
 
         fade.set_visible(true, start);
-        let (alpha, animating) = fade.sample(
-            start + Duration::from_secs_f32(CAPTION_FADE_IN_MS / 2000.0),
-        );
+        let (alpha, animating) =
+            fade.sample(start + Duration::from_secs_f32(CAPTION_FADE_IN_MS / 2000.0));
         assert!(animating);
         assert!(alpha > 0.0 && alpha < 1.0);
         let (alpha, animating) =
@@ -2648,11 +2646,7 @@ mod tests {
             false,
             issued_at + SEEK_ACCEPTED_ACK_TIMEOUT - Duration::from_millis(1)
         ));
-        assert!(accepted.accepts(
-            10_000,
-            false,
-            issued_at + SEEK_ACCEPTED_ACK_TIMEOUT
-        ));
+        assert!(accepted.accepts(10_000, false, issued_at + SEEK_ACCEPTED_ACK_TIMEOUT));
     }
 
     #[test]
@@ -2725,7 +2719,10 @@ mod tests {
         let (position, reanchored) = clock.publish_at(20_300, 4, true, resume_at);
         assert!(reanchored);
         assert_eq!(position, 20_300);
-        assert_eq!(clock.position_at(resume_at + Duration::from_millis(250)), 20_550);
+        assert_eq!(
+            clock.position_at(resume_at + Duration::from_millis(250)),
+            20_550
+        );
     }
 
     #[test]

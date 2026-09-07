@@ -1,0 +1,103 @@
+> Task :src:convertXmlValueResourcesForAndroidMain NO-SOURCE
+> Task :src:copyNonXmlValueResourcesForAndroidMain NO-SOURCE
+> Task :src:prepareComposeResourcesTaskForAndroidMain NO-SOURCE
+> Task :src:generateResourceAccessorsForAndroidMain NO-SOURCE
+> Task :src:convertXmlValueResourcesForCommonMain NO-SOURCE
+> Task :src:copyNonXmlValueResourcesForCommonMain NO-SOURCE
+> Task :src:prepareComposeResourcesTaskForCommonMain NO-SOURCE
+> Task :src:generateResourceAccessorsForCommonMain NO-SOURCE
+> Task :src:generateActualResourceCollectorsForAndroidMain UP-TO-DATE
+> Task :src:convertXmlValueResourcesForJvmMain NO-SOURCE
+> Task :src:copyNonXmlValueResourcesForJvmMain NO-SOURCE
+> Task :src:prepareComposeResourcesTaskForJvmMain NO-SOURCE
+> Task :src:generateResourceAccessorsForJvmMain NO-SOURCE
+> Task :src:generateActualResourceCollectorsForJvmMain
+> Task :src:generateComposeResClass UP-TO-DATE
+> Task :src:generateExpectResourceCollectorsForCommonMain UP-TO-DATE
+> Task :src:transformCommonMainDependenciesMetadata
+> Task :src:androidSourcesJar
+
+> Task :src:buildRustAndroid
+
+> Task :src:androidPreBuild
+> Task :src:preAndroidMainBuild
+> Task :src:checkAndroidMainAarMetadata UP-TO-DATE
+> Task :src:mergeAndroidMainJniLibFolders
+> Task :src:mergeAndroidMainNativeLibs
+> Task :src:extractAndroidMainAnnotations UP-TO-DATE
+> Task :src:generateAndroidMainEmptyResourceFiles UP-TO-DATE
+> Task :src:kmpPartiallyResolvedDependenciesChecker
+> Task :src:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :src:copyAndroidMainJniLibsProjectOnly
+> Task :src:javaPreCompileAndroidMain UP-TO-DATE
+> Task :src:prepareAndroidMainArtProfile UP-TO-DATE
+> Task :src:prepareLintJarForPublish UP-TO-DATE
+> Task :src:processAndroidMainManifest UP-TO-DATE
+> Task :src:writeAndroidMainAarMetadata UP-TO-DATE
+> Task :src:generatePomFileForAndroidPublication
+> Task :src:checkJvmMainComposeLibrariesCompatibility
+> Task :src:assembleJvmMainResources
+w: [:src:dokkaGeneratePublicationHtml] Couldn't resolve link: [NativeLyricsViewPool] in RustSkiaLyricsView.android.kt/com.mocharealm.accompanist.lyrics.ui.renderer.RustSkiaLyricsView.beginPlayerHostSession (:src/androidMain)
+
+> Task :src:buildRustJvm
+
+w: [:src:dokkaGeneratePublicationHtml] Couldn't resolve link: [scope] in SdfAtlasManager.kt/com.mocharealm.accompanist.lyrics.text.SdfAtlasManager.drawGlyph (:src/commonMain)
+w: [:src:dokkaGeneratePublicationHtml] Couldn't resolve link: [TextStyle.lineHeight] in KaraokeLyricsConfig.kt (:src/commonMain)
+w: [:src:dokkaGeneratePublicationHtml] Couldn't resolve link: [TextUnit.Unspecified] in KaraokeLyricsConfig.kt (:src/commonMain)
+w: [:src:dokkaGeneratePublicationHtml] Couldn't resolve link: [TextStyle.lineHeight] (:src/commonMain)
+w: [:src:dokkaGeneratePublicationHtml] Couldn't resolve link: [TextUnit.Unspecified] (:src/commonMain)
+w: [:src:dokkaGeneratePublicationHtml] Couldn't resolve link: [TextStyle.lineHeight] in KaraokeLyricsConfig.kt/com.mocharealm.accompanist.lyrics.ui.composable.lyrics.KaraokeTypography.normalLineHeightRatio (:src/commonMain)
+w: [:src:dokkaGeneratePublicationHtml] Couldn't resolve link: [TextUnit.Unspecified] in KaraokeLyricsConfig.kt/com.mocharealm.accompanist.lyrics.ui.composable.lyrics.KaraokeTypography.normalLineHeightRatio (:src/commonMain)
+w: [:src:dokkaGeneratePublicationHtml] Couldn't resolve link: [TextStyle.lineHeight] in NativeLyricsScene.kt/com.mocharealm.accompanist.lyrics.ui.renderer.lineHeightPx (:src/commonMain)
+
+> Task :src:buildRustJvm
+
+> Task :src:dokkaGeneratePublicationHtml
+
+> Task :src:buildRustJvm
+
+> Task :src:compileKotlinJvm
+> Task :src:compileAndroidMain
+
+> Task :src:buildRustJvm
+
+> Task :src:logLinkDokkaGeneratePublicationHtml SKIPPED
+> Task :src:androidDokkaJavadocJar
+> Task :src:compileAndroidMainJavaWithJavac NO-SOURCE
+> Task :src:mergeAndroidMainGeneratedProguardFiles UP-TO-DATE
+> Task :src:mergeAndroidMainConsumerProguardFiles
+> Task :src:processAndroidMainJavaRes UP-TO-DATE
+> Task :src:mergeAndroidMainJavaResource UP-TO-DATE
+> Task :src:syncAndroidMainLibJars
+> Task :src:bundleAndroidMainAar
+> Task :src:generateMetadataFileForAndroidPublication
+> Task :src:signAndroidPublication
+> Task :src:publishAndroidPublicationToLocalRepository
+> Task :src:compileJvmMainJava NO-SOURCE
+> Task :src:jvmProcessResources
+> Task :src:processJvmMainResources SKIPPED
+> Task :src:jvmMainClasses
+> Task :src:jvmJar
+> Task :src:jvmSourcesJar
+> Task :src:generateMetadataFileForJvmPublication
+> Task :src:generatePomFileForJvmPublication
+> Task :src:jvmDokkaJavadocJar
+> Task :src:signJvmPublication
+> Task :src:publishJvmPublicationToLocalRepository
+> Task :src:compileCommonMainKotlinMetadata SKIPPED
+> Task :src:generateProjectStructureMetadata UP-TO-DATE
+> Task :src:metadataCommonMainProcessResources NO-SOURCE
+> Task :src:metadataCommonMainClasses UP-TO-DATE
+> Task :src:allMetadataJar
+> Task :src:buildKotlinToolingMetadata
+> Task :src:sourcesJar
+> Task :src:generateMetadataFileForKotlinMultiplatformPublication
+> Task :src:generatePomFileForKotlinMultiplatformPublication
+> Task :src:kotlinMultiplatformDokkaJavadocJar
+> Task :src:signKotlinMultiplatformPublication
+> Task :src:publishKotlinMultiplatformPublicationToLocalRepository
+> Task :src:publishAllPublicationsToLocalRepository
+
+BUILD SUCCESSFUL in 1m 5s
+53 actionable tasks: 38 executed, 15 up-to-date
+Consider enabling configuration cache to speed up this build: https://docs.gradle.org/9.4.1/userguide/configuration_cache_enabling.html

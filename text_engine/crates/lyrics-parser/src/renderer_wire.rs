@@ -324,17 +324,14 @@ fn top_bar_json(
         return ("null".to_string(), params.content_top_inset);
     };
 
-    let artist = params
-        .top_bar_artist
-        .clone()
-        .unwrap_or_else(|| {
-            lyrics
-                .artists
-                .iter()
-                .map(|artist| artist.name.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        });
+    let artist = params.top_bar_artist.clone().unwrap_or_else(|| {
+        lyrics
+            .artists
+            .iter()
+            .map(|artist| artist.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    });
 
     let d = density.max(0.5);
     let dp = |v: f32| v * d;

@@ -49,8 +49,8 @@ fn try_apply(configured: crate::GpuPreference) -> Result<String, String> {
     use windows::Win32::Foundation::HMODULE;
     use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0};
     use windows::Win32::Graphics::Direct3D11::{
-        D3D11CreateDevice, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, ID3D11Device,
-        ID3D11DeviceContext,
+        D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+        D3D11_SDK_VERSION,
     };
     use windows::Win32::Graphics::Dxgi::{
         CreateDXGIFactory2, IDXGIAdapter1, IDXGIFactory6, DXGI_ADAPTER_FLAG,
@@ -94,11 +94,7 @@ fn try_apply(configured: crate::GpuPreference) -> Result<String, String> {
             .map_err(|e| format!("EnumAdapterByGpuPreference: {e}"))?
     };
 
-    let desc = unsafe {
-        adapter
-            .GetDesc1()
-            .map_err(|e| format!("GetDesc1: {e}"))?
-    };
+    let desc = unsafe { adapter.GetDesc1().map_err(|e| format!("GetDesc1: {e}"))? };
     let description = wchar_to_string(&desc.Description);
     let luid = (desc.AdapterLuid.LowPart, desc.AdapterLuid.HighPart);
 

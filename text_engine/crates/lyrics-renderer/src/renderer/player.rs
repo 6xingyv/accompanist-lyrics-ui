@@ -106,9 +106,18 @@ pub(crate) struct PlayerQueueItemInput {
 #[serde(default, rename_all = "camelCase")]
 pub(crate) struct PlayerInput {
     pub presentation: PlayerPresentationInput,
+    pub viewport_left: f32,
+    pub viewport_top: f32,
     pub viewport_width: Option<f32>,
     pub viewport_height: Option<f32>,
+    pub collapsed_radius: f32,
+    pub expanded_top_left_radius: f32,
+    pub expanded_top_right_radius: f32,
+    pub expanded_bottom_right_radius: f32,
+    pub expanded_bottom_left_radius: f32,
     pub mini_foreground_argb: Option<i32>,
+    pub mini_container_argb: Option<i32>,
+    pub full_container_argb: Option<i32>,
     pub screen: PlayerScreenInput,
     pub title: String,
     pub artist: String,
@@ -162,6 +171,17 @@ pub(super) struct PreparedPlayer {
     pub is_playing: bool,
     pub liked: bool,
     mini_foreground: Color4f,
+    pub mini_container: Color4f,
+    pub full_container: Color4f,
+    pub viewport_left: f32,
+    pub viewport_top: f32,
+    pub collapsed_radius: f32,
+    pub expanded_top_left_radius: f32,
+    pub expanded_top_right_radius: f32,
+    pub expanded_bottom_right_radius: f32,
+    pub expanded_bottom_left_radius: f32,
+    pub mini_title: PreparedText,
+    pub mini_artist: PreparedText,
     pub title: PreparedText,
     pub artist: PreparedText,
     pub artwork_title: PreparedText,
@@ -172,7 +192,7 @@ pub(super) struct PreparedPlayer {
     queue_items: Vec<PreparedQueueItem>,
     runtime_label_font: PreparedRuntimeLabelFont,
     pub layout: PlayerLayout,
-    mini_layout: PlayerLayout,
+    pub mini_layout: PlayerLayout,
     icons: PlayerIcons,
 }
 
@@ -339,8 +359,7 @@ impl PlayerLayout {
         let pane_left = if landscape { width * 0.5 } else { 0.0 };
         let pane_width = width - pane_left;
         if landscape {
-            let pane_fit =
-                (pane_width - 2.0 * LANDSCAPE_COLUMN_MARGIN * density) / DESIGN_WIDTH;
+            let pane_fit = (pane_width - 2.0 * LANDSCAPE_COLUMN_MARGIN * density) / DESIGN_WIDTH;
             let height_fit = height / (FIXED_ROWS_DP + LANDSCAPE_BODY_RESERVE);
             scale = scale.min(pane_fit).min(height_fit).max(0.25);
         }
@@ -1623,12 +1642,14 @@ impl LyricsRenderer {
             .filter(|value| value.is_finite() && *value > 0.0)
             .unwrap_or(height)
             .clamp(1.0, height);
-        // The mini bar flexes across its viewport, so it keeps the full width and
-        // only shares the (clamped) chrome scale — no centered column there.
+        // Mini-player typography and geometry stay in physical dp. Deriving this
+        // scale from the full landscape width inflated the collapsed layout, then
+        // the full two-pane layout immediately selected a smaller, height-capped
+        // scale as expansion began.
         let mini_layout = PlayerLayout::resolve_with_scale(
             viewport_width,
             viewport_height,
-            PlayerLayout::chrome_scale(width, density),
+            density.clamp(0.25, 8.0),
         );
         let layout = if input.presentation == PlayerPresentationInput::Mini {
             mini_layout
@@ -1640,6 +1661,13 @@ impl LyricsRenderer {
             weight: 700,
             italic: false,
         };
+        let mini_title = self.prepare_plain_text(
+            &input.title,
+            17.0 * mini_layout.scale,
+            24.0 * mini_layout.scale,
+            1_000_000.0,
+            false,
+        );
         let title = self.prepare_plain_text(
             &input.title,
             17.0 * layout.scale,
@@ -1651,6 +1679,13 @@ impl LyricsRenderer {
             weight: 400,
             italic: false,
         };
+        let mini_artist = self.prepare_plain_text(
+            &input.artist,
+            15.0 * mini_layout.scale,
+            21.0 * mini_layout.scale,
+            1_000_000.0,
+            false,
+        );
         let artist = self.prepare_plain_text(
             &input.artist,
             15.0 * layout.scale,
@@ -1762,7 +1797,20 @@ impl LyricsRenderer {
             duration_ms: input.duration_ms.max(0),
             is_playing: input.is_playing,
             liked: input.liked,
+            viewport_left: input.viewport_left.max(0.0),
+            viewport_top: input.viewport_top.max(0.0),
+            collapsed_radius: input.collapsed_radius.max(0.0),
+            expanded_top_left_radius: input.expanded_top_left_radius.max(0.0),
+            expanded_top_right_radius: input.expanded_top_right_radius.max(0.0),
+            expanded_bottom_right_radius: input.expanded_bottom_right_radius.max(0.0),
+            expanded_bottom_left_radius: input.expanded_bottom_left_radius.max(0.0),
             mini_foreground: color4f_from_argb(input.mini_foreground_argb.unwrap_or(-1)),
+            mini_container: color4f_from_argb(input.mini_container_argb.unwrap_or(-1)),
+            full_container: color4f_from_argb(
+                input.full_container_argb.unwrap_or(0xFF000000u32 as i32),
+            ),
+            mini_title,
+            mini_artist,
             title,
             artist,
             artwork_title,
@@ -1783,7 +1831,9 @@ pub(super) fn collect_player_font_usage(
     player: &PreparedPlayer,
     ids: &mut Vec<fontdb::ID>,
 ) -> usize {
-    collect_text_font_usage(&player.title, ids)
+    collect_text_font_usage(&player.mini_title, ids)
+        + collect_text_font_usage(&player.mini_artist, ids)
+        + collect_text_font_usage(&player.title, ids)
         + collect_text_font_usage(&player.artist, ids)
         + collect_text_font_usage(&player.artwork_title, ids)
         + collect_text_font_usage(&player.artwork_artist, ids)
@@ -2110,7 +2160,7 @@ fn draw_mini_player(
     animating |= draw_marquee_text(
         canvas,
         typefaces,
-        &player.title,
+        &player.mini_title,
         text_left,
         7.0 * s,
         text_width,
@@ -2123,7 +2173,7 @@ fn draw_mini_player(
     animating |= draw_marquee_text(
         canvas,
         typefaces,
-        &player.artist,
+        &player.mini_artist,
         text_left,
         31.0 * s,
         text_width,
@@ -3577,7 +3627,10 @@ mod tests {
         ] {
             let rect = ui.control(button).hit_rect;
             assert!(rect.top >= 0.0, "{button:?} must start on-screen");
-            assert!(rect.bottom <= layout.height, "{button:?} must end on-screen");
+            assert!(
+                rect.bottom <= layout.height,
+                "{button:?} must end on-screen"
+            );
             assert!(rect.left + layout.column_left >= pane_width - 0.5);
             assert!(rect.right + layout.column_left <= 2340.0 + 0.5);
         }

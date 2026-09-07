@@ -32,6 +32,7 @@ internal actual fun NativeLyricsViewHost(
     playerExpansionTarget: Float,
     playerExpansionGeometry: NativePlayerExpansionGeometry?,
     onPlayerExpansionDragStart: (() -> Unit)?,
+    onPlayerExpansionProgress: ((Float) -> Unit)?,
     onPlayerExpansionSettled: ((Float) -> Unit)?,
     onPlayerAction: ((NativePlayerAction) -> Unit)?,
     onQueueReordered: ((Int, Int) -> Unit)?,

@@ -94,6 +94,7 @@ internal object NativeLyricsViewPool {
             ?: RustSkiaLyricsView(appContext)
         available = null
         leased = true
+        view.beginPlayerHostSession()
         view.retainNativeEngineOnDetach = true
         return view
     }

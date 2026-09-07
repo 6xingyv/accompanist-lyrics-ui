@@ -15,9 +15,7 @@ use std::thread;
 use std::time::Duration;
 
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
-use wasapi::{
-    initialize_mta, AudioClient, Direction, SampleType, StreamMode, WaveFormat,
-};
+use wasapi::{initialize_mta, AudioClient, Direction, SampleType, StreamMode, WaveFormat};
 
 const CAPTURE_RATE: usize = 48_000;
 const CAPTURE_CHANNELS: usize = 2;
@@ -228,12 +226,8 @@ fn run_process_loopback(process_id: u32, control: &CaptureControl) -> Result<(),
                     if i + 4 > queue.len() {
                         break;
                     }
-                    let sample = f32::from_le_bytes([
-                        queue[i],
-                        queue[i + 1],
-                        queue[i + 2],
-                        queue[i + 3],
-                    ]);
+                    let sample =
+                        f32::from_le_bytes([queue[i], queue[i + 1], queue[i + 2], queue[i + 3]]);
                     sum += sample;
                 }
                 mono.push(sum / CAPTURE_CHANNELS as f32);

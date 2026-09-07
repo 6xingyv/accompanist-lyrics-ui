@@ -26,9 +26,9 @@ pub(super) fn wide_lyrics_layout_scale(width: f32, height: f32) -> f32 {
     let width_progress = ((width - WIDE_MIN_SCALE_WIDTH)
         / (WIDE_MAX_SCALE_WIDTH - WIDE_MIN_SCALE_WIDTH))
         .clamp(0.0, 1.0);
-    let height_progress =
-        ((height - WIDE_MIN_SCALE_HEIGHT) / (WIDE_MAX_SCALE_HEIGHT - WIDE_MIN_SCALE_HEIGHT))
-            .clamp(0.0, 1.0);
+    let height_progress = ((height - WIDE_MIN_SCALE_HEIGHT)
+        / (WIDE_MAX_SCALE_HEIGHT - WIDE_MIN_SCALE_HEIGHT))
+        .clamp(0.0, 1.0);
     let progress = width_progress.min(height_progress);
     1.0 + progress * (WIDE_MAX_LYRICS_LAYOUT_SCALE - 1.0)
 }
@@ -47,15 +47,11 @@ pub(super) struct ResolvedPlayerChrome {
     pub(super) thumb_border_width: f32,
 }
 
-pub(super) fn resolve_keep_alive(
-    chrome: &ResolvedPlayerChrome,
-    spacing: &SpacingInput,
-) -> f32 {
+pub(super) fn resolve_keep_alive(chrome: &ResolvedPlayerChrome, spacing: &SpacingInput) -> f32 {
     chrome
         .focus_y
         .map(|focus_y| {
-            (focus_y - spacing.line_padding * chrome.lyrics_layout_scale)
-                .max(chrome.content_top)
+            (focus_y - spacing.line_padding * chrome.lyrics_layout_scale).max(chrome.content_top)
         })
         .unwrap_or(spacing.focus_top_offset + chrome.content_top)
 }
@@ -104,8 +100,7 @@ pub(super) fn resolve_player_chrome(scene: &mut LyricsScene) -> ResolvedPlayerCh
     if !landscape_lyrics {
         let line_padding_x = scene.style.spacing.horizontal_padding.max(0.0);
         let max_text_width = NARROW_MAX_TEXT_WIDTH_DP * layout_density;
-        let text_width =
-            width - chrome.content_left - chrome.content_right - line_padding_x * 2.0;
+        let text_width = width - chrome.content_left - chrome.content_right - line_padding_x * 2.0;
         if text_width > max_text_width {
             let inset = (text_width - max_text_width) * 0.5;
             chrome.content_left += inset;
@@ -142,11 +137,9 @@ pub(super) fn resolve_player_chrome(scene: &mut LyricsScene) -> ResolvedPlayerCh
         .min(width - safe_right)
         .max(lyrics_viewport_left + 1.0)
         .min(width);
-    let lyrics_viewport_width =
-        (lyrics_viewport_right_edge - lyrics_viewport_left).max(1.0);
+    let lyrics_viewport_width = (lyrics_viewport_right_edge - lyrics_viewport_left).max(1.0);
     let lyrics_clip_left = (lyrics_viewport_left - clip_bleed).max(safe_left);
-    let lyrics_clip_right_edge =
-        (lyrics_viewport_right_edge + clip_bleed).min(width - safe_right);
+    let lyrics_clip_right_edge = (lyrics_viewport_right_edge + clip_bleed).min(width - safe_right);
 
     // Decompiled inner text frame: centered in the viewport, padded by 16*s*1.2,
     // and capped at 500*s*1.2. SceneConfig's content insets exclude the renderer's
@@ -162,8 +155,7 @@ pub(super) fn resolve_player_chrome(scene: &mut LyricsScene) -> ResolvedPlayerCh
 
     chrome.content_top = system_top;
     chrome.content_left = (text_left - line_padding_x).max(0.0);
-    chrome.content_right =
-        (width - (text_left + text_width) - line_padding_x).max(0.0);
+    chrome.content_right = (width - (text_left + text_width) - line_padding_x).max(0.0);
     chrome.lyrics_clip_left = lyrics_clip_left;
     chrome.lyrics_clip_right = (width - lyrics_clip_right_edge).max(0.0);
     chrome.thumb_border_width = dp(1.0);
@@ -250,8 +242,7 @@ impl LyricsRenderer {
                 italic: typography.normal_font_italic,
             },
             accompaniment_font_size: typography.accompaniment_font_size * lyrics_layout_scale,
-            accompaniment_line_height: typography.accompaniment_line_height
-                * lyrics_layout_scale,
+            accompaniment_line_height: typography.accompaniment_line_height * lyrics_layout_scale,
             accompaniment_attrs: TextAttrs {
                 weight: typography.accompaniment_font_weight,
                 italic: typography.accompaniment_font_italic,
@@ -264,8 +255,7 @@ impl LyricsRenderer {
             },
             accompaniment_translation_font_size: typography.accompaniment_translation_font_size
                 * lyrics_layout_scale,
-            accompaniment_translation_line_height: typography
-                .accompaniment_translation_line_height
+            accompaniment_translation_line_height: typography.accompaniment_translation_line_height
                 * lyrics_layout_scale,
             accompaniment_translation_attrs: TextAttrs {
                 weight: typography.accompaniment_translation_font_weight,

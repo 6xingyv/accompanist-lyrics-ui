@@ -1,0 +1,7 @@
+Starting a Gradle Daemon (subsequent builds will be faster)
+
+> Task :src:buildRustAndroid
+
+BUILD SUCCESSFUL in 58s
+1 actionable task: 1 executed
+Consider enabling configuration cache to speed up this build: https://docs.gradle.org/9.4.1/userguide/configuration_cache_enabling.html

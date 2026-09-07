@@ -52,6 +52,7 @@ internal actual fun NativeLyricsViewHost(
     playerExpansionTarget: Float,
     playerExpansionGeometry: NativePlayerExpansionGeometry?,
     onPlayerExpansionDragStart: (() -> Unit)?,
+    onPlayerExpansionProgress: ((Float) -> Unit)?,
     onPlayerExpansionSettled: ((Float) -> Unit)?,
     onPlayerAction: ((NativePlayerAction) -> Unit)?,
     onQueueReordered: ((Int, Int) -> Unit)?,
@@ -78,6 +79,7 @@ internal actual fun NativeLyricsViewHost(
     val latestControlsClick by rememberUpdatedState(onControlsClick)
     val latestPlayerAction by rememberUpdatedState(onPlayerAction)
     val latestExpansionDragStart by rememberUpdatedState(onPlayerExpansionDragStart)
+    val latestExpansionProgress by rememberUpdatedState(onPlayerExpansionProgress)
     val latestExpansionSettled by rememberUpdatedState(onPlayerExpansionSettled)
     val latestQueueReordered by rememberUpdatedState(onQueueReordered)
     val latestLyrics by rememberUpdatedState(lyrics)
@@ -110,6 +112,12 @@ internal actual fun NativeLyricsViewHost(
     val nativeExpansionDragStart = remember {
         {
             latestExpansionDragStart?.invoke()
+            Unit
+        }
+    }
+    val nativeExpansionProgress = remember {
+        { progress: Float ->
+            latestExpansionProgress?.invoke(progress)
             Unit
         }
     }
@@ -172,6 +180,7 @@ internal actual fun NativeLyricsViewHost(
         setContentInsets(contentTopPx, contentBottomPx, contentLeftPx, contentRightPx)
         setMusicFoundationClockEnabled(useMusicFoundationClock)
         setPlaybackState(isPlaying, backgroundReactive)
+        setOnPlayerExpansionProgress(nativeExpansionProgress)
         configurePlayerExpansion(playerExpansionGeometry, playerExpansionTarget)
         if (playerChrome != null) {
             // Full portrait player owns chrome geometry; clear the legacy top bar.
@@ -187,9 +196,18 @@ internal actual fun NativeLyricsViewHost(
                 playing = playerChrome.isPlaying,
                 liked = playerChrome.liked,
                 presentation = playerChrome.presentation.wireValue,
+                viewportLeft = playerExpansionGeometry?.collapsedLeft ?: 0f,
+                viewportTop = playerExpansionGeometry?.collapsedTop ?: 0f,
                 viewportWidth = playerChrome.viewportWidth,
                 viewportHeight = playerChrome.viewportHeight,
+                collapsedRadius = playerExpansionGeometry?.collapsedRadius ?: 0f,
+                expandedTopLeftRadius = playerExpansionGeometry?.expandedTopLeftRadius ?: 0f,
+                expandedTopRightRadius = playerExpansionGeometry?.expandedTopRightRadius ?: 0f,
+                expandedBottomRightRadius = playerExpansionGeometry?.expandedBottomRightRadius ?: 0f,
+                expandedBottomLeftRadius = playerExpansionGeometry?.expandedBottomLeftRadius ?: 0f,
                 miniForegroundArgb = playerChrome.miniForegroundArgb,
+                miniContainerArgb = playerChrome.miniContainerArgb,
+                fullContainerArgb = playerChrome.fullContainerArgb,
                 screen = playerChrome.initialScreen.wireValue,
                 queueTitle = playerChrome.queueTitle,
                 queueSource = playerChrome.queueSource,
@@ -208,6 +226,7 @@ internal actual fun NativeLyricsViewHost(
             setPlayerChrome(title = null)
             setOnPlayerAction(null)
             setOnPlayerExpansionDragCallbacks(null, null)
+            setOnPlayerExpansionProgress(null)
             setOnQueueReordered(null)
             setTopBar(title, artist)
             setOnControlsClicked(nativeControlsClick)

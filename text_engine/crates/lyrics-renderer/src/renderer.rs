@@ -3,7 +3,7 @@ use cosmic_text::{
     Weight, Wrap,
 };
 use serde::{Deserialize, Serialize};
-use skia_safe::{font_style, Data, FontMgr, FontStyle, Path, Typeface};
+use skia_safe::{font_style, Color4f, Data, FontMgr, FontStyle, Paint, Path, Typeface};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -61,6 +61,16 @@ const DEFAULT_DOTS_STILL_MS: f32 = 200.0;
 const DEFAULT_DOTS_DIP_MS: f32 = 3000.0;
 const DEFAULT_DOTS_EXIT_MS: f32 = 200.0;
 const DOTS_VERTICAL_PADDING: f32 = 12.0;
+
+fn lerp_color4f(from: Color4f, to: Color4f, progress: f32) -> Color4f {
+    let p = progress.clamp(0.0, 1.0);
+    Color4f::new(
+        from.r + (to.r - from.r) * p,
+        from.g + (to.g - from.g) * p,
+        from.b + (to.b - from.b) * p,
+        from.a + (to.a - from.a) * p,
+    )
+}
 const KARAOKE_INACTIVE_ALPHA: f32 = 0.2;
 // A line that leaves the focus dims to `FOCUS_ALPHA_MIN` over `..FALLOFF_MS` of
 // distance (time before it starts / after it ends). Kept short so the dim is
@@ -1347,7 +1357,6 @@ impl LyricsRenderer {
             .and_then(|scene| scene.player.as_ref())
             .map(|player| player.presentation);
         if presentation == Some(player::PlayerPresentationInput::Mini) {
-            canvas.clear(skia_safe::Color::TRANSPARENT);
             return false;
         }
         if !self.background_enabled {
@@ -1360,8 +1369,6 @@ impl LyricsRenderer {
         };
         if expansion >= 0.999 {
             canvas.clear(skia_safe::Color::BLACK);
-        } else {
-            canvas.clear(skia_safe::Color::TRANSPARENT);
         }
 
         let now = Instant::now();
@@ -1591,9 +1598,97 @@ impl LyricsRenderer {
         // First half of layout (targets); spring half is timed after background.
         let mut layout_ms = phase_ms(phase);
 
-        // Bottom layer: the opaque GPU mesh-gradient background (no-op unless the
-        // engine owns the full surface). Draws before any lyrics and advances its
-        // own loudness-paced animation clock.
+        // The expanding player is one native container: clear the complete
+        // TextureView first, clip the whole renderer to the animated container,
+        // then paint its theme surface below mesh/chrome. Keeping this in the
+        // render pass avoids an Android outline and a second independently-timed
+        // Compose background layer on every drag sample.
+        let player_surface = self.scene.as_ref().and_then(|scene| {
+            scene.player.as_ref().map(|player| {
+                let expansion = if player.presentation == player::PlayerPresentationInput::Mini {
+                    0.0
+                } else {
+                    self.player_expansion_progress.clamp(0.0, 1.0)
+                };
+                let mini_width = player.mini_layout.surface_width.min(width).max(1.0);
+                let mini_height = player.mini_layout.height.min(height as f32).max(1.0);
+                // Resolve the transition around TopCenter explicitly. This keeps
+                // the mini player centred even when its side safe areas differ;
+                // TopStart must never become the expansion pivot.
+                let mini_center_x = player.viewport_left + mini_width * 0.5;
+                let full_center_x = width * 0.5;
+                let visible_center_x = mini_center_x + (full_center_x - mini_center_x) * expansion;
+                let visible_top = player.viewport_top * (1.0 - expansion);
+                let visible_width = mini_width + (width - mini_width) * expansion;
+                let visible_left = visible_center_x - visible_width * 0.5;
+                let visible_height = mini_height + (height as f32 - mini_height) * expansion;
+                let lerp_radius =
+                    |collapsed: f32, expanded: f32| collapsed + (expanded - collapsed) * expansion;
+                let radii = crate::capsule::CornerRadii {
+                    top_left: lerp_radius(player.collapsed_radius, player.expanded_top_left_radius),
+                    top_right: lerp_radius(
+                        player.collapsed_radius,
+                        player.expanded_top_right_radius,
+                    ),
+                    bottom_right: lerp_radius(
+                        player.collapsed_radius,
+                        player.expanded_bottom_right_radius,
+                    ),
+                    bottom_left: lerp_radius(
+                        player.collapsed_radius,
+                        player.expanded_bottom_left_radius,
+                    ),
+                };
+                let color = lerp_color4f(player.mini_container, player.full_container, expansion);
+                (
+                    visible_left,
+                    visible_top,
+                    visible_width,
+                    visible_height,
+                    radii,
+                    color,
+                    expansion,
+                )
+            })
+        });
+        let player_surface_clipped = player_surface
+            .as_ref()
+            .is_some_and(|(_, _, _, _, _, _, expansion)| *expansion < 0.999);
+        if let Some((
+            visible_left,
+            visible_top,
+            visible_width,
+            visible_height,
+            radii,
+            color,
+            expansion,
+        )) = player_surface
+        {
+            if expansion < 0.999 {
+                canvas.clear(skia_safe::Color::TRANSPARENT);
+                canvas.save();
+                let container_clip = crate::capsule::continuous_rounded_rect_with_radii(
+                    skia_safe::Rect::from_xywh(
+                        visible_left,
+                        visible_top,
+                        visible_width,
+                        visible_height,
+                    ),
+                    radii,
+                );
+                canvas.clip_path(&container_clip, skia_safe::ClipOp::Intersect, true);
+                canvas.translate((visible_left, visible_top));
+            }
+            let mut container_paint = Paint::default();
+            container_paint.set_color4f(color, None);
+            canvas.draw_rect(
+                skia_safe::Rect::from_xywh(0.0, 0.0, visible_width, visible_height),
+                &container_paint,
+            );
+        }
+
+        // Bottom media layer: GPU mesh-gradient over the player container (no-op
+        // unless artwork enabled it). It advances its loudness-paced clock.
         let phase = Instant::now();
         let background_animating = self.draw_background(canvas, width, height as f32);
         timing.background_ms = phase_ms(phase);
@@ -1660,6 +1755,9 @@ impl LyricsRenderer {
         // (shared) alongside the scene for the draw pass.
         let dynamic_layouts = &self.frame_layouts;
         let Some(scene) = &self.scene else {
+            if player_surface_clipped {
+                canvas.restore();
+            }
             return -3;
         };
 
@@ -2063,6 +2161,9 @@ impl LyricsRenderer {
             false
         };
         timing.top_bar_ms = phase_ms(phase);
+        if player_surface_clipped {
+            canvas.restore();
+        }
         timing.total_ms = phase_ms(frame_start);
         self.last_frame_timing = timing;
 
@@ -2123,18 +2224,26 @@ impl LyricsRenderer {
     /// Begin a native-player button gesture and return its stable action code.
     /// Zero means the point does not hit player chrome.
     pub fn player_pointer_down(&mut self, x: f32, y: f32) -> i32 {
+        let expansion = self.player_expansion_progress;
         let Some((layout, presentation)) = self
             .scene
             .as_ref()
             .and_then(|scene| scene.player.as_ref())
-            .map(|player| (player.layout, player.presentation))
+            .map(|player| {
+                if expansion < 0.999 {
+                    (player.mini_layout, player::PlayerPresentationInput::Mini)
+                } else {
+                    (player.layout, player.presentation)
+                }
+            })
         else {
             return 0;
         };
         let ui = player::PlayerUiLayout::resolve(layout, self.player_screen, presentation);
         // Pointer coords are surface px; the full-player chrome lives in the
         // centered design column (no-op offset until the chrome clamp engages).
-        self.player_interaction.press(&ui, x - layout.column_left, y)
+        self.player_interaction
+            .press(&ui, x - layout.column_left, y)
     }
 
     /// Finish a native-player button gesture.
@@ -2146,11 +2255,18 @@ impl LyricsRenderer {
     /// The action code is still returned so the host can handle transport /
     /// favorite / more / output / queue filters.
     pub fn player_pointer_up(&mut self, x: f32, y: f32) -> i32 {
+        let expansion = self.player_expansion_progress;
         let Some((layout, presentation)) = self
             .scene
             .as_ref()
             .and_then(|scene| scene.player.as_ref())
-            .map(|player| (player.layout, player.presentation))
+            .map(|player| {
+                if expansion < 0.999 {
+                    (player.mini_layout, player::PlayerPresentationInput::Mini)
+                } else {
+                    (player.layout, player.presentation)
+                }
+            })
         else {
             self.player_interaction.cancel();
             return 0;

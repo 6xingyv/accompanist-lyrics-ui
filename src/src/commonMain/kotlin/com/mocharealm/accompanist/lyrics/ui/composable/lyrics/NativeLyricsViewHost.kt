@@ -40,6 +40,7 @@ internal expect fun NativeLyricsViewHost(
     playerExpansionTarget: Float = 1f,
     playerExpansionGeometry: NativePlayerExpansionGeometry? = null,
     onPlayerExpansionDragStart: (() -> Unit)? = null,
+    onPlayerExpansionProgress: ((Float) -> Unit)? = null,
     onPlayerExpansionSettled: ((Float) -> Unit)? = null,
     onPlayerAction: ((NativePlayerAction) -> Unit)? = null,
     onQueueReordered: ((Int, Int) -> Unit)? = null,

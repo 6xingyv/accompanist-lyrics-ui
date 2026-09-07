@@ -125,10 +125,7 @@ impl SimpleXmlParser {
 
 fn append_text(element: &mut MutableElement, raw_text: &str) {
     if raw_text.trim().is_empty() {
-        let inline_prefix = raw_text
-            .split(['\n', '\r'])
-            .next()
-            .unwrap_or_default();
+        let inline_prefix = raw_text.split(['\n', '\r']).next().unwrap_or_default();
         let has_semantic_inline_space = inline_prefix.contains(' ') || inline_prefix.contains('\t');
         let is_layout_whitespace = raw_text.contains('\n') || raw_text.contains('\r');
         if !is_layout_whitespace || has_semantic_inline_space {

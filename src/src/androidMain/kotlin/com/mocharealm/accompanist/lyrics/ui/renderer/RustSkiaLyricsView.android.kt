@@ -3,7 +3,6 @@ package com.mocharealm.accompanist.lyrics.ui.renderer
 import android.animation.ValueAnimator
 import android.content.Context
 import android.graphics.Color
-import android.graphics.Outline
 import android.graphics.SurfaceTexture
 import android.os.Handler
 import android.os.HandlerThread
@@ -17,7 +16,6 @@ import android.view.TextureView
 import android.view.VelocityTracker
 import android.view.View
 import android.view.ViewConfiguration
-import android.view.ViewOutlineProvider
 import com.mocharealm.accompanist.lyrics.core.model.SyncedLyrics
 import com.mocharealm.accompanist.lyrics.text.NativeFontConfig
 import com.mocharealm.accompanist.lyrics.text.NativeFontSource
@@ -47,8 +45,8 @@ private const val CLOCK_RECONCILE_MS = 350.0
 private const val CLOCK_MAX_RATE = 2.5
 /** Clamp on a single frame's dt, so a stall doesn't lurch the clock. */
 private const val CLOCK_MAX_FRAME_MS = 64.0
-/** Keep the player surface bounded on high-refresh displays. */
-private const val TARGET_FRAME_INTERVAL_NANOS = 1_000_000_000L / 60L
+/** Fallback until the TextureView is attached to a display. */
+private const val DEFAULT_FRAME_INTERVAL_NANOS = 1_000_000_000L / 60L
 private const val FRAME_INTERVAL_TOLERANCE_NANOS = 1_000_000L
 /** Some OEMs do not continuously dispatch vsync to a non-UI Looper. */
 private const val CHOREOGRAPHER_STALL_TIMEOUT_MS = 50L
@@ -77,11 +75,6 @@ class RustSkiaLyricsView @JvmOverloads constructor(
     }
 
     init {
-        outlineProvider = object : ViewOutlineProvider() {
-            override fun getOutline(view: View, outline: Outline) {
-                updatePlayerOutline(outline)
-            }
-        }
         LyricsUiDiagnostics.record(
             "RustSkiaLyricsView",
             "created sdk=${android.os.Build.VERSION.SDK_INT} manufacturer=${android.os.Build.MANUFACTURER} model=${android.os.Build.MODEL}",
@@ -179,6 +172,9 @@ class RustSkiaLyricsView @JvmOverloads constructor(
     private var surfaceReady = false
     private var renderScheduled = false
     private var lastPresentedFrameNanos = 0L
+    // A hard-coded 60 Hz cap made a 120 Hz device present every other frame.
+    @Volatile
+    private var targetFrameIntervalNanos = DEFAULT_FRAME_INTERVAL_NANOS
     private var useHandlerFramePump = false
     private var lastDiagnosticRenderKind = Int.MIN_VALUE
     private var lastDiagnosticFrameLogNanos = 0L
@@ -218,6 +214,11 @@ class RustSkiaLyricsView @JvmOverloads constructor(
     // thread holds for a whole frame — the old per-MOVE engine.scrollLyricsBy could
     // block the UI thread ~a frame each move and stutter the drag.
     private val pendingScrollDeltaBits = AtomicInteger(0)
+    // ACTION_MOVE and the render thread must not race through two independent
+    // Handler queues. Keep only the newest sample; doFrame consumes it immediately
+    // before drawing, so the container, cover and lyrics all use one progress value
+    // for that presented frame.
+    private val pendingExpansionProgressBits = AtomicInteger(NO_PENDING_EXPANSION)
 
     private var renderWidth = 0
     private var renderHeight = 0
@@ -232,6 +233,12 @@ class RustSkiaLyricsView @JvmOverloads constructor(
     private var isQueueReordering = false
     private var downX = 0f
     private var downY = 0f
+    // Expansion is drawn inside a fixed full-window TextureView. Keep a
+    // screen-space origin and a separate raw-coordinate velocity tracker so the
+    // drag remains independent of the animated native container bounds.
+    private var downRawX = 0f
+    private var downRawY = 0f
+    private var expansionVelocityTracker: VelocityTracker? = null
     private var lastTouchY = 0f
     /** Set once a swallowed expansion-candidate move commits to being a non-tap,
      * so the gesture detector is cancelled exactly once for the gesture. */
@@ -243,18 +250,21 @@ class RustSkiaLyricsView @JvmOverloads constructor(
     private var onLinePressed: ((Int) -> Unit)? = null
     private var onQueueReordered: ((Int, Int) -> Unit)? = null
     private var onPlayerExpansionDragStart: (() -> Unit)? = null
+    private var onPlayerExpansionProgress: ((Float) -> Unit)? = null
     private var onPlayerExpansionSettled: ((Float) -> Unit)? = null
 
     private val gestureDetector = GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
         override fun onDown(e: MotionEvent): Boolean = true
 
         override fun onSingleTapUp(e: MotionEvent): Boolean {
-            if (!engineClosed && engine.hitTestTopBar(e.x * renderScale, e.y * renderScale)) {
+            val x = playerLocalX(e.x)
+            val y = playerLocalY(e.y)
+            if (!engineClosed && engine.hitTestTopBar(x * renderScale, y * renderScale)) {
                 performClick()
                 onControlsClicked?.invoke()
                 return true
             }
-            val lineIndex = hitTestLine(e.x, e.y) ?: return false
+            val lineIndex = hitTestLine(x, y) ?: return false
             performClick()
             onLineClicked?.invoke(lineIndex)
             return true
@@ -262,7 +272,9 @@ class RustSkiaLyricsView @JvmOverloads constructor(
 
         override fun onLongPress(e: MotionEvent) {
             if (playerWire != null && !engineClosed) {
-                val index = engine.beginQueueReorder(e.x * renderScale, e.y * renderScale)
+                val x = playerLocalX(e.x)
+                val y = playerLocalY(e.y)
+                val index = engine.beginQueueReorder(x * renderScale, y * renderScale)
                 if (index >= 0) {
                     isQueueReordering = true
                     velocityTracker?.clear()
@@ -281,8 +293,13 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         // Start non-opaque (mini pill / transitions need alpha); updateSurfaceOpacity
         // flips this to true whenever the renderer is known full-bleed opaque.
         isOpaque = false
-        isClickable = true
-        isLongClickable = true
+        // The TextureView is intentionally full-window so Rust can expand the
+        // player without a remeasure. Keep the Android view itself non-clickable:
+        // our onTouchEvent owns gestures inside the visible player rectangle,
+        // while taps outside it must continue to hit Compose siblings (notably
+        // MainScreen's bottom navigation).
+        isClickable = false
+        isLongClickable = false
     }
 
     fun configureFonts(fontBytes: ByteArray?) {
@@ -449,9 +466,18 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         playing: Boolean = false,
         liked: Boolean = false,
         presentation: String = "full",
+        viewportLeft: Float = 0f,
+        viewportTop: Float = 0f,
         viewportWidth: Float? = null,
         viewportHeight: Float? = null,
+        collapsedRadius: Float = 0f,
+        expandedTopLeftRadius: Float = 0f,
+        expandedTopRightRadius: Float = 0f,
+        expandedBottomRightRadius: Float = 0f,
+        expandedBottomLeftRadius: Float = 0f,
         miniForegroundArgb: Int = -1,
+        miniContainerArgb: Int = -1,
+        fullContainerArgb: Int = 0xFF000000.toInt(),
         screen: String = "artwork",
         queueTitle: String = "",
         queueSource: String = "",
@@ -470,9 +496,18 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         val next = title?.let {
             PlayerWire(
                 presentation = presentation,
+                viewportLeft = viewportLeft,
+                viewportTop = viewportTop,
                 viewportWidth = viewportWidth,
                 viewportHeight = viewportHeight,
+                collapsedRadius = collapsedRadius,
+                expandedTopLeftRadius = expandedTopLeftRadius,
+                expandedTopRightRadius = expandedTopRightRadius,
+                expandedBottomRightRadius = expandedBottomRightRadius,
+                expandedBottomLeftRadius = expandedBottomLeftRadius,
                 miniForegroundArgb = miniForegroundArgb,
+                miniContainerArgb = miniContainerArgb,
+                fullContainerArgb = fullContainerArgb,
                 screen = screen,
                 title = it,
                 artist = artist,
@@ -511,8 +546,9 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         }
         playerExpansionProgress = next
         applyPlayerExpansionVisual(next)
+        onPlayerExpansionProgress?.invoke(next)
         updateSurfaceOpacity()
-        if (!engineClosed) postPlayerCommand { engine.setPlayerExpansionProgress(next) }
+        postPlayerExpansionProgress(next)
     }
 
     fun configurePlayerExpansion(
@@ -523,29 +559,63 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         val firstConfiguration = !playerExpansionConfigured
         val geometryChanged = playerExpansionGeometry != geometry
         playerExpansionGeometry = geometry
-        playerExpansionConfigured = geometry != null
+        // The Compose host owns the layer translation and clip.  A null geometry
+        // is therefore still a fully configured expansion surface; it only means
+        // that this View must not mutate translation/outline on every drag frame.
+        playerExpansionConfigured = true
         if (geometry == null) {
-            cancelPlayerExpansionAnimator()
-            playerExpansionProgress = nextTarget
-            playerExpansionTarget = nextTarget
+            // The pool may hand us a view that previously used the legacy native
+            // geometry path. Clear those properties once before Compose takes
+            // over the layer transform.
             translationX = 0f
             translationY = 0f
+            elevation = 0f
             clipToOutline = false
-            updateSurfaceOpacity()
+            if (firstConfiguration) {
+                playerExpansionProgress = nextTarget
+                playerExpansionTarget = nextTarget
+                applyPlayerExpansionVisual(nextTarget)
+                postPlayerExpansionProgress(nextTarget)
+                return
+            }
+            if (isPlayerExpansionDragging || playerExpansionGestureOwnsTarget) return
+            if (nextTarget != playerExpansionTarget) animatePlayerExpansionTo(nextTarget)
             return
         }
         if (firstConfiguration) {
             playerExpansionProgress = nextTarget
             playerExpansionTarget = nextTarget
             applyPlayerExpansionVisual(nextTarget)
-            if (!engineClosed) postPlayerCommand {
-                engine.setPlayerExpansionProgress(nextTarget)
-            }
+            postPlayerExpansionProgress(nextTarget)
             return
         }
         if (geometryChanged) applyPlayerExpansionVisual(playerExpansionProgress)
         if (isPlayerExpansionDragging || playerExpansionGestureOwnsTarget) return
         if (nextTarget != playerExpansionTarget) animatePlayerExpansionTo(nextTarget)
+    }
+
+    /** Reset state retained by [NativeLyricsViewPool] before a new AndroidView
+     * host configures this instance. Without this boundary a recycled fullscreen
+     * player (`progress = 1`) animates down to the new host's mini target, exposing
+     * the full layout at the mini position on its first frame. */
+    internal fun beginPlayerHostSession() {
+        cancelPlayerExpansionAnimator()
+        recycleTouchState()
+        playerExpansionConfigured = false
+        playerExpansionGeometry = null
+        playerExpansionProgress = 1f
+        playerExpansionTarget = 1f
+        playerExpansionDragStartProgress = 0f
+        playerExpansionGestureOwnsTarget = false
+        pendingExpansionProgressBits.set(NO_PENDING_EXPANSION)
+        onPlayerExpansionDragStart = null
+        onPlayerExpansionProgress = null
+        onPlayerExpansionSettled = null
+        translationX = 0f
+        translationY = 0f
+        elevation = 0f
+        clipToOutline = false
+        isOpaque = false
     }
 
     private fun animatePlayerExpansionTo(target: Float) {
@@ -558,9 +628,6 @@ class RustSkiaLyricsView @JvmOverloads constructor(
             onPlayerExpansionSettled?.invoke(next)
             return
         }
-        if (!engineClosed) postPlayerCommand {
-            engine.animatePlayerExpansionTo(next, PLAYER_EXPANSION_DURATION_MS.toFloat())
-        }
         playerExpansionAnimator = ValueAnimator.ofFloat(playerExpansionProgress, next).apply {
             duration = PLAYER_EXPANSION_DURATION_MS
             interpolator = android.animation.TimeInterpolator { input ->
@@ -569,6 +636,12 @@ class RustSkiaLyricsView @JvmOverloads constructor(
             addUpdateListener { animator ->
                 playerExpansionProgress = animator.animatedValue as Float
                 applyPlayerExpansionVisual(playerExpansionProgress)
+                onPlayerExpansionProgress?.invoke(playerExpansionProgress)
+                // One progress value drives View translation, Compose's previous
+                // scene transform, and Rust's container/content geometry. The old
+                // second Rust animator started on another thread a few ms later,
+                // so these layers visibly chased one another.
+                postPlayerExpansionProgress(playerExpansionProgress)
             }
             addListener(object : android.animation.AnimatorListenerAdapter() {
                 override fun onAnimationEnd(animation: android.animation.Animator) {
@@ -576,6 +649,8 @@ class RustSkiaLyricsView @JvmOverloads constructor(
                     playerExpansionAnimator = null
                     playerExpansionProgress = next
                     applyPlayerExpansionVisual(next)
+                    onPlayerExpansionProgress?.invoke(next)
+                    postPlayerExpansionProgress(next)
                     playerExpansionGestureOwnsTarget = false
                     onPlayerExpansionSettled?.invoke(next)
                 }
@@ -598,19 +673,19 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         playerExpansionProgress = next
         playerExpansionTarget = next
         applyPlayerExpansionVisual(next)
-        if (!engineClosed) postPlayerCommand { engine.setPlayerExpansionProgress(next) }
+        onPlayerExpansionProgress?.invoke(next)
+        postPlayerExpansionProgress(next)
     }
 
     private fun applyPlayerExpansionVisual(progress: Float) {
-        val geometry = playerExpansionGeometry ?: return
-        val p = progress.coerceIn(0f, 1f)
-        translationX = geometry.collapsedLeft * (1f - p)
-        translationY = geometry.collapsedTop * (1f - p)
-        // The mini background is owned by Compose. A native elevation shadow is
-        // clipped by the collapsed host layer and darkens the inside of the pill.
+        // Keep the TextureView fixed at the window origin. Rust owns all four
+        // animated container edges; splitting top/left into this RenderNode and
+        // width/height into the render thread made the bottom/right edges combine
+        // progress samples from different vsyncs and visibly twitch.
+        translationX = 0f
+        translationY = 0f
         elevation = 0f
-        clipToOutline = p < 1f || playerExpansionAnimator != null || isPlayerExpansionDragging
-        invalidateOutline()
+        clipToOutline = false
         updateSurfaceOpacity()
     }
 
@@ -622,14 +697,13 @@ class RustSkiaLyricsView @JvmOverloads constructor(
      * mesh-gradient background is enabled AND the player is not in mini
      * presentation AND the (engine-side) expansion is >= 0.999 — in every other
      * case (mini pill, expansion transition, no background art) it clears
-     * transparent, so the view must stay non-opaque. The Kotlin-side steady-state
-     * condition (progress == 1, no animator, no drag) is the inverse of the
-     * `clipToOutline` condition above (clip on ⇒ rounded corners ⇒ non-opaque).
+     * transparent, so the view must stay non-opaque.
      * Toggling isOpaque on a live TextureView takes effect on the next
      * layer/buffer update, so we invalidate() to apply it promptly.
      */
     private fun updateSurfaceOpacity() {
-        val fullBleed = backgroundPixels != null &&
+        val fullBleed = playerWire?.fullContainerArgb
+            ?.let { (it ushr 24) == 0xFF } == true &&
             playerWire?.presentation != "mini" &&
             playerExpansionProgress >= 1f &&
             playerExpansionAnimator == null &&
@@ -638,34 +712,6 @@ class RustSkiaLyricsView @JvmOverloads constructor(
             isOpaque = fullBleed
             invalidate()
         }
-    }
-
-    private fun updatePlayerOutline(outline: Outline) {
-        val geometry = playerExpansionGeometry ?: run {
-            outline.setRect(0, 0, width, height)
-            return
-        }
-        val p = playerExpansionProgress.coerceIn(0f, 1f)
-        val clipWidth = geometry.collapsedWidth + (width - geometry.collapsedWidth) * p
-        val clipHeight = geometry.collapsedHeight + (height - geometry.collapsedHeight) * p
-        // TextureView + arbitrary Path outlines are expensive and have stalled
-        // some vendor renderers. Screen corners are symmetric on supported
-        // Android devices, so use the hardware round-rect outline fast path.
-        val expandedRadius = maxOf(
-            geometry.expandedTopLeftRadius,
-            geometry.expandedTopRightRadius,
-            geometry.expandedBottomRightRadius,
-            geometry.expandedBottomLeftRadius,
-        )
-        val radius = geometry.collapsedRadius +
-            (expandedRadius - geometry.collapsedRadius) * p
-        outline.setRoundRect(
-            0,
-            0,
-            clipWidth.roundToInt().coerceAtLeast(1),
-            clipHeight.roundToInt().coerceAtLeast(1),
-            radius.coerceAtLeast(0f),
-        )
     }
 
     /** Stable native action codes: favorite=1, more=2, previous=3,
@@ -680,6 +726,33 @@ class RustSkiaLyricsView @JvmOverloads constructor(
     ) {
         onPlayerExpansionDragStart = onStart
         onPlayerExpansionSettled = onSettled
+    }
+
+    /** Reports the native expansion sample without causing an AndroidView update. */
+    fun setOnPlayerExpansionProgress(callback: ((Float) -> Unit)?) {
+        if (onPlayerExpansionProgress === callback) return
+        onPlayerExpansionProgress = callback
+        // AndroidView calls this from its update block. Defer the initial sample
+        // until after that update returns so the callback cannot mutate a Compose
+        // snapshot while the host is applying its current snapshot.
+        callback?.let { listener ->
+            post {
+                if (onPlayerExpansionProgress === listener) {
+                    listener(playerExpansionProgress)
+                }
+            }
+        }
+    }
+
+    private fun postPlayerExpansionProgress(progress: Float) {
+        if (engineClosed) return
+        if (renderHandler == null) {
+            engine.setPlayerExpansionProgress(progress)
+            requestRender()
+            return
+        }
+        pendingExpansionProgressBits.set(progress.toRawBits())
+        requestRender()
     }
 
     fun setOnQueueReordered(callback: ((Int, Int) -> Unit)?) {
@@ -940,7 +1013,7 @@ class RustSkiaLyricsView @JvmOverloads constructor(
             val dueNanos = if (lastPresentedFrameNanos == 0L) {
                 now
             } else {
-                lastPresentedFrameNanos + TARGET_FRAME_INTERVAL_NANOS
+                lastPresentedFrameNanos + targetFrameIntervalNanos
             }
             val delayMs = ((dueNanos - now).coerceAtLeast(0L) + 999_999L) / 1_000_000L
             handler.postDelayed(handlerFrameRunnable, delayMs)
@@ -981,12 +1054,16 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         val sinceLastPresent = frameTimeNanos - lastPresentedFrameNanos
         if (
             lastPresentedFrameNanos != 0L &&
-            sinceLastPresent < TARGET_FRAME_INTERVAL_NANOS - FRAME_INTERVAL_TOLERANCE_NANOS
+            sinceLastPresent < targetFrameIntervalNanos - FRAME_INTERVAL_TOLERANCE_NANOS
         ) {
             scheduleFrame()
             return
         }
         lastPresentedFrameNanos = frameTimeNanos
+        val expansionBits = pendingExpansionProgressBits.getAndSet(NO_PENDING_EXPANSION)
+        if (expansionBits != NO_PENDING_EXPANSION && !engineClosed) {
+            engine.setPlayerExpansionProgress(Float.fromBits(expansionBits))
+        }
         applyPendingScrollOnRenderThread()
         // Arm the next vsync callback BEFORE the blocking present. eglSwapBuffers
         // (swapInterval 1) blocks the render thread until the next vsync, so posting
@@ -1104,7 +1181,7 @@ class RustSkiaLyricsView @JvmOverloads constructor(
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
-        if (lyrics == null) return super.onTouchEvent(event)
+        if (lyrics == null && playerWire == null) return super.onTouchEvent(event)
 
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
@@ -1116,14 +1193,20 @@ class RustSkiaLyricsView @JvmOverloads constructor(
                 swallowedGestureCancelledTap = false
                 collapseGrabReleased = false
                 activePointerId = event.getPointerId(0)
-                downX = event.x
-                downY = event.y
+                downX = playerLocalX(event.x)
+                downY = playerLocalY(event.y)
+                downRawX = event.rawX
+                downRawY = event.rawY
                 lastTouchY = event.y
                 velocityTracker?.recycle()
                 velocityTracker = VelocityTracker.obtain().also { it.addMovement(event) }
+                expansionVelocityTracker?.recycle()
+                expansionVelocityTracker = VelocityTracker.obtain().also {
+                    it.addRawMovement(event)
+                }
                 if (playerWire != null) {
-                    val x = event.x * renderScale
-                    val y = event.y * renderScale
+                    val x = playerLocalX(event.x) * renderScale
+                    val y = playerLocalY(event.y) * renderScale
                     postPlayerCommand { engine.playerPointerDown(x, y) }
                 }
                 gestureDetector.onTouchEvent(event)
@@ -1133,6 +1216,7 @@ class RustSkiaLyricsView @JvmOverloads constructor(
             MotionEvent.ACTION_POINTER_UP -> {
                 handlePointerUp(event)
                 velocityTracker?.addMovement(event)
+                expansionVelocityTracker?.addRawMovement(event)
                 return true
             }
 
@@ -1140,30 +1224,34 @@ class RustSkiaLyricsView @JvmOverloads constructor(
                 val pointerIndex = event.findPointerIndex(activePointerId)
                 if (pointerIndex < 0) return false
                 velocityTracker?.addMovement(event)
-                val y = event.getY(pointerIndex)
+                expansionVelocityTracker?.addRawMovement(event)
+                val y = playerLocalY(event.getY(pointerIndex))
+                val rawX = event.rawXForPointer(pointerIndex)
+                val rawY = event.rawYForPointer(pointerIndex)
                 if (isQueueReordering) {
                     val renderY = y * renderScale
                     postPlayerCommand { engine.updateQueueReorder(renderY) }
                     return true
                 }
                 if (isPlayerExpansionDragging) {
-                    val totalDy = y - downY
+                    val totalDy = rawY - downRawY
                     val next = playerExpansionDragStartProgress -
-                        totalDy / height.coerceAtLeast(1)
+                        totalDy / playerExpansionDragRange()
                     applyInteractivePlayerExpansion(next)
                     lastTouchY = y
                     return true
                 }
-                val miniCanExpand = playerWire?.presentation == "mini" &&
-                    playerExpansionProgress < 0.999f &&
+                // The scene-backed player keeps one full renderer layout for
+                // its lifetime. Expansion state, rather than presentation JSON,
+                // decides which vertical gesture is available.
+                val miniCanExpand = playerExpansionProgress < 0.999f &&
                     onPlayerExpansionDragStart != null
-                val fullCanCollapse = playerWire?.presentation == "full" &&
-                    playerExpansionProgress >= 0.999f &&
+                val fullCanCollapse = playerExpansionProgress >= 0.999f &&
                     !collapseGrabReleased &&
                     downY <= 80f * resources.displayMetrics.density
                 if (miniCanExpand || fullCanCollapse) {
-                    val totalDy = y - downY
-                    val totalDx = event.getX(pointerIndex) - downX
+                    val totalDy = rawY - downRawY
+                    val totalDx = rawX - downRawX
                     val startsExpansion = miniCanExpand && totalDy < -touchSlop
                     val startsCollapse = fullCanCollapse && totalDy > touchSlop
                     if (startsExpansion || startsCollapse) {
@@ -1176,7 +1264,7 @@ class RustSkiaLyricsView @JvmOverloads constructor(
                         postPlayerCommand { engine.cancelPlayerPointer() }
                         onPlayerExpansionDragStart?.invoke()
                         val next = playerExpansionDragStartProgress -
-                            totalDy / height.coerceAtLeast(1)
+                            totalDy / playerExpansionDragRange()
                         applyInteractivePlayerExpansion(next)
                         return true
                     }
@@ -1227,8 +1315,13 @@ class RustSkiaLyricsView @JvmOverloads constructor(
             MotionEvent.ACTION_UP -> {
                 if (isPlayerExpansionDragging) {
                     velocityTracker?.addMovement(event)
-                    velocityTracker?.computeCurrentVelocity(1000, maxFlingVelocity.toFloat())
-                    val velocityY = velocityTracker?.getYVelocity(activePointerId) ?: 0f
+                    expansionVelocityTracker?.addRawMovement(event)
+                    expansionVelocityTracker?.computeCurrentVelocity(
+                        1000,
+                        maxFlingVelocity.toFloat(),
+                    )
+                    val velocityY = expansionVelocityTracker
+                        ?.getYVelocity(activePointerId) ?: 0f
                     val target = when {
                         velocityY < -700f -> 1f
                         velocityY > 700f -> 0f
@@ -1261,8 +1354,8 @@ class RustSkiaLyricsView @JvmOverloads constructor(
                     finishManualDrag()
                 } else {
                     if (playerWire != null) {
-                        val x = event.x * renderScale
-                        val y = event.y * renderScale
+                        val x = playerLocalX(event.x) * renderScale
+                        val y = playerLocalY(event.y) * renderScale
                         postPlayerCommand {
                             val action = engine.playerPointerUp(x, y)
                             if (action != 0) post {
@@ -1308,10 +1401,45 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         val collapsedWidth = player.viewportWidth ?: width.toFloat()
         val collapsedHeight = player.viewportHeight ?: height.toFloat()
         val progress = playerExpansionProgress.coerceIn(0f, 1f)
+        val visibleLeft = visiblePlayerLeft(player, collapsedWidth, progress)
+        val visibleTop = player.viewportTop * (1f - progress)
         val visibleWidth = collapsedWidth + (width - collapsedWidth) * progress
         val visibleHeight = collapsedHeight + (height - collapsedHeight) * progress
-        return x >= 0f && y >= 0f && x <= visibleWidth && y <= visibleHeight
+        return x >= visibleLeft && y >= visibleTop &&
+            x <= visibleLeft + visibleWidth && y <= visibleTop + visibleHeight
     }
+
+    private fun playerLocalX(x: Float): Float {
+        val player = playerWire ?: return x
+        val collapsedWidth = player.viewportWidth ?: width.toFloat()
+        return x - visiblePlayerLeft(
+            player,
+            collapsedWidth,
+            playerExpansionProgress.coerceIn(0f, 1f),
+        )
+    }
+
+    private fun playerLocalY(y: Float): Float {
+        val player = playerWire ?: return y
+        return y - player.viewportTop * (1f - playerExpansionProgress.coerceIn(0f, 1f))
+    }
+
+    /** Horizontal position of the expanding container with a TopCenter pivot. */
+    private fun visiblePlayerLeft(player: PlayerWire, collapsedWidth: Float, progress: Float): Float {
+        val miniCenterX = player.viewportLeft + collapsedWidth * 0.5f
+        val visibleCenterX = miniCenterX + (width * 0.5f - miniCenterX) * progress
+        val visibleWidth = collapsedWidth + (width - collapsedWidth) * progress
+        return visibleCenterX - visibleWidth * 0.5f
+    }
+
+    /** Distance travelled by the container's top edge between mini and full.
+     * Normalising by the full View height made that edge move only
+     * collapsedTop/height pixels for each finger pixel, so it permanently lagged
+     * behind the gesture. */
+    private fun playerExpansionDragRange(): Float =
+        playerExpansionGeometry?.collapsedTop
+            ?.takeIf { it.isFinite() && it > 1f }
+            ?: height.coerceAtLeast(1).toFloat()
 
     override fun performClick(): Boolean {
         super.performClick()
@@ -1399,14 +1527,18 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         }
     }
 
-    /**
-     * Hint that this surface is intentionally capped at 60 FPS. The render loop
-     * also enforces the cap because the platform may choose a different mode.
-     */
+    /** Match both the render pump and the surface vote to the active display. */
     private fun requestPlayerFrameRate(surface: Surface) {
+        val refreshRate = display?.refreshRate
+            ?.takeIf { it.isFinite() && it >= 30f }
+            ?.coerceAtMost(240f)
+            ?: 60f
+        targetFrameIntervalNanos = (1_000_000_000.0 / refreshRate)
+            .toLong()
+            .coerceAtLeast(1L)
         if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.R) return
         runCatching {
-            surface.setFrameRate(60f, Surface.FRAME_RATE_COMPATIBILITY_DEFAULT)
+            surface.setFrameRate(refreshRate, Surface.FRAME_RATE_COMPATIBILITY_DEFAULT)
         }
     }
 
@@ -1502,8 +1634,15 @@ class RustSkiaLyricsView @JvmOverloads constructor(
                     topBar = topBarWire,
                     player = playerWire?.let { player ->
                         player.copy(
+                            viewportLeft = player.viewportLeft * renderScale,
+                            viewportTop = player.viewportTop * renderScale,
                             viewportWidth = player.viewportWidth?.times(renderScale),
                             viewportHeight = player.viewportHeight?.times(renderScale),
+                            collapsedRadius = player.collapsedRadius * renderScale,
+                            expandedTopLeftRadius = player.expandedTopLeftRadius * renderScale,
+                            expandedTopRightRadius = player.expandedTopRightRadius * renderScale,
+                            expandedBottomRightRadius = player.expandedBottomRightRadius * renderScale,
+                            expandedBottomLeftRadius = player.expandedBottomLeftRadius * renderScale,
                         )
                     },
                 )
@@ -1569,6 +1708,12 @@ class RustSkiaLyricsView @JvmOverloads constructor(
             )
         )
         engineClosed = false
+        // configureFonts replaces the complete native EngineState. Its renderer
+        // starts at progress=1, even if this host was already configured as a mini
+        // player. Restore the host-owned progress before binding/drawing the new
+        // engine so a fullscreen layout can never appear at the collapsed origin.
+        pendingExpansionProgressBits.set(NO_PENDING_EXPANSION)
+        engine.setPlayerExpansionProgress(playerExpansionProgress)
         // configureFonts recreates the native engine (nativeInit), which drops the
         // renderer's mesh-gradient background and playback state — re-apply them.
         applyBackgroundArt()
@@ -1624,10 +1769,18 @@ class RustSkiaLyricsView @JvmOverloads constructor(
         }
 
         activePointerId = event.getPointerId(nextPointerIndex)
-        downX = event.getX(nextPointerIndex)
-        downY = event.getY(nextPointerIndex)
+        downX = playerLocalX(event.getX(nextPointerIndex))
+        downY = playerLocalY(event.getY(nextPointerIndex))
+        downRawX = event.rawXForPointer(nextPointerIndex)
+        downRawY = event.rawYForPointer(nextPointerIndex)
         lastTouchY = downY
         velocityTracker?.clear()
+        expansionVelocityTracker?.clear()
+        if (isPlayerExpansionDragging) {
+            // Continue a multi-touch handoff from the exact visual position;
+            // otherwise the new pointer is compared with the old drag origin.
+            playerExpansionDragStartProgress = playerExpansionProgress
+        }
     }
 
     private fun cancelTapDetection(event: MotionEvent) {
@@ -1640,17 +1793,40 @@ class RustSkiaLyricsView @JvmOverloads constructor(
     private fun recycleTouchState() {
         velocityTracker?.recycle()
         velocityTracker = null
+        expansionVelocityTracker?.recycle()
+        expansionVelocityTracker = null
         activePointerId = MotionEvent.INVALID_POINTER_ID
         isDragging = false
         isPlayerExpansionDragging = false
+    }
+
+    /** Raw screen coordinate for any pointer. MotionEvent.rawX/rawY describe
+     * pointer 0; every pointer shares the same local-to-screen offset. */
+    private fun MotionEvent.rawXForPointer(pointerIndex: Int): Float =
+        rawX + getX(pointerIndex) - x
+
+    private fun MotionEvent.rawYForPointer(pointerIndex: Int): Float =
+        rawY + getY(pointerIndex) - y
+
+    private fun VelocityTracker.addRawMovement(event: MotionEvent) {
+        val rawEvent = MotionEvent.obtain(event)
+        rawEvent.offsetLocation(event.rawX - event.x, event.rawY - event.y)
+        addMovement(rawEvent)
+        rawEvent.recycle()
     }
 
     private fun updateRenderTarget(width: Int, height: Int): Boolean {
         if (width <= 0 || height <= 0) return false
 
         val pixels = width.toFloat() * height.toFloat()
-        val scale = if (pixels > MAX_RENDER_PIXELS) {
-            max(MIN_RENDER_SCALE, sqrt(MAX_RENDER_PIXELS / pixels))
+        val refreshRate = display?.refreshRate?.takeIf { it.isFinite() } ?: 60f
+        val pixelBudget = if (refreshRate >= HIGH_REFRESH_RATE_HZ) {
+            HIGH_REFRESH_MAX_RENDER_PIXELS
+        } else {
+            MAX_RENDER_PIXELS
+        }
+        val scale = if (pixels > pixelBudget) {
+            max(MIN_RENDER_SCALE, sqrt(pixelBudget / pixels))
         } else {
             1f
         }
@@ -1669,6 +1845,9 @@ class RustSkiaLyricsView @JvmOverloads constructor(
 
     private companion object {
         const val MAX_RENDER_PIXELS = 2_200_000f
+        const val HIGH_REFRESH_MAX_RENDER_PIXELS = 1_600_000f
+        const val HIGH_REFRESH_RATE_HZ = 90f
         const val MIN_RENDER_SCALE = 0.7f
+        const val NO_PENDING_EXPANSION = Int.MIN_VALUE
     }
 }

@@ -159,9 +159,18 @@ internal data class LyricsSceneWire(
 @Serializable
 internal data class PlayerWire(
     val presentation: String = "full",
+    val viewportLeft: Float = 0f,
+    val viewportTop: Float = 0f,
     val viewportWidth: Float? = null,
     val viewportHeight: Float? = null,
+    val collapsedRadius: Float = 0f,
+    val expandedTopLeftRadius: Float = 0f,
+    val expandedTopRightRadius: Float = 0f,
+    val expandedBottomRightRadius: Float = 0f,
+    val expandedBottomLeftRadius: Float = 0f,
     val miniForegroundArgb: Int = -1,
+    val miniContainerArgb: Int = -1,
+    val fullContainerArgb: Int = 0xFF000000.toInt(),
     val screen: String = "artwork",
     val title: String,
     val artist: String,
