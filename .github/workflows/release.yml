@@ -1,20 +1,19 @@
-name: Release and snapshot
+name: Release
 
 on:
   push:
-    branches: ['**']
-    tags: ['**']
+    tags: ['v*', '[0-9]*']
 
 permissions:
   contents: read
 
-# Preserve every pushed commit build; serialize retries of the same ref and commit.
 concurrency:
-  group: build-${{ github.ref }}-${{ github.sha }}
+  group: release-${{ github.ref }}-${{ github.sha }}
   cancel-in-progress: false
 
 jobs:
   build:
+    environment: android-release
     runs-on: ubuntu-latest
     timeout-minutes: 45
     outputs:
@@ -35,18 +34,14 @@ jobs:
         id: version
         shell: bash
         run: |
-          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
-            version="${GITHUB_REF_NAME#v}"
-            if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
-              echo '::error::Use a version tag such as v2.0.0 or v2.0.0-rc.1'
-              exit 1
-            fi
-            if [[ "$version" == *-SNAPSHOT ]]; then
-              echo '::error::SNAPSHOT versions are reserved for branch builds; use a release or prerelease tag.'
-              exit 1
-            fi
-          else
-            version="0.0.0-${GITHUB_SHA:0:12}-SNAPSHOT"
+          version="${GITHUB_REF_NAME#v}"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo '::error::Use a version tag such as v2.0.0 or v2.0.0-rc.1'
+            exit 1
+          fi
+          if [[ "$version" == *-SNAPSHOT ]]; then
+            echo '::error::SNAPSHOT versions are reserved for branch builds; use a release or prerelease tag.'
+            exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           if [[ "$version" == *-* ]]; then
@@ -56,7 +51,6 @@ jobs:
           fi
 
       - name: Configure APK signing
-        id: signing
         env:
           STORE_BASE64: ${{ secrets.RELEASE_STORE_BASE64 }}
           STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
@@ -64,22 +58,17 @@ jobs:
           KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
         shell: bash
         run: |
-          if [[ -n "$STORE_BASE64" && -n "$STORE_PASSWORD" && -n "$KEY_ALIAS" && -n "$KEY_PASSWORD" ]]; then
-            umask 077
-            printf '%s' "$STORE_BASE64" | base64 --decode > "$RUNNER_TEMP/release.keystore"
-            echo "RELEASE_STORE_FILE=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
-            echo 'variant=release' >> "$GITHUB_OUTPUT"
-            echo 'task=assembleRelease' >> "$GITHUB_OUTPUT"
-          elif [[ "$GITHUB_REF_TYPE" == tag ]]; then
-            echo '::error::Tag releases require all four RELEASE_* signing secrets (see docs/ci.md).'
+          if [[ -z "$STORE_BASE64" || -z "$STORE_PASSWORD" || -z "$KEY_ALIAS" || -z "$KEY_PASSWORD" ]]; then
+            echo '::error::Tag releases require RELEASE_STORE_BASE64, RELEASE_STORE_PASSWORD, RELEASE_KEY_ALIAS, and RELEASE_KEY_PASSWORD in the android-release environment.'
             exit 1
-          elif [[ -n "$STORE_BASE64$STORE_PASSWORD$KEY_ALIAS$KEY_PASSWORD" ]]; then
-            echo '::error::Incomplete signing secrets; configure all four or remove them for debug snapshots.'
-            exit 1
-          else
-            echo 'variant=debug' >> "$GITHUB_OUTPUT"
-            echo 'task=assembleDebug' >> "$GITHUB_OUTPUT"
           fi
+          umask 077
+          printf '%s' "$STORE_BASE64" | base64 --decode > "$RUNNER_TEMP/release.keystore"
+          if [[ ! -s "$RUNNER_TEMP/release.keystore" ]]; then
+            echo '::error::RELEASE_STORE_BASE64 did not produce a keystore file.'
+            exit 1
+          fi
+          echo "RELEASE_STORE_FILE=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
 
       - name: Install Android build tools
         run: sdkmanager 'platforms;android-37' 'build-tools;37.0.0'
@@ -90,19 +79,18 @@ jobs:
           RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
           RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
           VERSION: ${{ steps.version.outputs.version }}
-          APK_TASK: ${{ steps.signing.outputs.task }}
         shell: bash
         run: |
           bash ./gradlew --no-daemon --max-workers=2 \
             '-Dorg.gradle.jvmargs=-Xmx3g -XX:MaxMetaspaceSize=768m' \
             "-PreleaseVersion=$VERSION" -PciPackaging=true \
             :src:jvmTest :sample:shared:jvmTest :sample:desktop-app:classes \
-            ":sample:android-app:$APK_TASK" :src:publishAllPublicationsToCiRepository
+            :sample:android-app:assembleRelease :src:publishAllPublicationsToCiRepository
 
       - name: Collect packages
         env:
           VERSION: ${{ steps.version.outputs.version }}
-          VARIANT: ${{ steps.signing.outputs.variant }}
+          VARIANT: release
         shell: bash
         run: |
           mkdir -p dist
@@ -142,23 +130,17 @@ jobs:
             echo '::error::MAVEN_CENTRAL_USERNAME and MAVEN_CENTRAL_PASSWORD must contain a Central Portal user token.'
             exit 1
           fi
-          args=()
-          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
-            if [[ -z "$ORG_GRADLE_PROJECT_signingInMemoryKey" ]]; then
-              echo '::error::Tag releases require SIGNING_IN_MEMORY_KEY.'
-              exit 1
-            fi
-            # An unset optional key ID must not be passed as an empty Gradle property.
-            if [[ -z "$ORG_GRADLE_PROJECT_signingInMemoryKeyId" ]]; then
-              unset ORG_GRADLE_PROJECT_signingInMemoryKeyId
-            fi
-          else
-            # Central snapshots do not require GPG signing.
-            args+=(-PciPackaging=true)
+          if [[ -z "$ORG_GRADLE_PROJECT_signingInMemoryKey" ]]; then
+            echo '::error::Tag releases require SIGNING_IN_MEMORY_KEY.'
+            exit 1
+          fi
+          # An unset optional key ID must not be passed as an empty Gradle property.
+          if [[ -z "$ORG_GRADLE_PROJECT_signingInMemoryKeyId" ]]; then
+            unset ORG_GRADLE_PROJECT_signingInMemoryKeyId
           fi
           bash ./gradlew --no-daemon --max-workers=2 \
             '-Dorg.gradle.jvmargs=-Xmx3g -XX:MaxMetaspaceSize=768m' \
-            "-PreleaseVersion=$VERSION" "${args[@]}" :src:publishToMavenCentral
+            "-PreleaseVersion=$VERSION" :src:publishToMavenCentral
 
       - name: Remove signing material
         if: always()
@@ -166,7 +148,6 @@ jobs:
         run: rm -f -- "$RUNNER_TEMP/release.keystore"
 
   release:
-    if: github.ref_type == 'tag'
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
