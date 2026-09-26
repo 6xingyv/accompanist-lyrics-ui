@@ -130,8 +130,8 @@ jobs:
         shell: bash
         run: |
           if [[ -z "$ORG_GRADLE_PROJECT_mavenCentralUsername" || -z "$ORG_GRADLE_PROJECT_mavenCentralPassword" || -z "$ORG_GRADLE_PROJECT_signingInMemoryKey" || -z "$ORG_GRADLE_PROJECT_signingInMemoryKeyPassword" ]]; then
-            echo '::notice::Maven Central publishing skipped; configure MAVEN_CENTRAL_USERNAME, MAVEN_CENTRAL_PASSWORD, SIGNING_IN_MEMORY_KEY, and SIGNING_IN_MEMORY_KEY_PASSWORD to enable it.'
-            exit 0
+            echo '::error::Maven Central credentials/signing key are required for releases.'
+            exit 1
           fi
           # An unset optional key ID must not be passed as an empty Gradle property.
           if [[ -z "$ORG_GRADLE_PROJECT_signingInMemoryKeyId" ]]; then
