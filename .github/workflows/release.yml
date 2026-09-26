@@ -126,13 +126,9 @@ jobs:
           ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_IN_MEMORY_KEY_PASSWORD }}
         shell: bash
         run: |
-          if [[ -z "$ORG_GRADLE_PROJECT_mavenCentralUsername" || -z "$ORG_GRADLE_PROJECT_mavenCentralPassword" ]]; then
-            echo '::error::MAVEN_CENTRAL_USERNAME and MAVEN_CENTRAL_PASSWORD must contain a Central Portal user token.'
-            exit 1
-          fi
-          if [[ -z "$ORG_GRADLE_PROJECT_signingInMemoryKey" ]]; then
-            echo '::error::Tag releases require SIGNING_IN_MEMORY_KEY.'
-            exit 1
+          if [[ -z "$ORG_GRADLE_PROJECT_mavenCentralUsername" || -z "$ORG_GRADLE_PROJECT_mavenCentralPassword" || -z "$ORG_GRADLE_PROJECT_signingInMemoryKey" || -z "$ORG_GRADLE_PROJECT_signingInMemoryKeyPassword" ]]; then
+            echo '::notice::Maven Central publishing skipped; configure MAVEN_CENTRAL_USERNAME, MAVEN_CENTRAL_PASSWORD, SIGNING_IN_MEMORY_KEY, and SIGNING_IN_MEMORY_KEY_PASSWORD to enable it.'
+            exit 0
           fi
           # An unset optional key ID must not be passed as an empty Gradle property.
           if [[ -z "$ORG_GRADLE_PROJECT_signingInMemoryKeyId" ]]; then
