@@ -20,29 +20,28 @@ fun SyncedLineText(
     textStyle: TextStyle,
     textColor: Color,
     modifier: Modifier = Modifier,
-    showTranslation: Boolean = true
+    showTranslation: Boolean = true,
 ) {
     Column(
-        modifier
-            .fillMaxWidth()
-            .padding(vertical = 12.dp, horizontal = 16.dp),
-        horizontalAlignment = if (isLineRtl) Alignment.End else Alignment.Start
+        modifier.fillMaxWidth().padding(vertical = 12.dp, horizontal = 16.dp),
+        horizontalAlignment = if (isLineRtl) Alignment.End else Alignment.Start,
     ) {
         Text(
             text = line.content,
             style = textStyle,
             color = textColor,
-            textAlign = if (isLineRtl) TextAlign.End else TextAlign.Start
+            textAlign = if (isLineRtl) TextAlign.End else TextAlign.Start,
         )
         if (showTranslation) {
-            line.translation?.let {
-                Text(
-                    text = it,
-                    color = textColor.copy(alpha = 0.6f),
-                    textAlign = if (isLineRtl) TextAlign.End else TextAlign.Start
-                )
-            }
+            line.translation
+                ?.takeIf { it.isNotBlank() }
+                ?.let {
+                    Text(
+                        text = it,
+                        color = textColor.copy(alpha = 0.6f),
+                        textAlign = if (isLineRtl) TextAlign.End else TextAlign.Start,
+                    )
+                }
         }
     }
 }
-

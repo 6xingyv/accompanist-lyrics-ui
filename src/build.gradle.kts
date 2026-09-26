@@ -1,4 +1,3 @@
-import com.android.build.api.dsl.androidLibrary
 import com.vanniktech.maven.publish.JavadocJar
 import com.vanniktech.maven.publish.KotlinMultiplatform
 
@@ -21,7 +20,7 @@ kotlin {
             }
         }
     }
-    androidLibrary {
+    android {
         namespace = "com.mocharealm.accompanist.lyrics.ui"
         compileSdk = 37
 
@@ -41,8 +40,8 @@ kotlin {
         }
 
         compilations.configureEach {
-            compilerOptions.configure {
-                jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_21
+            compileTaskProvider.configure {
+                compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_21) }
             }
         }
     }
@@ -64,6 +63,8 @@ kotlin {
                 implementation(compose.components.resources)
             }
         }
+        commonTest.dependencies { implementation(kotlin("test")) }
+        jvmTest.dependencies { implementation(compose.desktop.currentOs) }
         androidMain.dependencies {
         }
     }
@@ -71,6 +72,10 @@ kotlin {
 
 publishing {
     repositories {
+        maven {
+            name = "ci"
+            url = rootProject.layout.buildDirectory.dir("ci-maven").get().asFile.toURI()
+        }
         maven {
             name = "local"
             url = uri("file:///E:/maven")
@@ -88,7 +93,10 @@ mavenPublishing {
         )
     )
 
-    signAllPublications()
+    // CI archives are downloadable Maven repositories, not Maven Central uploads.
+    if (!providers.gradleProperty("ciPackaging").map(String::toBoolean).getOrElse(false)) {
+        signAllPublications()
+    }
 
     coordinates("com.mocharealm.accompanist", "lyrics-ui", rootProject.version.toString())
 
@@ -120,7 +128,7 @@ mavenPublishing {
 }
 
 composeCompiler {
-    val configFile = rootProject.layout.projectDirectory.file("compose-compiler-config.conf")
+    val configFile = rootProject.layout.projectDirectory.file("compose_compiler_config.conf")
     if (configFile.asFile.exists()) {
         stabilityConfigurationFiles.add(configFile)
     }

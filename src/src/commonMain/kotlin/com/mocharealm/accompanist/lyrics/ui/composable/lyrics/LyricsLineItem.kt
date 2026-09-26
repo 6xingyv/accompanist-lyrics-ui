@@ -1,5 +1,7 @@
 package com.mocharealm.accompanist.lyrics.ui.composable.lyrics
 
+import com.mocharealm.accompanist.lyrics.ui.internal.effects.lyricsVisualLayer
+
 import androidx.compose.animation.core.EaseInOut
 import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
@@ -16,7 +18,6 @@ import androidx.compose.ui.graphics.BlurEffect
 import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.TileMode
 import androidx.compose.ui.graphics.TransformOrigin
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.unit.dp
 import com.mocharealm.gaze.capsule.ContinuousRoundedRectangle
 
@@ -32,53 +33,54 @@ fun LyricsLineItem(
     inactiveAlpha: Float = 0.4f,
     blendMode: BlendMode = BlendMode.SrcOver,
     isInteractive: Boolean = true,
-    content: @Composable () -> Unit
+    content: @Composable () -> Unit,
 ) {
-    val scaleState by animateFloatAsState(
-        targetValue = if (isFocused) 1f else 0.98f,
-        animationSpec = if (isFocused) {
-            tween(durationMillis = 600, easing = LinearOutSlowInEasing)
-        } else {
-            tween(durationMillis = 300, easing = EaseInOut)
-        },
-        label = "scale"
-    )
+    val scaleState by
+        animateFloatAsState(
+            targetValue = if (isFocused) 1f else 0.98f,
+            animationSpec =
+                if (isFocused) {
+                    tween(durationMillis = 600, easing = LinearOutSlowInEasing)
+                } else {
+                    tween(durationMillis = 300, easing = EaseInOut)
+                },
+            label = "scale",
+        )
 
-    val alphaState by animateFloatAsState(
-        targetValue = if (isFocused) activeAlpha else inactiveAlpha,
-        label = "alpha"
-    )
+    val alphaState by
+        animateFloatAsState(
+            targetValue = if (isFocused) activeAlpha else inactiveAlpha,
+            label = "alpha",
+        )
 
     Box(
-        modifier = modifier
-            .fillMaxWidth()
-            .graphicsLayer {
+        modifier =
+            modifier.fillMaxWidth().lyricsVisualLayer {
                 scaleX = scaleState
                 scaleY = scaleState
                 alpha = alphaState
                 transformOrigin = TransformOrigin(if (isRightAligned) 1f else 0f, 1f)
                 this.blendMode = blendMode
-                compositingStrategy = CompositingStrategy.Offscreen
+                compositingStrategy = CompositingStrategy.Auto
 
                 val radius = blurRadius()
-                if (radius > 0f) {
-                    renderEffect = BlurEffect(
-                        radiusX = radius,
-                        radiusY = radius,
-                        edgeTreatment = TileMode.Clamp
-                    )
-                }
+                renderEffect =
+                    if (radius > 0f) {
+                        BlurEffect(
+                            radiusX = radius,
+                            radiusY = radius,
+                            edgeTreatment = TileMode.Clamp,
+                        )
+                    } else null
             }
-            .then(
-                if (isInteractive) Modifier.clip(ContinuousRoundedRectangle(8.dp))
-                    .combinedClickable(
-                        onClick = onLineClicked,
-                        onLongClick = onLinePressed
-                    )
-                else Modifier
-            )
-
     ) {
+        // Clip the ripple, never the lyrics that can draw beyond their animated layout height.
+        if (isInteractive)
+            Box(
+                Modifier.matchParentSize()
+                    .clip(ContinuousRoundedRectangle(8.dp))
+                    .combinedClickable(onClick = onLineClicked, onLongClick = onLinePressed)
+            )
         content()
     }
 }
