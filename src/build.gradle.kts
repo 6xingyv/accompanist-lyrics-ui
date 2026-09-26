@@ -120,9 +120,9 @@ mavenPublishing {
             }
         }
         scm {
-            url = "https://github.com/6xingyv/Accompanist"
-            connection = "scm:git:git://github.com/6xingyv/Accompanist.git"
-            developerConnection = "scm:git:ssh://git@github.com/6xingyv/Accompanist.git"
+            url = "https://github.com/6xingyv/accompanist-lyrics-ui"
+            connection = "scm:git:git://github.com/6xingyv/accompanist-lyrics-ui.git"
+            developerConnection = "scm:git:ssh://git@github.com/6xingyv/accompanist-lyrics-ui.git"
         }
     }
 }
