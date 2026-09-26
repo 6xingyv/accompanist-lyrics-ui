@@ -107,17 +107,17 @@ jobs:
         shell: bash
         run: rm -f -- "$RUNNER_TEMP/release.keystore"
 
-      - name: Publish snapshot to Maven Central
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
-          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
-        shell: bash
-        run: |
-          if [[ -z "$ORG_GRADLE_PROJECT_mavenCentralUsername" || -z "$ORG_GRADLE_PROJECT_mavenCentralPassword" ]]; then
-            echo '::notice::Snapshot publishing skipped; configure MAVEN_CENTRAL_USERNAME and MAVEN_CENTRAL_PASSWORD to enable it.'
-            exit 0
-          fi
-          bash ./gradlew --no-daemon --max-workers=2 \
-            '-Dorg.gradle.jvmargs=-Xmx3g -XX:MaxMetaspaceSize=768m' \
-            "-PreleaseVersion=$VERSION" -PciPackaging=true :src:publishToMavenCentral
+#      - name: Publish snapshot to Maven Central
+#        env:
+#          VERSION: ${{ steps.version.outputs.version }}
+#          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+#          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+#        shell: bash
+#        run: |
+#          if [[ -z "$ORG_GRADLE_PROJECT_mavenCentralUsername" || -z "$ORG_GRADLE_PROJECT_mavenCentralPassword" ]]; then
+#            echo '::notice::Snapshot publishing skipped; configure MAVEN_CENTRAL_USERNAME and MAVEN_CENTRAL_PASSWORD to enable it.'
+#            exit 0
+#          fi
+#          bash ./gradlew --no-daemon --max-workers=2 \
+#            '-Dorg.gradle.jvmargs=-Xmx3g -XX:MaxMetaspaceSize=768m' \
+#            "-PreleaseVersion=$VERSION" -PciPackaging=true :src:publishToMavenCentral
