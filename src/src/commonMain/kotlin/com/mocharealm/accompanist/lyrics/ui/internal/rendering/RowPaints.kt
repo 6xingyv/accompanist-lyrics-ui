@@ -4,6 +4,8 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.*
 import androidx.compose.ui.graphics.drawscope.*
 
+internal const val FocusedRowUnlitAlpha = 0.2f
+
 /** Color-dependent paints are cached; playback selects a shadow without allocating one. */
 internal class RowPaints(color: Color) {
     val shadows =

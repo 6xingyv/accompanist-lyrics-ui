@@ -45,6 +45,8 @@ internal fun PreparedLineText(
     val activeColor = resources.color
     val raster = resources.raster(prepared)
     val paints = remember(activeColor) { RowPaints(activeColor) }
+    val accompanimentAlpha =
+        if (prepared.source is KaraokeLine.AccompanimentKaraokeLine) 0.6f else 1f
     val alignment = if (prepared.rightAligned) Alignment.End else Alignment.Start
     val phoneticProgress =
         animateFloatAsState(
@@ -65,6 +67,7 @@ internal fun PreparedLineText(
     ) {
         Column(
             modifier
+                .graphicsLayer { alpha = accompanimentAlpha }
                 .fillMaxWidth()
                 .padding(
                     vertical = verticalPadding,
@@ -159,7 +162,10 @@ internal fun PreparedLineText(
                             with(density) { layout.size.height.toDp() },
                         )
                     ) {
-                        drawText(layout, paints.phoneticColor)
+                        drawText(
+                            layout,
+                            activeColor.copy(alpha = activeColor.alpha * FocusedRowUnlitAlpha),
+                        )
                     }
                 }
             }

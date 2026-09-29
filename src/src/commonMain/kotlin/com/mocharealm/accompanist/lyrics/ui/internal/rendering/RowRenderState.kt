@@ -10,8 +10,8 @@ internal class RowRenderState(private val row: PreparedRow) {
     internal val layerPaint = Paint()
     internal val mask: Brush =
         Brush.horizontalGradient(
-            if (row.rtl) listOf(Color.White.copy(alpha = 0.2f), Color.White)
-            else listOf(Color.White, Color.White.copy(alpha = 0.2f)),
+            if (row.rtl) listOf(Color.White.copy(alpha = FocusedRowUnlitAlpha), Color.White)
+            else listOf(Color.White, Color.White.copy(alpha = FocusedRowUnlitAlpha)),
             startX = -row.sweepFadeWidth / 2f,
             endX = row.sweepFadeWidth / 2f,
         )
