@@ -8,6 +8,7 @@ import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.*
 import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.style.LineBreak
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextMotion
 import androidx.compose.ui.unit.Constraints
@@ -20,6 +21,12 @@ import com.mocharealm.accompanist.lyrics.ui.profile.LyricsProfile
 import com.mocharealm.accompanist.lyrics.ui.preparation.MeasuredLyricsLine
 import com.mocharealm.accompanist.lyrics.ui.internal.text.resolveProfiles
 import com.mocharealm.accompanist.lyrics.ui.internal.text.isRtl
+
+private data class PreparedAtom(
+    val profile: LyricsProfile,
+    val group: PreparedGroup,
+    val sourceText: String,
+)
 
 /**
  * Prepare the entire scene before publishing it. The cache also shares nested/top-level
@@ -158,10 +165,15 @@ private fun prepareLine(
     val accompaniment = line is KaraokeLine.AccompanimentKaraokeLine
     val style =
         (if (accompaniment) accompanimentStyle else normalStyle).copy(
-            textMotion = TextMotion.Animated
+            textMotion = TextMotion.Animated,
+            lineBreak = LineBreak.Paragraph,
         )
     val animatedPhoneticStyle = phoneticStyle.copy(textMotion = TextMotion.Animated)
-    val animatedTranslationStyle = translationStyle.copy(textMotion = TextMotion.Animated)
+    val animatedTranslationStyle =
+        translationStyle.copy(
+            textMotion = TextMotion.Animated,
+            lineBreak = LineBreak.Paragraph,
+        )
     val sweepFadeWidth =
         sweepWidths.getOrPut(style) {
             val fontSize = style.fontSize
@@ -232,6 +244,12 @@ private fun prepareLine(
                 },
             )
         }
+    val atoms =
+        runs.flatMap { run ->
+            run.groups.map { group ->
+                PreparedAtom(run.profile, group, group.preparedSourceText())
+            }
+        }
     val rows = mutableListOf<PreparedRow>()
     var rowRuns = mutableListOf<PreparedProfileRun>()
     var rowGroups = mutableListOf<PreparedGroup>()
@@ -244,7 +262,10 @@ private fun prepareLine(
     }
     fun flushRow() {
         flushRun()
-        if (rowRuns.isEmpty()) return
+        if (rowRuns.isEmpty()) {
+            rowProfile = null
+            return
+        }
         var baseline = 0f
         var descent = 0f
         var phoneticHeight = 0f
@@ -383,21 +404,45 @@ private fun prepareLine(
         top += phoneticHeight + baseline + descent
         rowRuns = mutableListOf()
         rowWidth = 0f
+        rowProfile = null
     }
-    for (run in runs) {
-        flushRun()
-        rowProfile = run.profile
-        for (group in run.groups) {
-            if (
-                rowWidth > 0f &&
-                    (group.units.first().text.breakBefore || rowWidth + group.width > layoutWidth)
-            )
-                flushRow()
+    fun appendRows(start: Int, end: Int) {
+        var current = start
+        while (current < end) {
+            val profile = atoms[current].profile
+            if (rowProfile !== profile) {
+                flushRun()
+                rowProfile = profile
+            }
+            val group = atoms[current].group
             rowGroups.add(group)
             rowWidth += group.width
+            current++
+        }
+        flushRow()
+    }
+    var segmentStart = 0
+    for (index in atoms.indices) {
+        if (index > segmentStart && atoms[index].group.units.first().text.breakBefore) {
+            appendBalancedRows(
+                atoms,
+                segmentStart,
+                index,
+                layoutWidth,
+                style.localeList?.firstOrNull()?.toLanguageTag(),
+                ::appendRows,
+            )
+            segmentStart = index
         }
     }
-    flushRow()
+    appendBalancedRows(
+        atoms,
+        segmentStart,
+        atoms.size,
+        layoutWidth,
+        style.localeList?.firstOrNull()?.toLanguageTag(),
+        ::appendRows,
+    )
     val nested =
         (line as? KaraokeLine.MainKaraokeLine)?.accompanimentLines.orEmpty().map {
             prepareLine(
@@ -434,8 +479,15 @@ private fun prepareLine(
             line.translation
                 ?.takeIf { it.isNotBlank() }
                 ?.let {
+                    val wrapped =
+                        wrapTextWithBalancedLineBreaks(
+                            it,
+                            animatedTranslationStyle,
+                            layoutWidth,
+                            measurer,
+                        )
                     measurer.measure(
-                        it,
+                        wrapped,
                         animatedTranslationStyle.copy(
                             textAlign = if (rightAligned) TextAlign.Right else TextAlign.Left
                         ),
@@ -459,3 +511,89 @@ private fun prepareLine(
         )
         .also { cache[line] = it }
 }
+
+private fun appendBalancedRows(
+    atoms: List<PreparedAtom>,
+    start: Int,
+    end: Int,
+    maxWidth: Float,
+    localeTag: String?,
+    appendRows: (Int, Int) -> Unit,
+) {
+    if (start >= end) return
+    val text = buildString { for (index in start until end) append(atoms[index].sourceText) }
+    val legalOffsets = lineBreakBoundaries(text, localeTag).toSet()
+    val atomOffsets = IntArray(end - start + 1)
+    for (index in start until end) {
+        atomOffsets[index - start + 1] =
+            atomOffsets[index - start] + atoms[index].sourceText.length
+    }
+    val candidates = mutableListOf<LineBreakCandidate>()
+    for (offset in 1 until end - start) {
+        val textOffset = atomOffsets[offset]
+        val nextText = atoms[start + offset].sourceText
+        var whitespaceEnd = textOffset
+        while (whitespaceEnd < text.length && text[whitespaceEnd].isWhitespace()) whitespaceEnd++
+        val legal =
+            textOffset in legalOffsets ||
+                (nextText.firstOrNull()?.isWhitespace() == true &&
+                    legalOffsets.any { it in textOffset..whitespaceEnd })
+        candidates.add(
+            LineBreakCandidate(
+                offset,
+                if (legal) 0.0 else EmergencyBreakPenalty,
+            )
+        )
+    }
+    val widths = FloatArray(end - start + 1)
+    for (index in start until end) {
+        widths[index - start + 1] = widths[index - start] + atoms[index].group.width
+    }
+    val selected =
+        balancedLineBreaks(end - start, candidates, maxWidth) { from, to ->
+            widths[to] - widths[from]
+        }
+    if (selected != null) {
+        var rowStart = start
+        for (rowEnd in selected) {
+            appendRows(rowStart, start + rowEnd)
+            rowStart = start + rowEnd
+        }
+        return
+    }
+
+    // A single indivisible drawable can exceed the viewport. Preserve it as an overflow row,
+    // while keeping ordinary rows within the available width.
+    var rowStart = start
+    var rowWidth = 0f
+    for (index in start until end) {
+        val group = atoms[index].group
+        if (index > rowStart && rowWidth + group.width > maxWidth) {
+            appendRows(rowStart, index)
+            rowStart = index
+            rowWidth = 0f
+        }
+        rowWidth += group.width
+    }
+    appendRows(rowStart, end)
+}
+
+private fun PreparedGroup.preparedSourceText(): String =
+    units.joinToString("") { unit ->
+        val text = unit.text.layout.layoutInput.text.text
+        val range = unit.text.sourceRange
+        if (range != null && range.min >= 0 && range.max <= text.length) {
+            text.substring(range.min, range.max)
+        } else {
+            var first = -1
+            var last = -1
+            for (index in text.indices) {
+                val bounds = unit.text.layout.getBoundingBox(index)
+                if (bounds.right > unit.text.left && bounds.left < unit.text.right) {
+                    if (first < 0) first = index
+                    last = index
+                }
+            }
+            if (first >= 0) text.substring(first, last + 1) else text
+        }
+    }

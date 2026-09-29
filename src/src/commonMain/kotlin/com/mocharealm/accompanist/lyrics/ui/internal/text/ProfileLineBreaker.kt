@@ -6,10 +6,7 @@ import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.unit.Constraints
 import com.mocharealm.accompanist.lyrics.ui.internal.text.*
 
-/**
- * The paragraph engine only selects safe breaks. Every resulting fragment is shaped as a standalone
- * drawable, exactly like an ordinary unit; paragraph offsets never enter row layout.
- */
+/** Unicode line opportunities choose breaks; each resulting fragment is then shaped standalone. */
 internal fun breakShapedUnit(
     unit: ProfileTextUnit,
     measurer: TextMeasurer,
@@ -45,13 +42,31 @@ internal fun breakShapedUnit(
     )
         sourceEnd++
     val text = input.text.subSequence(sourceOffset, sourceEnd)
-    val breaks =
-        measurer.measure(
-            text,
-            input.style,
-            softWrap = true,
-            constraints = Constraints(maxWidth = maxWidth.toInt().coerceAtLeast(1)),
-        )
+    val localeTag = input.style.localeList?.firstOrNull()?.toLanguageTag()
+    val selectedBreaks =
+        if ('\n' in text.text || '\r' in text.text) null
+        else balancedTextLineBreaks(text.text, input.style, maxWidth, localeTag, measurer)
+    val fallbackBreaks =
+        selectedBreaks?.let { ends ->
+            buildList {
+                var begin = 0
+                for (end in ends) {
+                    if (end > begin) add(begin to end)
+                    begin = end
+                }
+            }
+        } ?: run {
+            val layout =
+                measurer.measure(
+                    text,
+                    input.style,
+                    softWrap = true,
+                    constraints = Constraints(maxWidth = maxWidth.toInt().coerceAtLeast(1)),
+                )
+            (0 until layout.lineCount).map { line ->
+                layout.getLineStart(line) to layout.getLineEnd(line)
+            }
+        }
     val result = mutableListOf<ProfileTextUnit>()
     val indexedTiming =
         unit.timing.isNotEmpty() &&
@@ -78,26 +93,18 @@ internal fun breakShapedUnit(
         while (drawableEnd > begin && text.text[drawableEnd - 1] in "\r\n") drawableEnd--
         val fragment = text.subSequence(begin, drawableEnd)
         val layout = measurer.measure(fragment, input.style, softWrap = false)
-        // Joining forms can change width when a paragraph break becomes a standalone run.
-        // Ask the same platform breaker for a smaller safe boundary; never split UTF-16 manually.
+        // A joining form may grow after it becomes a standalone run. Re-run the same Unicode
+        // breaker against that shaped fragment before allowing an indivisible overflow.
         if (layout.size.width > maxWidth && end - begin > 1) {
-            var limit = (maxWidth - (layout.size.width - maxWidth) - 1f).toInt().coerceAtLeast(1)
-            while (true) {
-                val retry =
-                    measurer.measure(
-                        fragment,
-                        input.style,
-                        softWrap = true,
-                        constraints = Constraints(maxWidth = limit),
-                    )
-                val split = retry.getLineEnd(0)
-                if (split in 1 until fragment.length) {
-                    append(begin, begin + split)
-                    append(begin + split, end)
-                    return
+            val retryEnds =
+                balancedTextLineBreaks(fragment.text, input.style, maxWidth, localeTag, measurer)
+            if (retryEnds != null && retryEnds.size > 1) {
+                var retryStart = 0
+                for (retryEnd in retryEnds) {
+                    append(begin + retryStart, begin + retryEnd)
+                    retryStart = retryEnd
                 }
-                if (limit == 1) break // A single indivisible cluster cannot be wrapped further.
-                limit = (limit / 2).coerceAtLeast(1)
+                return
             }
         }
         val left = 0f
@@ -149,9 +156,6 @@ internal fun breakShapedUnit(
             )
         )
     }
-    for (line in 0 until breaks.lineCount) append(
-        breaks.getLineStart(line),
-        breaks.getLineEnd(line),
-    )
+    for ((begin, end) in fallbackBreaks) append(begin, end)
     return result
 }

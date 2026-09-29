@@ -8,6 +8,7 @@ media3Exoplayer = "1.11.0"
 media3Session = "1.11.0"
 compose = "1.12.0"
 kotlinx-serialization = "2.4.10"
+icu4j = "78.3"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -24,6 +25,7 @@ koin-compose = { group = "io.insert-koin", name = "koin-compose" }
 koin-compose-viewmodel = { group = "io.insert-koin", name = "koin-compose-viewmodel" }
 cloudy = { module = "com.github.skydoves:cloudy", version = "0.7.1" }
 tinyPinyin = { module = "com.github.promeg:tinypinyin", version = "2.0.3" }
+icu4j = { group = "com.ibm.icu", name = "icu4j", version.ref = "icu4j" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

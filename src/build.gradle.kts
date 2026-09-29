@@ -64,6 +64,7 @@ kotlin {
             }
         }
         commonTest.dependencies { implementation(kotlin("test")) }
+        jvmMain.dependencies { implementation(libs.icu4j) }
         jvmTest.dependencies { implementation(compose.desktop.currentOs) }
         androidMain.dependencies {
         }

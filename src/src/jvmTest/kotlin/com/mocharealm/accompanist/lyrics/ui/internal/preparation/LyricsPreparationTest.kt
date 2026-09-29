@@ -10,6 +10,7 @@ import androidx.compose.ui.graphics.drawscope.CanvasDrawScope
 import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.style.LineBreak
 import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.createFontFamilyResolver
 import androidx.compose.ui.unit.Density
@@ -123,7 +124,7 @@ class LyricsPreparationTest {
         val line =
             prepareLyricsLine(
                 source("Hello").copy(
-                    translation = "translated",
+                    translation = "这是一段中文翻译，测试换行。",
                     syllables = listOf(KaraokeSyllable("Hello", 1000, 3000, phonetic = "phonetic")),
                 ),
                 DefaultLyricsProfiles,
@@ -137,11 +138,69 @@ class LyricsPreparationTest {
                 translationStyle = translationStyle,
             )
 
-        assertEquals(23.sp, line.translation!!.layoutInput.style.fontSize)
+        val translation = requireNotNull(line.translation)
+        assertEquals(23.sp, translation.layoutInput.style.fontSize)
+        assertEquals(LineBreak.Paragraph, translation.layoutInput.style.lineBreak)
         val phonetic =
             line.rows.single().runs.flatMap { it.groups }.flatMap { it.units }
                 .firstNotNullOf { it.phonetic }
         assertEquals(9.sp, phonetic.layoutInput.style.fontSize)
+    }
+
+    @Test
+    fun mainAndAccompanimentLyricsUseHighQualityLineBreaking() {
+        val accompaniment =
+            KaraokeLine.AccompanimentKaraokeLine(
+                listOf(KaraokeSyllable("echo", 0, 1000)),
+                null,
+                KaraokeAlignment.Start,
+                0,
+                1000,
+            )
+
+        for (line in listOf(prepare(source("主唱")), prepare(accompaniment))) {
+            val layouts =
+                line.rows
+                    .flatMap { it.runs }
+                    .flatMap { it.groups }
+                    .flatMap { it.units }
+                    .map { it.text.layout }
+
+            assertTrue(layouts.isNotEmpty())
+            assertTrue(layouts.all { it.layoutInput.style.lineBreak == LineBreak.Paragraph })
+        }
+    }
+
+    @Test
+    fun cjkLyricsAndTranslationsUseBalancedUnicodeLineBreaks() {
+        val lyrics = "春天来了我们一起去海边看日落然后迎着晚风回家"
+        val translation = "這是一段較長的中文翻譯需要在合適的位置斷行並且保持每行長度接近"
+        val prepared =
+            prepare(source(lyrics).copy(translation = translation), width = 160f)
+
+        val lyricRows =
+            prepared.rows.map { row ->
+                row.runs
+                    .flatMap { it.groups }
+                    .joinToString("") { group ->
+                        group.units.joinToString("") { unit ->
+                            val text = unit.text.layout.layoutInput.text.text
+                            val range = unit.text.sourceRange
+                            if (range == null) text else text.substring(range.min, range.max)
+                        }
+                    }
+            }
+        assertEquals(lyrics, lyricRows.joinToString(""))
+        assertTrue(lyricRows.size > 1)
+        assertTrue(lyricRows.maxOf { it.length } - lyricRows.minOf { it.length } <= 1)
+
+        val wrappedTranslation = assertNotNull(prepared.translation).layoutInput.text.text
+        assertEquals(translation, wrappedTranslation.replace("\n", ""))
+        val translationRows = wrappedTranslation.split('\n')
+        assertTrue(translationRows.size > 1)
+        assertTrue(
+            translationRows.maxOf { it.length } - translationRows.minOf { it.length } <= 1
+        )
     }
 
     @Test
