@@ -68,6 +68,9 @@ kotlin {
         jvmTest.dependencies { implementation(compose.desktop.currentOs) }
         androidMain.dependencies {
         }
+        val androidDeviceTest by getting {
+            dependencies { implementation("androidx.test:runner:1.5.0") }
+        }
     }
 }
 

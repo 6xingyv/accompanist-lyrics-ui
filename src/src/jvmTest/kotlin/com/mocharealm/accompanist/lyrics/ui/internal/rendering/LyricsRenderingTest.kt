@@ -9,6 +9,7 @@ import androidx.compose.ui.graphics.*
 import androidx.compose.ui.graphics.drawscope.CanvasDrawScope
 import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.text.TextMeasurer
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.createFontFamilyResolver
@@ -79,6 +80,41 @@ class LyricsRenderingTest {
             assertEquals(1, group.units.size)
             assertSame(group.combined, group.units.single().text)
         }
+    }
+
+    @Test
+    fun wholeSourceRangeIsNotClippedWhenMeasuredBoundsUnderestimateTheLayout() {
+        val text = "नैन"
+        val layout = measurer.measure(text, style, softWrap = false)
+        val unit =
+            ProfileTextUnit(
+                layout = layout,
+                left = 0f,
+                right = 1f,
+                start = 0,
+                end = 1,
+                sourceRange = TextRange(0, text.length),
+            )
+
+        fun render(drawText: androidx.compose.ui.graphics.drawscope.DrawScope.() -> Unit): ImageBitmap {
+            val bitmap = ImageBitmap(240, 80)
+            CanvasDrawScope().draw(Density(1f), LayoutDirection.Ltr, Canvas(bitmap), Size(240f, 80f)) {
+                drawRect(Color.White)
+                drawText()
+            }
+            return bitmap
+        }
+
+        val expected = render { drawText(layout, Color.Black) }
+        val actual = render { with(DefaultLyricsProfile()) { draw(unit, Color.Black, Shadow.None) } }
+        val expectedPixels = expected.toPixelMap()
+        val actualPixels = actual.toPixelMap()
+        var inkPixels = 0
+        for (y in 0 until expected.height) for (x in 0 until expected.width) {
+            assertEquals(expectedPixels[x, y], actualPixels[x, y], "pixel ($x, $y)")
+            if (expectedPixels[x, y] != Color.White) inkPixels++
+        }
+        assertTrue(inkPixels > 0, "The Indic sample must render visible glyphs")
     }
 
     @Test

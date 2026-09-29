@@ -198,18 +198,35 @@ open class DefaultLyricsProfile : LyricsProfile {
         if (units.size == 1) return units.single()
         if (units.any { it.layout.lineCount > 1 }) return null
         if (units.isEmpty() || units.any { it.layout !== units.first().layout }) return null
+        val ranges = units.map { it.sourceRange }
+        val combinedRange =
+            if (
+                ranges.all { it != null } &&
+                    ranges.zipWithNext().all { (a, b) -> a!!.max == b!!.min }
+            ) {
+                TextRange(ranges.first()!!.min, ranges.last()!!.max)
+            } else {
+                null
+            }
         return ProfileTextUnit(
             units.first().layout,
             units.minOf { it.left },
             units.maxOf { it.right },
             units.minOf { it.start },
             units.maxOf { it.end },
+            sourceRange = combinedRange,
         )
     }
 
     override fun DrawScope.draw(unit: ProfileTextUnit, color: Color, shadow: Shadow) {
         // Preserve contextual shaping. Clipping is only needed for independently movable slices.
-        if (unit.left == 0f && unit.right == unit.layout.size.width.toFloat()) {
+        val sourceRange = unit.sourceRange
+        val coversWholeLayout =
+            sourceRange?.min == 0 && sourceRange.max == unit.layout.layoutInput.text.length
+        if (
+            coversWholeLayout ||
+                (unit.left == 0f && unit.right == unit.layout.size.width.toFloat())
+        ) {
             drawText(unit.layout, color, shadow = shadow)
         } else {
             clipRect(
