@@ -84,7 +84,7 @@ fun KaraokeLyricsView(
     useBlurEffect: Boolean = true,
     showTranslation: Boolean = true,
     showPhonetic: Boolean = true,
-    anchor: LyricsAnchor = LyricsAnchor.Fixed(40.dp),
+    anchor: LyricsAnchor = LyricsAnchor.Fixed(64.dp),
     topFade: LyricsFade = LyricsFade.ToAnchor(16.dp),
     bottomFade: LyricsFade = LyricsFade.Fraction(0.5f),
     keepAliveZone: Dp = 100.dp,

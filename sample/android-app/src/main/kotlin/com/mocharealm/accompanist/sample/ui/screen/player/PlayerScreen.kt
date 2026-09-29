@@ -694,7 +694,7 @@ fun PlayerLyrics(
     onSeekTo: (Int) -> Unit,
     onShare: (KaraokeLine) -> Unit,
     modifier: Modifier = Modifier,
-    anchor: LyricsAnchor = LyricsAnchor.Fixed(40.dp),
+    anchor: LyricsAnchor = LyricsAnchor.Fixed(64.dp),
     bottomFade: LyricsFade = LyricsFade.Fraction(0.5f),
 ) {
     if (lyrics == null) {
