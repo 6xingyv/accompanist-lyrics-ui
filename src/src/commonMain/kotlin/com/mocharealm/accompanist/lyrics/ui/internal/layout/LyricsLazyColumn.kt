@@ -77,9 +77,14 @@ fun LyricsLazyColumn(
             state.onScrollPrefetch = null
         }
     }
-    val provider =
+    val indices =
         remember(items, state) {
-            val indices = items.withIndex().associate { it.value.key to it.index }
+            items.withIndex().associate { it.value.key to it.index }.also {
+                require(it.size == items.size) { "Lyrics list keys must be unique" }
+            }
+        }
+    val provider =
+        remember(items, state, indices) {
             object : LazyLayoutItemProvider {
                 override val itemCount
                     get() = items.size
@@ -184,7 +189,7 @@ fun LyricsLazyColumn(
                             if (scrollChain != null && state.chain.active) height else 0
                     val childWidth = (width - left - right).coerceAtLeast(0)
                     Snapshot.withoutReadObservation {
-                        state.configure(items, childWidth, spacing, top, bottom, height)
+                        state.configure(items, indices, childWidth, spacing, top, bottom, height)
                         state.chain.configure(items.size, scrollChain, state.position, height)
                     }
                     val position = Snapshot.withoutReadObservation { state.position }

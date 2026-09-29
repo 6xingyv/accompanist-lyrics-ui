@@ -16,10 +16,17 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.BlurEffect
 import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.graphics.RenderEffect
 import androidx.compose.ui.graphics.TileMode
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.unit.dp
 import com.mocharealm.gaze.capsule.ContinuousRoundedRectangle
+import kotlin.math.roundToInt
+
+private val FocusBlurEffects =
+    Array<RenderEffect?>(65) { index ->
+        if (index == 0) null else BlurEffect(index.toFloat(), index.toFloat(), TileMode.Clamp)
+    }
 
 @Composable
 fun LyricsLineItem(
@@ -63,15 +70,11 @@ fun LyricsLineItem(
                 this.blendMode = blendMode
                 compositingStrategy = CompositingStrategy.Auto
 
-                val radius = blurRadius()
-                renderEffect =
-                    if (radius > 0f) {
-                        BlurEffect(
-                            radiusX = radius,
-                            radiusY = radius,
-                            edgeTreatment = TileMode.Clamp,
-                        )
-                    } else null
+                val radius =
+                    blurRadius()
+                        .takeIf { it.isFinite() }
+                        ?: 0f
+                renderEffect = FocusBlurEffects[radius.roundToInt().coerceIn(0, 64)]
             }
     ) {
         // Clip the ripple, never the lyrics that can draw beyond their animated layout height.

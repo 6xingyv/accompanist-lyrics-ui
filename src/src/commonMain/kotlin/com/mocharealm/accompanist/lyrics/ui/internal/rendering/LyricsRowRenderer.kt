@@ -69,11 +69,9 @@ internal fun DrawScope.drawPreparedRow(
                                     val cached = cachedGroup?.units?.get(unitIndex)?.phonetic
                                     drawPhonetic(
                                         cached,
-                                        glows
-                                            ?.phonetics
-                                            ?.get(runIndex)
-                                            ?.get(groupIndex)
-                                            ?.get(unitIndex),
+                                        if (phoneticProgress < 1f)
+                                            glows?.phonetic(runIndex, groupIndex, unitIndex)
+                                        else null,
                                         it,
                                         phoneticColor,
                                         alpha,
@@ -116,7 +114,9 @@ internal fun DrawScope.drawPreparedRow(
                             if (cached != null)
                                 drawUnit(
                                     cached,
-                                    glows?.runs?.get(runIndex)?.get(groupIndex)?.get(unitIndex),
+                                    if (shadowIndex > 0)
+                                        glows?.glow(runIndex, groupIndex, unitIndex)
+                                    else null,
                                     shadowIndex,
                                     alpha,
                                     paints,
@@ -134,11 +134,9 @@ internal fun DrawScope.drawPreparedRow(
                                 translate(unit.phoneticPosition.x, unit.phoneticPosition.y) {
                                     drawPhonetic(
                                         cached?.phonetic,
-                                        glows
-                                            ?.phonetics
-                                            ?.get(runIndex)
-                                            ?.get(groupIndex)
-                                            ?.get(unitIndex),
+                                        if (phoneticProgress < 1f)
+                                            glows?.phonetic(runIndex, groupIndex, unitIndex)
+                                        else null,
                                         it,
                                         phoneticColor,
                                         alpha,

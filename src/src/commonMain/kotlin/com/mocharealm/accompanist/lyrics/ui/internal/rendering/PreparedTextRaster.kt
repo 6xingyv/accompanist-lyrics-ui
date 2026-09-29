@@ -80,64 +80,49 @@ internal class UnitLayers(val text: TextLayer, val glow: Boolean, val phonetic: 
 
 /**
  * Only records references to already-rasterized pixels; never calls profiles or rasterizes text.
+ * Layers are allocated on first animated use, rather than for every unit as a row enters the cache.
  */
-internal class RowGlowLayers(scope: CacheDrawScope, raster: PreparedRowLayers) {
-    val runs =
-        if (!raster.hasGlow) null
-        else
-            Array(raster.runs.size) { r ->
-                val run = raster.runs[r]
-                if (run.none { it.hasGlow }) null
-                else
-                    Array(run.size) { g ->
-                        val group = run[g]
-                        if (!group.hasGlow) null
-                        else
-                            Array(group.units.size) { u ->
-                                val unit = group.units[u]
-                                if (!unit.glow) null
-                                else
-                                    scope.obtainGraphicsLayer().apply {
-                                        compositingStrategy = CompositingStrategy.Offscreen
-                                        record(scope, scope.layoutDirection, unit.text.dimensions) {
-                                            translate(
-                                                unit.text.padding.toFloat(),
-                                                unit.text.padding.toFloat(),
-                                            ) {
-                                                with(unit.text) { draw() }
-                                            }
-                                        }
-                                    }
-                            }
-                    }
+internal class RowGlowLayers(
+    private val scope: CacheDrawScope,
+    private val raster: PreparedRowLayers,
+) {
+    private val glowLayers =
+        Array(raster.runs.size) { r ->
+            Array(raster.runs[r].size) { g ->
+                arrayOfNulls<GraphicsLayer>(raster.runs[r][g].units.size)
             }
-    val phonetics =
-        if (!raster.hasPhonetics) null
-        else
-            Array(raster.runs.size) { r ->
-                val run = raster.runs[r]
-                if (run.none { it.hasPhonetics }) null
-                else
-                    Array(run.size) { g ->
-                        val group = run[g]
-                        if (!group.hasPhonetics) null
-                        else
-                            Array(group.units.size) { u ->
-                                group.units[u].phonetic?.let { tile ->
-                                    scope.obtainGraphicsLayer().apply {
-                                        record(scope, scope.layoutDirection, tile.dimensions) {
-                                            translate(
-                                                tile.padding.toFloat(),
-                                                tile.padding.toFloat(),
-                                            ) {
-                                                with(tile) { draw() }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                    }
+        }
+    private val phoneticLayers =
+        Array(raster.runs.size) { r ->
+            Array(raster.runs[r].size) { g ->
+                arrayOfNulls<GraphicsLayer>(raster.runs[r][g].units.size)
             }
+        }
+
+    fun glow(runIndex: Int, groupIndex: Int, unitIndex: Int): GraphicsLayer? {
+        val unit = raster.runs[runIndex][groupIndex].units[unitIndex]
+        if (!unit.glow) return null
+        return glowLayers[runIndex][groupIndex][unitIndex]
+            ?: createLayer(unit.text, offscreen = true).also {
+                glowLayers[runIndex][groupIndex][unitIndex] = it
+            }
+    }
+
+    fun phonetic(runIndex: Int, groupIndex: Int, unitIndex: Int): GraphicsLayer? {
+        val tile = raster.runs[runIndex][groupIndex].units[unitIndex].phonetic ?: return null
+        return phoneticLayers[runIndex][groupIndex][unitIndex]
+            ?: createLayer(tile, offscreen = false).also {
+                phoneticLayers[runIndex][groupIndex][unitIndex] = it
+            }
+    }
+
+    private fun createLayer(tile: TextLayer, offscreen: Boolean): GraphicsLayer =
+        scope.obtainGraphicsLayer().apply {
+            if (offscreen) compositingStrategy = CompositingStrategy.Offscreen
+            record(scope, scope.layoutDirection, tile.dimensions) {
+                translate(tile.padding.toFloat(), tile.padding.toFloat()) { with(tile) { draw() } }
+            }
+        }
 }
 
 internal fun DrawScope.drawUnit(

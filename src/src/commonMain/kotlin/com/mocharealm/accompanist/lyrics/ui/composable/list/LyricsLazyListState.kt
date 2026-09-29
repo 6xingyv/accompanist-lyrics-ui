@@ -124,7 +124,7 @@ class LyricsLazyListState(
     internal var ready by mutableStateOf(false)
     internal var remeasurement: Remeasurement? = null
     internal var tryPlacementScroll: (() -> Boolean)? = null
-    internal var onScrollPrefetch: ((Float) -> Unit)? = null
+    internal var onScrollPrefetch: ((Float, Boolean) -> Unit)? = null
     internal var measurePasses = 0
         private set
 
@@ -174,7 +174,7 @@ class LyricsLazyListState(
         if (position != previous) {
             chain.moveTo(position, followingChain && !suppressChain)
             if (tryPlacementScroll?.invoke() != true) remeasurement?.forceRemeasure()
-            onScrollPrefetch?.invoke((position - previous).toFloat())
+            onScrollPrefetch?.invoke((position - previous).toFloat(), followingChain)
         }
         (position - previous).toFloat()
     }
@@ -196,6 +196,7 @@ class LyricsLazyListState(
 
     internal fun configure(
         newItems: List<LyricsListItem>,
+        newKeys: Map<Any, Int>,
         width: Int,
         spacing: Int,
         top: Int,
@@ -205,8 +206,7 @@ class LyricsLazyListState(
         if (items !== newItems || configuredWidth != width || configuredSpacing != spacing) {
             val anchorKey = items.getOrNull(firstVisibleItemIndex)?.key
             val anchorOffset = firstVisibleItemScrollOffset
-            keys = newItems.withIndex().associate { it.value.key to it.index }
-            require(keys.size == newItems.size) { "Lyrics list keys must be unique" }
+            keys = newKeys
             items = newItems
             heights =
                 LyricsHeightIndex(IntArray(items.size) { items[it].estimatedHeightPx }, spacing)
