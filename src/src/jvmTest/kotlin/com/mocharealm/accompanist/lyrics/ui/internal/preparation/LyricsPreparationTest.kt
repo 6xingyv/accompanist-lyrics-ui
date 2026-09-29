@@ -110,9 +110,38 @@ class LyricsPreparationTest {
                     500f,
                     1f,
                     false,
+                    translationStyle = androidx.compose.ui.text.TextStyle(),
                 )
             assertEquals(size * 2f, line.rows.single().sweepFadeWidth, 0.001f)
         }
+    }
+
+    @Test
+    fun translationAndPhoneticUseIndependentTextStyles() {
+        val phoneticStyle = TextStyle(fontSize = 9.sp)
+        val translationStyle = TextStyle(fontSize = 23.sp)
+        val line =
+            prepareLyricsLine(
+                source("Hello").copy(
+                    translation = "translated",
+                    syllables = listOf(KaraokeSyllable("Hello", 1000, 3000, phonetic = "phonetic")),
+                ),
+                DefaultLyricsProfiles,
+                measurer,
+                style,
+                style,
+                phoneticStyle,
+                500f,
+                1f,
+                true,
+                translationStyle = translationStyle,
+            )
+
+        assertEquals(23.sp, line.translation!!.layoutInput.style.fontSize)
+        val phonetic =
+            line.rows.single().runs.flatMap { it.groups }.flatMap { it.units }
+                .firstNotNullOf { it.phonetic }
+        assertEquals(9.sp, phonetic.layoutInput.style.fontSize)
     }
 
     @Test
@@ -375,6 +404,7 @@ class LyricsPreparationTest {
                 500f,
                 1f,
                 false,
+                translationStyle = androidx.compose.ui.text.TextStyle(),
             )
         for (line in prepared.lines.filterNotNull()) for (row in line.rows) {
             val groups = row.runs.flatMap { it.groups }

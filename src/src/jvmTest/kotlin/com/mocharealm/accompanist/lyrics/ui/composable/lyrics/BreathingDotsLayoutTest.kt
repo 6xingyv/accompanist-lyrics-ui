@@ -65,6 +65,7 @@ class BreathingDotsLayoutTest {
                         KaraokeLyricsView(
                             state, lyrics, { time.intValue }, {}, {},
                             normalLineTextStyle = style,
+                            translationTextStyle = androidx.compose.ui.text.TextStyle(),
                             itemSpacing = 24.dp,
                             scrollChain = null,
                         )

@@ -46,7 +46,12 @@ class AccompanimentFollowTest {
             scene.draw(canvas)
         }
         try {
-            scene.setContent { KaraokeLyricsView(state, lyrics, { 2000 }, {}, {}) }
+            scene.setContent {
+                KaraokeLyricsView(
+                    state, lyrics, { 2000 }, {}, {},
+                    translationTextStyle = androidx.compose.ui.text.TextStyle(),
+                )
+            }
             val deadline = System.nanoTime() + 10_000_000_000L
             while (state.items.isEmpty() && System.nanoTime() < deadline) {
                 frame()
@@ -99,7 +104,16 @@ class AccompanimentFollowTest {
             scene.draw(canvas)
         }
         try {
-            scene.setContent { KaraokeLyricsView(listState=state, lyrics=lyrics, currentPosition={time.intValue}, onLineClicked={}, onLinePressed={}) }
+            scene.setContent {
+                KaraokeLyricsView(
+                    listState = state,
+                    lyrics = lyrics,
+                    currentPosition = { time.intValue },
+                    onLineClicked = {},
+                    onLinePressed = {},
+                    translationTextStyle = androidx.compose.ui.text.TextStyle(),
+                )
+            }
             val deadline = System.nanoTime() + 20_000_000_000L
             while (state.items.isEmpty() && System.nanoTime() < deadline) { frame(); Thread.sleep(5) }
             assertTrue(state.items.isNotEmpty())

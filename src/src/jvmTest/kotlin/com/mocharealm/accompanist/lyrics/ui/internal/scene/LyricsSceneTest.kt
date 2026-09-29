@@ -82,6 +82,7 @@ class LyricsSceneTest {
                     LyricsLayoutRequest(
                         lyrics, listOf(profile), rememberTextMeasurer(), style, style, style,
                         width.floatValue, LocalDensity.current, LocalLayoutDirection.current,
+                        androidx.compose.ui.text.TextStyle(),
                     ),
                     color.value,
                     provider.value,

@@ -199,6 +199,7 @@ class LyricsPlaybackTest {
                 500f,
                 1f,
                 true,
+                translationStyle = androidx.compose.ui.text.TextStyle(),
             )
         assertSame(prepared.lines[0]!!.before.single(), prepared.lines[1])
         assertEquals(prepared.allLines.sumOf { it.rows.size }, prepared.rows.size)

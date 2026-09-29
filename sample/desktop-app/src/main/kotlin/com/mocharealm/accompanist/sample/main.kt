@@ -139,6 +139,7 @@ fun main() = application {
                             onLineClicked = { position.intValue = it.start.coerceIn(0, duration) },
                             onLinePressed = {},
                             modifier = Modifier.weight(1f).fillMaxWidth(),
+                            translationTextStyle = LocalTextStyle.current,
                         )
                         PreviewProgress(position, duration)
                     }

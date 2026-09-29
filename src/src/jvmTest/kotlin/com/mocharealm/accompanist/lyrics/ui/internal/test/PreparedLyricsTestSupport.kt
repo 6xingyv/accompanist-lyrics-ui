@@ -43,4 +43,5 @@ internal fun prepare(
         width,
         1f,
         true,
+        translationStyle = TextStyle(fontSize = 12.sp),
     )

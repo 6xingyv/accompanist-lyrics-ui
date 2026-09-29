@@ -58,9 +58,16 @@ fun KaraokeLyricsView(
             fontWeight = FontWeight.Bold,
             textMotion = TextMotion.Animated,
         ),
+    translationTextStyle: TextStyle =
+        LocalTextStyle.current.copy(
+            fontSize = 18.sp,
+            lineHeight = TextUnit.Unspecified,
+            fontWeight = FontWeight.Bold,
+            textMotion = TextMotion.Animated,
+        ),
     accompanimentLineTextStyle: TextStyle =
         LocalTextStyle.current.copy(
-            fontSize = 20.sp,
+            fontSize = 22.sp,
             lineHeight = TextUnit.Unspecified,
             fontWeight = FontWeight.Bold,
             textMotion = TextMotion.Animated,
@@ -107,7 +114,7 @@ fun KaraokeLyricsView(
         val scene = rememberLyricsScene(
             LyricsLayoutRequest(
                 lyrics, profiles, measurer, normalLineTextStyle, accompanimentLineTextStyle,
-                phoneticTextStyle, width, density, direction,
+                phoneticTextStyle, width, density, direction, translationTextStyle,
             ),
             textColor,
             timeProvider,

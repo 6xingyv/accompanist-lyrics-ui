@@ -58,6 +58,7 @@ class LyricsRecompositionTest {
         try {
             scene.setContent {
                 KaraokeLyricsView(state, lyrics, { 35000 }, {}, {},
+                    translationTextStyle = androidx.compose.ui.text.TextStyle(),
                     showTranslation = translation.value, showPhonetic = phonetic.value)
             }
             val deadline = System.nanoTime() + 10_000_000_000L
@@ -119,6 +120,7 @@ class LyricsRecompositionTest {
                     currentPosition = { position.intValue },
                     onLineClicked = {},
                     onLinePressed = {},
+                    translationTextStyle = androidx.compose.ui.text.TextStyle(),
                 )
             }
             val deadline = System.nanoTime() + 10_000_000_000L
@@ -238,6 +240,7 @@ class LyricsRecompositionTest {
                     currentPosition = { position.intValue },
                     onLineClicked = {},
                     onLinePressed = {},
+                    translationTextStyle = androidx.compose.ui.text.TextStyle(),
                     renderProfiles = listOf(profile),
                     showTranslation = captions.value,
                     showPhonetic = captions.value,

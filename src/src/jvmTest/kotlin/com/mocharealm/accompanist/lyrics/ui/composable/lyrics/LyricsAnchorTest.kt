@@ -61,6 +61,7 @@ class LyricsAnchorTest {
                     key(time.intValue) {
                         KaraokeLyricsView(
                             state, lyrics, { time.intValue }, {}, {},
+                            translationTextStyle = androidx.compose.ui.text.TextStyle(),
                             anchor = anchor,
                             topFade = LyricsFade.Fixed(0.dp),
                             bottomFade = LyricsFade.Fixed(0.dp),

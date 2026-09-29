@@ -21,6 +21,7 @@ fun SyncedLineText(
     textColor: Color,
     modifier: Modifier = Modifier,
     showTranslation: Boolean = true,
+    translationTextStyle: TextStyle,
 ) {
     Column(
         modifier.fillMaxWidth().padding(vertical = 12.dp, horizontal = 16.dp),
@@ -38,6 +39,7 @@ fun SyncedLineText(
                 ?.let {
                     Text(
                         text = it,
+                        style = translationTextStyle,
                         color = textColor.copy(alpha = 0.6f),
                         textAlign = if (isLineRtl) TextAlign.End else TextAlign.Start,
                     )

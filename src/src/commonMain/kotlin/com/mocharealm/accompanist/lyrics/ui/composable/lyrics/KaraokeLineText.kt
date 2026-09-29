@@ -31,6 +31,7 @@ fun KaraokeLineText(
     currentTimeProvider: () -> Int,
     modifier: Modifier = Modifier,
     normalLineTextStyle: TextStyle = LocalTextStyle.current,
+    translationTextStyle: TextStyle = LocalTextStyle.current,
     accompanimentLineTextStyle: TextStyle = LocalTextStyle.current,
     phoneticTextStyle: TextStyle = LocalTextStyle.current,
     activeColor: Color = Color.White,
@@ -61,6 +62,7 @@ fun KaraokeLineText(
             LyricsLayoutRequest(
                 lyrics, profiles, textMeasurer, normalLineTextStyle, accompanimentLineTextStyle,
                 phoneticTextStyle, width, density, LocalLayoutDirection.current,
+                translationTextStyle,
             ),
             activeColor,
             currentTimeProvider,

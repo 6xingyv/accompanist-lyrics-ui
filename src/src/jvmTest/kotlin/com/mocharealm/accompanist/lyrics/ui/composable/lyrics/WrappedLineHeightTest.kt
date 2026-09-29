@@ -67,6 +67,7 @@ class WrappedLineHeightTest {
                         { 5000 },
                         {},
                         {},
+                        translationTextStyle = androidx.compose.ui.text.TextStyle(),
                         renderProfiles = listOf(profile),
                     )
                 }

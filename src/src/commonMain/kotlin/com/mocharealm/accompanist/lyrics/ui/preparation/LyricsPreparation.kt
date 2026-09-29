@@ -20,6 +20,7 @@ fun prepareLyrics(
     density: Float,
     showPhonetic: Boolean,
     fontScale: Float = 1f,
+    translationStyle: TextStyle,
 ): PreparedLyrics =
     prepareLyricsInternal(
         lyrics,
@@ -32,6 +33,7 @@ fun prepareLyrics(
         density,
         showPhonetic,
         fontScale,
+        translationStyle,
     )
 
 /** Prepare one line for callers that own a line cache. */
@@ -47,6 +49,7 @@ fun prepareLyricsLine(
     showPhonetic: Boolean,
     animate: Boolean = true,
     fontScale: Float = 1f,
+    translationStyle: TextStyle,
 ): PreparedLine =
     prepareLyricsLineInternal(
         line,
@@ -60,4 +63,5 @@ fun prepareLyricsLine(
         showPhonetic,
         animate,
         fontScale,
+        translationStyle,
     )

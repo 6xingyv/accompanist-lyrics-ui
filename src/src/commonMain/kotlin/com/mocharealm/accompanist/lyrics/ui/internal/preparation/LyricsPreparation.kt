@@ -36,6 +36,7 @@ internal fun prepareLyricsInternal(
     density: Float,
     showPhonetic: Boolean,
     fontScale: Float = 1f,
+    translationStyle: TextStyle,
 ): PreparedLyrics {
     val cache = mutableMapOf<KaraokeLine, PreparedLine>()
     val sweepWidths = mutableMapOf<TextStyle, Float>()
@@ -61,6 +62,7 @@ internal fun prepareLyricsInternal(
                         normalStyle,
                         accompanimentStyle,
                         phoneticStyle,
+                        translationStyle,
                         width,
                         density,
                         showPhonetic,
@@ -84,6 +86,7 @@ internal fun prepareLyricsInternal(
                         normalStyle,
                         accompanimentStyle,
                         phoneticStyle,
+                        translationStyle,
                         width,
                         density,
                         showPhonetic,
@@ -112,6 +115,7 @@ internal fun prepareLyricsLineInternal(
     showPhonetic: Boolean,
     animate: Boolean = true,
     fontScale: Float = 1f,
+    translationStyle: TextStyle,
 ): PreparedLine =
     prepareLine(
         line,
@@ -120,6 +124,7 @@ internal fun prepareLyricsLineInternal(
         normalStyle,
         accompanimentStyle,
         phoneticStyle,
+        translationStyle,
         width,
         density,
         showPhonetic,
@@ -136,6 +141,7 @@ private fun prepareLine(
     normalStyle: TextStyle,
     accompanimentStyle: TextStyle,
     phoneticStyle: TextStyle,
+    translationStyle: TextStyle,
     width: Float,
     density: Float,
     showPhonetic: Boolean,
@@ -155,6 +161,7 @@ private fun prepareLine(
             textMotion = TextMotion.Animated
         )
     val animatedPhoneticStyle = phoneticStyle.copy(textMotion = TextMotion.Animated)
+    val animatedTranslationStyle = translationStyle.copy(textMotion = TextMotion.Animated)
     val sweepFadeWidth =
         sweepWidths.getOrPut(style) {
             val fontSize = style.fontSize
@@ -400,6 +407,7 @@ private fun prepareLine(
                 normalStyle,
                 accompanimentStyle,
                 phoneticStyle,
+                translationStyle,
                 width,
                 density,
                 showPhonetic,
@@ -428,7 +436,7 @@ private fun prepareLine(
                 ?.let {
                     measurer.measure(
                         it,
-                        animatedPhoneticStyle.copy(
+                        animatedTranslationStyle.copy(
                             textAlign = if (rightAligned) TextAlign.Right else TextAlign.Left
                         ),
                         constraints = Constraints(maxWidth = layoutWidth.toInt().coerceAtLeast(1)),

@@ -19,9 +19,11 @@ internal data class LyricsLayoutRequest(
     val width: Float,
     val density: Density,
     val direction: LayoutDirection,
+    val translationStyle: TextStyle,
 ) {
     fun prepare() = prepareLyrics(
         lyrics, profiles, measurer, normalStyle, accompanimentStyle, phoneticStyle,
         width, density.density, true, fontScale = density.fontScale,
+        translationStyle = translationStyle,
     )
 }
