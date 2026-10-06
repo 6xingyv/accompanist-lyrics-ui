@@ -48,10 +48,19 @@ class LyricsAnchorTest {
         fun activeInkTop(): Int {
             repeat(150) { frame(); Thread.sleep(2) }
             val pixels = IntArray(400 * 1000)
-            bitmap.readPixels(pixels)
             // Inactive items use 40% opacity; the focused lyric is brighter.
-            val first = pixels.indexOfFirst { (it ushr 24) > 240 }
-            assertTrue(first >= 0, "Focused lyric must be visibly drawn")
+            // Geometry readiness does not guarantee on-demand rasters have arrived. Allow
+            // their worker to finish under full-suite load, keeping the pixel assertion intact.
+            val deadline = System.nanoTime() + 20_000_000_000L
+            var first: Int
+            do {
+                bitmap.readPixels(pixels)
+                first = pixels.indexOfFirst { (it ushr 24) > 240 }
+                if (first >= 0) break
+                frame()
+                Thread.sleep(2)
+            } while (System.nanoTime() < deadline)
+            assertTrue(first >= 0, "Focused lyric must be visibly drawn after raster preparation: time=${time.intValue}, anchor=$anchor, ready=${state.ready}, position=${state.position}")
             return first / 400
         }
         try {

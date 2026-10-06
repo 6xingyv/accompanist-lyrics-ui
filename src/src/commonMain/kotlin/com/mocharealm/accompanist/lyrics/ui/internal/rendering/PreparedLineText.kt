@@ -43,8 +43,14 @@ internal fun PreparedLineText(
 ) {
     val density = LocalDensity.current
     val activeColor = resources.color
-    val raster = resources.raster(prepared)
+    val rasterState = resources.rasterState(prepared)
+    val raster by rasterState
     val paints = remember(activeColor) { RowPaints(activeColor) }
+    DisposableEffect(resources, prepared) {
+        resources.retain(prepared)
+        onDispose { resources.release(prepared) }
+    }
+    LaunchedEffect(resources, prepared) { resources.prepareRaster(prepared) }
     val accompanimentAlpha =
         if (prepared.source is KaraokeLine.AccompanimentKaraokeLine) 0.6f else 1f
     val alignment = if (prepared.rightAligned) Alignment.End else Alignment.Start
@@ -104,14 +110,15 @@ internal fun PreparedLineText(
                             }
                             .height(with(density) { row.height.toDp() })
                             .drawWithCache {
-                                val layers = raster.rows[index]
+                                val layers = raster?.rows?.getOrNull(index)
                                 val glows =
                                     layers
-                                        .takeIf { it.hasGlow || it.hasPhonetics }
+                                        ?.takeIf { it.hasGlow || it.hasPhonetics }
                                         ?.let {
                                             traceLyrics("Lyrics.layerCache") { RowGlowLayers(this, it) }
                                         }
                                 onDrawBehind {
+                                    val preparedLayers = layers ?: return@onDrawBehind
                                     val progress = phoneticProgress.value.coerceIn(0f, 1f)
                                     translate(
                                         top = -row.top - row.phoneticHeight * (1f - progress)
@@ -123,7 +130,7 @@ internal fun PreparedLineText(
                                             activeColor,
                                             paints,
                                             showDebugRectangles,
-                                            layers,
+                                            preparedLayers,
                                             glows,
                                             progress,
                                         )

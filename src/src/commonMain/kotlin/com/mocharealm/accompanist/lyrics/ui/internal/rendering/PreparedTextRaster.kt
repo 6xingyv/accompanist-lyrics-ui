@@ -8,6 +8,8 @@ import androidx.compose.ui.graphics.drawscope.*
 import androidx.compose.ui.graphics.layer.CompositingStrategy
 import androidx.compose.ui.graphics.layer.GraphicsLayer
 import androidx.compose.ui.graphics.layer.drawLayer
+import androidx.compose.ui.text.TextLayoutInput
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.drawText
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.IntOffset
@@ -16,21 +18,24 @@ import androidx.compose.ui.unit.LayoutDirection
 import com.mocharealm.accompanist.lyrics.ui.internal.effects.revealAlpha
 import com.mocharealm.accompanist.lyrics.ui.internal.effects.revealBlurIndex
 import com.mocharealm.accompanist.lyrics.ui.internal.effects.revealScale
+import com.mocharealm.accompanist.lyrics.ui.internal.diagnostics.traceLyrics
 import com.mocharealm.accompanist.lyrics.ui.preparation.PreparedLine
 import com.mocharealm.accompanist.lyrics.ui.preparation.PreparedRow
+import com.mocharealm.accompanist.lyrics.ui.profile.DefaultLyricsProfiles
 import com.mocharealm.accompanist.lyrics.ui.profile.LyricsProfile
 import com.mocharealm.accompanist.lyrics.ui.profile.ProfileTextUnit
 import kotlin.math.ceil
 
-/** Fixed-origin raster tiles are prepared on the scene worker, before lazy items attach. */
+/** Fixed-origin raster tiles are prepared off the UI thread as lines enter the working set. */
 internal class PreparedRowLayers(
     density: Density,
     layoutDirection: LayoutDirection,
     row: PreparedRow,
     color: Color,
     paints: RowPaints,
+    tileCache: DisplayUnitRasterCache? = null,
 ) {
-    private val atlas = TextAtlas(density, layoutDirection)
+    private val atlas = TextAtlas(density, layoutDirection, tileCache)
     val runs =
         Array(row.runs.size) { runIndex ->
             val run = row.runs[runIndex]
@@ -47,7 +52,12 @@ internal class PreparedRowLayers(
                             else atlas.text(run.profile, unit.text, color),
                             group.effects.glow,
                             unit.phonetic?.let { layout ->
-                                atlas.add(layout.size.width.toFloat(), layout.size.height, 2) {
+                                atlas.cached(
+                                    PhoneticRasterKey(layout.layoutInput, paints.phoneticColor),
+                                    layout.size.width.toFloat(),
+                                    layout.size.height,
+                                    2,
+                                ) {
                                     drawText(layout, paints.phoneticColor)
                                 }
                             },
@@ -68,7 +78,15 @@ internal class PreparedRowLayers(
         get() = atlas.pageCount
 
     internal val pages: List<ImageBitmap>
-        get() = atlas.pages
+        get() = buildSet {
+            for (run in runs) for (group in run) {
+                group.combined?.let { add(it.image) }
+                for (unit in group.units) {
+                    add(unit.text.image)
+                    unit.phonetic?.let { add(it.image) }
+                }
+            }
+        }.toList()
 }
 
 internal class GroupLayers(val combined: TextLayer?, val units: Array<UnitLayers>) {
@@ -151,14 +169,101 @@ internal class TextLayer(val source: IntOffset, val dimensions: IntSize, val pad
     }
 }
 
+/** Reuses display-unit tiles across rows while keeping shared texture pages under a byte budget. */
+internal class DisplayUnitRasterCache(private val maxBytes: Long = 8L * 1024 * 1024) {
+    private class PageEntry(val bytes: Long) {
+        val keys = mutableSetOf<Any>()
+    }
+
+    private val tiles = mutableMapOf<Any, TextLayer>()
+    private val pages = mutableMapOf<ImageBitmap, PageEntry>()
+    private val pageOrder = mutableListOf<ImageBitmap>()
+    private var bytes = 0L
+
+    fun get(key: Any): TextLayer? {
+        val tile = tiles[key] ?: return null
+        return traceLyrics("Lyrics.displayUnitCacheHit") {
+            touch(tile.image)
+            tile
+        }
+    }
+
+    fun add(entries: List<Pair<Any, TextLayer>>) {
+        for ((key, tile) in entries) {
+            val page = tile.image
+            val pageEntry =
+                pages.getOrPut(page) {
+                    val entry = PageEntry(page.width.toLong() * page.height * 4L)
+                    bytes += entry.bytes
+                    entry
+                }
+            tiles.put(key, tile)?.let { old -> pages[old.image]?.keys?.remove(key) }
+            pageEntry.keys.add(key)
+            touch(page)
+        }
+        trim()
+    }
+
+    private fun touch(page: ImageBitmap) {
+        pageOrder.remove(page)
+        pageOrder.add(page)
+    }
+
+    private fun trim() {
+        while (bytes > maxBytes && pageOrder.isNotEmpty()) {
+            val page = pageOrder.removeAt(0)
+            val entry = pages.remove(page) ?: continue
+            bytes -= entry.bytes
+            for (key in entry.keys) tiles.remove(key)
+        }
+    }
+}
+
+private data class DefaultTextRasterKey(
+    val profile: LyricsProfile,
+    val layout: TextLayoutInput,
+    val left: Float,
+    val right: Float,
+    val sourceRange: TextRange?,
+    val color: Color,
+    val shadow: Shadow,
+)
+
+private data class PhoneticRasterKey(val layout: TextLayoutInput, val color: Color)
+
+private fun rasterKey(
+    profile: LyricsProfile,
+    unit: ProfileTextUnit,
+    color: Color,
+    shadow: Shadow,
+): Any? =
+    if (DefaultLyricsProfiles.any { it === profile })
+        DefaultTextRasterKey(
+            profile,
+            unit.layout.layoutInput,
+            unit.left,
+            unit.right,
+            unit.sourceRange,
+            color,
+            shadow,
+        )
+    else null
+
 /** Shelf packing is performed once during raster preparation, with bounded page dimensions. */
 private class TextAtlas(
     private val density: Density,
     private val layoutDirection: LayoutDirection,
+    private val tileCache: DisplayUnitRasterCache?,
 ) {
-    private class Entry(val tile: TextLayer, val padding: Int, val draw: DrawScope.() -> Unit)
+    private class Entry(
+        val tile: TextLayer,
+        val padding: Int,
+        val cacheKey: Any?,
+        val draw: DrawScope.() -> Unit,
+    )
 
     private val entries = mutableListOf<Entry>()
+    private val pendingTiles = mutableMapOf<Any, TextLayer>()
     private var x = 0
     private var y = 0
     private var shelfHeight = 0
@@ -172,12 +277,37 @@ private class TextAtlas(
         text: ProfileTextUnit,
         color: Color,
         shadow: Shadow = Shadow.None,
-    ): TextLayer =
-        add(text.width, kotlin.math.ceil(text.height).toInt(), 32) {
-            with(profile) { draw(text, color, shadow) }
-        }
+    ): TextLayer {
+        val key = rasterKey(profile, text, color, shadow)
+        return if (key == null)
+            add(text.width, kotlin.math.ceil(text.height).toInt(), 32) {
+                with(profile) { draw(text, color, shadow) }
+            }
+        else
+            cached(key, text.width, kotlin.math.ceil(text.height).toInt(), 32) {
+                with(profile) { draw(text, color, shadow) }
+            }
+    }
 
-    fun add(textWidth: Float, height: Int, padding: Int, draw: DrawScope.() -> Unit): TextLayer {
+    fun cached(
+        key: Any,
+        textWidth: Float,
+        height: Int,
+        padding: Int,
+        draw: DrawScope.() -> Unit,
+    ): TextLayer {
+        tileCache?.get(key)?.let { return it }
+        pendingTiles[key]?.let { return it }
+        return add(textWidth, height, padding, key, draw)
+    }
+
+    fun add(
+        textWidth: Float,
+        height: Int,
+        padding: Int,
+        cacheKey: Any? = null,
+        draw: DrawScope.() -> Unit,
+    ): TextLayer {
         val size =
             IntSize(
                 ceil(textWidth).toInt().coerceAtLeast(1) + 2 * padding,
@@ -190,7 +320,8 @@ private class TextAtlas(
         }
         if (y + size.height > 2048 && entries.isNotEmpty()) finish()
         val tile = TextLayer(IntOffset(x, y), size, padding)
-        entries.add(Entry(tile, padding, draw))
+        entries.add(Entry(tile, padding, cacheKey, draw))
+        if (cacheKey != null) pendingTiles[cacheKey] = tile
         x += size.width
         width = maxOf(width, x)
         shelfHeight = maxOf(shelfHeight, size.height)
@@ -227,7 +358,13 @@ private class TextAtlas(
         // Warming the entire song here evicts useful textures before they are drawn.
         pages.add(image)
         pageCount++
+        tileCache?.add(
+            entries.mapNotNull { entry ->
+                entry.cacheKey?.let { it to entry.tile }
+            }
+        )
         entries.clear()
+        pendingTiles.clear()
         x = 0
         y = 0
         shelfHeight = 0
@@ -237,7 +374,10 @@ private class TextAtlas(
 
 internal class PreparedLineRaster(
     val rows: List<PreparedRowLayers>,
-)
+) {
+    val pages: List<ImageBitmap> = rows.flatMap { it.pages }.distinct()
+    val byteCount: Long = pages.sumOf { it.width.toLong() * it.height * 4L }
+}
 
 /** Caller prepares off the UI thread and publishes the complete line only after all pages exist. */
 internal fun prepareLineRaster(
@@ -245,10 +385,11 @@ internal fun prepareLineRaster(
     color: Color,
     density: Density,
     direction: LayoutDirection,
+    tileCache: DisplayUnitRasterCache? = null,
 ): PreparedLineRaster {
     val paints = RowPaints(color)
     return PreparedLineRaster(
-        line.rows.map { PreparedRowLayers(density, direction, it, color, paints) },
+        line.rows.map { PreparedRowLayers(density, direction, it, color, paints, tileCache) },
     )
 }
 

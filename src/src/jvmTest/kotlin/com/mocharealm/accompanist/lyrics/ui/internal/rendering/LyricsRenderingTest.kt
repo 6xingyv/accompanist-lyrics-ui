@@ -39,9 +39,34 @@ import com.mocharealm.accompanist.lyrics.ui.internal.rendering.RowRenderState
 import com.mocharealm.accompanist.lyrics.ui.internal.rendering.drawPreparedRow
 import com.mocharealm.accompanist.lyrics.ui.internal.rendering.prepareLineRaster
 import kotlin.test.*
+import kotlinx.coroutines.*
 import com.mocharealm.accompanist.lyrics.ui.internal.test.*
 
 class LyricsRenderingTest {
+    @Test
+    fun rasterCacheSurvivesConcurrentPreparationAndViewportRelease() = runBlocking {
+        val lines = List(40) { prepare(source("cache line $it", 0, 1000)) }
+        val resources = LyricsRenderResources(PreparedLyrics(lines), Color.White, Density(1f), LayoutDirection.Ltr)
+        coroutineScope {
+            repeat(8) { worker ->
+                launch(Dispatchers.Default) {
+                    repeat(200) { iteration ->
+                        val line = lines[(worker * 7 + iteration) % lines.size]
+                        resources.retain(line)
+                        try {
+                            val raster = resources.prepareRaster(line)
+                            yield()
+                            assertSame(raster, resources.rasterState(line).value,
+                                "A retained line must survive another viewport's eviction")
+                        } finally {
+                            resources.release(line)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     @Test
     fun sweepUsesTwoEmAndCoversExactLogicalEndpoints() {
         for (text in listOf("Hello", "生活", "سلام")) {

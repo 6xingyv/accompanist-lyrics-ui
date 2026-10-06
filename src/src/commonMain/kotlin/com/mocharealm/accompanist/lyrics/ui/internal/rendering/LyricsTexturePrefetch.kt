@@ -25,13 +25,13 @@ internal fun LyricsTexturePrefetch(
             }
             .collectLatest { anchor ->
                 val pages = linkedSetOf<ImageBitmap>()
-                fun add(line: PreparedLine) {
-                    line.before.forEach(::add)
-                    resources.raster(line).rows.forEach { pages.addAll(it.pages) }
-                    line.after.forEach(::add)
+                suspend fun add(line: PreparedLine) {
+                    line.before.forEach { add(it) }
+                    pages.addAll(resources.prepareRaster(line).pages)
+                    line.after.forEach { add(it) }
                 }
                 for (index in maxOf(0, anchor - 1)..minOf(lines.lastIndex, anchor + 6)) {
-                    lines[index]?.let(::add)
+                    lines[index]?.let { add(it) }
                 }
                 requested.retainAll(pages)
                 for (page in pages) if (page !in requested) {
