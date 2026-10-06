@@ -205,12 +205,14 @@ fun LyricsLazyColumn(
                     var itemTop = startTop
                     var y = top + itemTop - position
                     var index = startIndex
+                    var layoutChanged = false
                     val childConstraints = Constraints(minWidth = childWidth, maxWidth = childWidth)
                     while (index < items.size && y < height + buffer) {
                         val placeable = compose(index).single().measure(childConstraints)
                         val previousHeight = state.heights.height(index)
                         state.heights.update(index, placeable.height)
                         val heightDelta = placeable.height - previousHeight
+                        if (heightDelta != 0) layoutChanged = true
                         if (index == state.interludeItemIndex && heightDelta != 0) {
                             // Dots are leading content of this item. Shift every later item as a
                             // single geometry update; do not feed the same delta into each spring.
@@ -238,6 +240,7 @@ fun LyricsLazyColumn(
                         y = top + itemTop - Snapshot.withoutReadObservation { state.position }
                     }
                     Snapshot.withoutReadObservation {
+                        if (layoutChanged) state.recordLayoutChange()
                         state.updateRange(top, bottom, height)
                         state.chain.rebase(state.position)
                     }

@@ -1,6 +1,9 @@
 package com.mocharealm.accompanist.lyrics.ui.internal.layout
 
 import com.mocharealm.accompanist.lyrics.ui.composable.list.*
+import com.mocharealm.accompanist.lyrics.ui.diagnostics.LyricsSpringTrace
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 
 import androidx.compose.animation.core.Easing
 import androidx.compose.animation.core.LinearEasing
@@ -32,6 +35,174 @@ import kotlinx.coroutines.*
 @OptIn(InternalComposeUiApi::class)
 class LyricsLazyListTest {
     @Test
+    fun captionReflowAfterLateFocusHandoffPreservesAnchorAcrossRetainedRanges() {
+        Host().use { reference -> Host().use { changed ->
+            val baseline = LyricsLazyListState()
+            val actual = LyricsLazyListState()
+            val target = mutableIntStateOf(8)
+            var caption by mutableIntStateOf(120)
+            var referenceCaption by mutableIntStateOf(120)
+            var referenceSettledCaption: State<Int> = mutableStateOf(120)
+            var settledCaption: State<Int> = mutableStateOf(120)
+            fun items(extra: () -> Int) = List(40) { index -> LyricsListItem(index, 400,
+                settledHeightPx = { 280 + extra() }, preserveAnchorOnHeightChange = false) }
+            val baselineItems = items { referenceSettledCaption.value }
+            val changedItems = items { settledCaption.value }
+            reference.content {
+                val currentCaption = referenceCaption
+                referenceSettledCaption = rememberUpdatedState(currentCaption)
+                val previous = remember { intArrayOf(currentCaption) }
+                SideEffect {
+                    if (previous[0] != currentCaption) {
+                        baseline.preserveFollowAnchorForContentChange()
+                        previous[0] = currentCaption
+                    }
+                }
+                val follow = lyricsAutoScroll(baseline, { target.intValue }, tween(1200, easing = LinearEasing), 0)
+                LyricsLazyColumn(baselineItems, baseline, modifier = follow,
+                    beyondBounds = 100.dp, itemSpacing = 0.dp, scrollChain = LyricsScrollChain()) {
+                    val extra by androidx.compose.animation.core.animateFloatAsState(
+                        currentCaption.toFloat(), com.mocharealm.accompanist.lyrics.ui.internal.effects.LyricsRevealSpring)
+                    Box(Modifier.layout { measurable, constraints ->
+                        val child = measurable.measure(constraints.copy(minHeight = 0,
+                            maxHeight = (280 + extra).toInt()))
+                        layout(child.width, (280 + extra).toInt()) { child.place(0, 0) }
+                    })
+                }
+            }
+            changed.content {
+                val currentCaption = caption
+                settledCaption = rememberUpdatedState(currentCaption)
+                val previous = remember { intArrayOf(currentCaption) }
+                SideEffect {
+                    if (previous[0] != currentCaption) {
+                        actual.preserveFollowAnchorForContentChange()
+                        previous[0] = currentCaption
+                    }
+                }
+                val follow = lyricsAutoScroll(actual, { target.intValue }, tween(1200, easing = LinearEasing), 0)
+                LyricsLazyColumn(changedItems, actual, modifier = follow,
+                    beyondBounds = 100.dp, itemSpacing = 0.dp, scrollChain = LyricsScrollChain()) {
+                    val extra by androidx.compose.animation.core.animateFloatAsState(
+                        currentCaption.toFloat(), com.mocharealm.accompanist.lyrics.ui.internal.effects.LyricsRevealSpring)
+                    Box(Modifier.layout { measurable, constraints ->
+                        val child = measurable.measure(constraints.copy(minHeight = 0,
+                            maxHeight = (280 + extra).toInt()))
+                        layout(child.width, (280 + extra).toInt()) { child.place(0, 0) }
+                    })
+                }
+            }
+            repeat(250) { reference.frame(); changed.frame() }
+            caption = 0
+            referenceCaption = 0
+            repeat(12) { reference.frame(); changed.frame() }
+            target.intValue = 9
+            repeat(160) { frame ->
+                if (frame in listOf(18, 48, 73, 105)) caption = if (caption == 0) 120 else 0
+                reference.frame(); changed.frame()
+                val expected = baseline.heights.top(9) - baseline.position + baseline.chain.offset(9)
+                val observed = actual.heights.top(9) - actual.position + actual.chain.offset(9)
+                assertEquals(expected, observed, 2.0,
+                    "Caption reflow must retain the focused screen trajectory after handoff; frame=$frame range=${actual.retainedFirst}..${actual.retainedEnd}")
+            }
+            assertEquals(0.0, actual.heights.top(9) - actual.position + actual.chain.offset(9), 2.0)
+            actual.finishCaptionContentChange()
+            baseline.finishCaptionContentChange()
+            target.intValue = 10
+            repeat(200) { reference.frame(); changed.frame() }
+            assertFalse(actual.anchoringContentChange, "A settled caption must not take ownership of future follows")
+            assertEquals(0.0, actual.heights.top(10) - actual.position + actual.chain.offset(10), 2.0)
+        } }
+    }
+
+    @Test
+    fun captionSettingsDoNotRetargetAnInFlightFollow() {
+        Host().use { host ->
+            val state = LyricsLazyListState()
+            val target = mutableIntStateOf(0)
+            var caption by mutableIntStateOf(20)
+            var settledCaption: State<Int> = mutableStateOf(20)
+            val items = List(30) { index -> LyricsListItem(index, 120,
+                settledHeightPx = { 100 + settledCaption.value }, preserveAnchorOnHeightChange = false) }
+            host.content {
+                val currentCaption = caption
+                settledCaption = rememberUpdatedState(currentCaption)
+                val previous = remember { intArrayOf(currentCaption) }
+                SideEffect {
+                    if (previous[0] != currentCaption) {
+                        state.preserveFollowAnchorForContentChange()
+                        previous[0] = currentCaption
+                    }
+                }
+                val follow = lyricsAutoScroll(state, { target.intValue },
+                    tween(2500, easing = LinearEasing), 0)
+                LyricsLazyColumn(items, state, modifier = follow, itemSpacing = 0.dp,
+                    beyondBounds = 1000.dp, scrollChain = LyricsScrollChain()) {
+                    Box(Modifier.height((100 + currentCaption).dp))
+                }
+            }
+            repeat(300) { host.frame() }
+            var starts = 0
+            val targets = mutableListOf<String>()
+            LyricsSpringTrace.install { record ->
+                val data = ByteBuffer.wrap(record).order(ByteOrder.LITTLE_ENDIAN)
+                if (data.getInt(21) == 112 && data.getInt(25) == 4) {
+                    starts++
+                    targets += "${data.getDouble(29)} at ${host.millis}"
+                }
+            }
+            try {
+                target.intValue = 4
+                // Start away from the top clamp so an 80px prefix contraction can be rebased.
+                repeat(60) { host.frame() }
+                val before = state.heights.top(4) - state.position + state.chain.offset(4)
+                repeat(120) { frame ->
+                    if (frame % 2 == 0) caption = if (caption == 20) 0 else 20
+                    host.frame()
+                    assertEquals(1, starts, "Caption toggles must not restart the active scroll: $targets")
+                    val actual = state.heights.top(4) - state.position + state.chain.offset(4)
+                    val expected = before - (frame + 1) * 480.0 / 2500 * 10
+                    assertEquals(expected, actual, 1.0,
+                        "Caption geometry must preserve the scroll trajectory at frame=$frame")
+                }
+                assertEquals(1, starts, "Caption toggles must not restart the active scroll")
+            } finally { LyricsSpringTrace.clear() }
+        }
+    }
+
+    @Test
+    fun retargetAdvancesPositionOnEveryFrameWithoutRepeatingTheInitialSample() {
+        Host().use { host ->
+            val state = LyricsLazyListState()
+            val target = mutableIntStateOf(0)
+            val items = List(30) { LyricsListItem(it, 100) }
+            host.content {
+                val follow = lyricsAutoScroll(state, { target.intValue },
+                    tween(1000, easing = LinearEasing), 0)
+                LyricsLazyColumn(items, state, modifier = follow, itemSpacing = 0.dp,
+                    beyondBounds = 1000.dp, scrollChain = LyricsScrollChain()) {
+                    Box(Modifier.height(100.dp))
+                }
+            }
+            repeat(10) { host.frame() }
+            target.intValue = 2
+            repeat(15) { host.frame() }
+            var previous = state.position
+            host.frame()
+            val previousStep = state.position - previous
+            assertTrue(previousStep > 1.0)
+            target.intValue = 3
+            repeat(8) { frame ->
+                previous = state.position
+                host.frame()
+                val step = state.position - previous
+                assertTrue(step > previousStep / 2,
+                    "Retarget must advance rather than report velocity while repeating t=0; frame=$frame step=$step previous=$previousStep")
+            }
+        }
+    }
+
+    @Test
     fun captionReflowDuringFollowPreservesAnchorTrajectoryAndOnlySpringsBelowIt() {
         Host().use { reference -> Host().use { changed ->
             val referenceState = LyricsLazyListState()
@@ -56,8 +227,8 @@ class LyricsLazyListTest {
                 }
             }
             repeat(5) { reference.frame(); changed.frame() }
-            reference.scope.launch { referenceState.animateFollowToItem(3, 3, true, tween(650)) }
-            changed.scope.launch { changedState.animateFollowToItem(3, 3, true, tween(650)) }
+            reference.scope.launch { referenceState.animateFollowToItem(3, 3, tween(650)) }
+            changed.scope.launch { changedState.animateFollowToItem(3, 3, tween(650)) }
             var sawLowerSpring = false
             repeat(110) { frame ->
                 if (frame == 15) changedState.preserveFollowAnchorForContentChange()
@@ -103,7 +274,7 @@ class LyricsLazyListTest {
             }
             host.scope.launch { state.scrollToItem(7) }
             repeat(5) { host.frame() }
-            host.scope.launch { state.animateFollowToItem(3, 3, true, tween(650)) }
+            host.scope.launch { state.animateFollowToItem(3, 3, tween(650)) }
             var previous = state.position
             repeat(90) { frame ->
                 if (frame in 5..24) extra = (frame - 4) * 5
@@ -330,6 +501,98 @@ class LyricsLazyListTest {
     }
 
     @Test
+    fun accompanimentGeometryRetargetPreservesScrollVelocityOnRevealAndHide() {
+        Host().use { host ->
+            val state = LyricsLazyListState()
+            val target = mutableIntStateOf(4)
+            var settledAccompanimentHeight by mutableIntStateOf(0)
+            var measuredAccompanimentHeight by mutableIntStateOf(0)
+            val items =
+                List(30) { index ->
+                    LyricsListItem(
+                        index,
+                        100,
+                        settledHeightPx = {
+                            100 + if (index == 1) settledAccompanimentHeight else 0
+                        },
+                        preserveAnchorOnHeightChange = false,
+                    )
+                }
+            host.content {
+                val follow =
+                    lyricsAutoScroll(
+                        state,
+                        { target.intValue },
+                        tween(600, easing = LinearEasing),
+                        0,
+                    )
+                LyricsLazyColumn(
+                    items,
+                    state,
+                    modifier = follow,
+                    itemSpacing = 0.dp,
+                    beyondBounds = 1000.dp,
+                    scrollChain = LyricsScrollChain(),
+                ) { index ->
+                    Box(
+                        Modifier.height(
+                            (100 + if (index == 1) measuredAccompanimentHeight else 0).dp,
+                        ),
+                    )
+                }
+            }
+            repeat(5) { host.frame() }
+            var previousPosition = state.position
+            val velocities = mutableListOf<Double>()
+            repeat(10) {
+                host.frame()
+                velocities += state.position - previousPosition
+                previousPosition = state.position
+            }
+            val velocityBeforeReveal = velocities.last()
+
+            // Playback predicts the full accompaniment height before its rows finish appearing.
+            settledAccompanimentHeight = 40
+            host.frame()
+            velocities += state.position - previousPosition
+            previousPosition = state.position
+            repeat(6) { frame ->
+                measuredAccompanimentHeight = ((frame + 1) * 40 / 6)
+                host.frame()
+                velocities += state.position - previousPosition
+                previousPosition = state.position
+            }
+            val velocityAfterReveal = velocities[10]
+            assertTrue(
+                velocityAfterReveal > 0.0,
+                "A revealing accompaniment must not reverse or restart follow motion: $velocities",
+            )
+            assertTrue(
+                kotlin.math.abs(velocityAfterReveal - velocityBeforeReveal) < 10.0,
+                "Reveal retarget must keep physical scroll velocity: $velocities",
+            )
+
+            settledAccompanimentHeight = 0
+            host.frame()
+            velocities += state.position - previousPosition
+            previousPosition = state.position
+            repeat(6) { frame ->
+                measuredAccompanimentHeight = (40 - (frame + 1) * 40 / 6).coerceAtLeast(0)
+                host.frame()
+                velocities += state.position - previousPosition
+                previousPosition = state.position
+            }
+            val velocityAfterHide = velocities.last()
+            assertTrue(
+                velocityAfterHide >= -0.5,
+                "A hiding accompaniment must retain momentum while its target moves: $velocities",
+            )
+            repeat(80) { host.frame() }
+            assertEquals(400.0, state.position, 1.0)
+        }
+    }
+
+    @Test
     fun lyricClickKeepsSpringTailAcrossPlaybackSeekAndTimelineEnd() {
         Host().use { host ->
             val state = LyricsLazyListState()
@@ -393,6 +656,227 @@ class LyricsLazyListTest {
             )
             repeat(1000) { host.frame() }
             assertFalse(state.chain.active)
+        }
+    }
+
+    @Test
+    fun consecutiveLyricClicksRetargetTheInFlightJump() {
+        Host().use { host ->
+            val state = LyricsLazyListState()
+            val items = List(30) { LyricsListItem(it, 100) }
+            host.content {
+                val follow =
+                    lyricsAutoScroll(
+                        state,
+                        { 0 },
+                        tween(650, easing = LinearEasing),
+                        0,
+                        playbackPosition = { 0 },
+                    )
+                LyricsLazyColumn(
+                    items,
+                    state,
+                    modifier = follow,
+                    itemSpacing = 0.dp,
+                    scrollChain = LyricsScrollChain(),
+                ) {
+                    Box(Modifier.height(100.dp))
+                }
+            }
+            repeat(3) { host.frame() }
+
+            var previousPosition = state.position
+            for (index in 1..12) {
+                val seek = index * 1000
+                state.resumeAutoScroll(seek, index)
+                host.frame()
+                assertTrue(
+                    state.position >= previousPosition,
+                    "A later click must continue the in-flight jump toward item $index",
+                )
+                previousPosition = state.position
+            }
+
+            repeat(30) { host.frame() }
+            assertTrue(state.position > 100.0, "Rapid retargeting must keep the jump moving")
+            assertTrue(state.position < 1200.0, "Retarget must retain the configured duration")
+            repeat(40) { host.frame() }
+            assertEquals(1200.0, state.position, 1.0, "The latest clicked item must win")
+        }
+    }
+
+    @Test
+    fun clickingSameLyricRepeatedlyAfterRetargetDoesNotResetOtherItemSprings() {
+        Host().use { host ->
+            val state = LyricsLazyListState()
+            val target = mutableIntStateOf(0)
+            val time = mutableIntStateOf(0)
+            var clicked = -1
+            val onLineClicked: (Int) -> Unit = { index ->
+                clicked = index
+                state.resumeAutoScroll(index * 1000, index)
+                time.intValue = index * 1000
+                target.intValue = index
+            }
+            host.content {
+                val follow =
+                    lyricsAutoScroll(
+                        state,
+                        { target.intValue },
+                        tween(200, easing = LinearEasing),
+                        0,
+                        playbackPosition = { time.intValue },
+                    )
+                LyricsLazyColumn(
+                    List(50) { LyricsListItem(it, 100) },
+                    state,
+                    modifier = follow,
+                    itemSpacing = 0.dp,
+                    scrollChain = LyricsScrollChain(),
+                ) { index ->
+                    Box(
+                        Modifier.fillMaxWidth()
+                            .height(100.dp)
+                            .clickable { onLineClicked(index) }
+                    )
+                }
+            }
+            repeat(3) { host.frame() }
+
+            target.intValue = 1
+            time.intValue = 16
+            repeat(5) { host.frame() }
+            assertTrue(state.position in 0.0..100.0)
+            var previousPosition = state.position
+            repeat(6) {
+                onLineClicked(5)
+                host.frame()
+                assertTrue(
+                    state.position >= previousPosition - 0.5,
+                    "Repeated clicks on one row must preserve follow motion: " +
+                        "$previousPosition -> ${state.position}",
+                )
+                previousPosition = state.position
+            }
+            repeat(60) { host.frame() }
+            assertEquals(500.0, state.position, 1.0)
+            assertTrue(state.chain.offset(8) > 0.1f)
+            assertTrue(state.chain.active)
+
+            repeat(6) {
+                onLineClicked(5)
+                host.frame()
+                assertEquals(5, clicked)
+                assertTrue(
+                    state.chain.offset(8) > 0.1f,
+                    "Clicking the focused line must not snap another line's spring to rest",
+                )
+                assertTrue(state.chain.active)
+            }
+        }
+    }
+
+    @Test
+    fun stalePlaybackSamplesAfterLyricClicksDoNotCollapseOtherItemSprings() {
+        fun tailOffsetAfterSameDuration(repeatClickAndStaleSample: Boolean): Float {
+            return Host().use { host ->
+                val state = LyricsLazyListState()
+                val target = mutableIntStateOf(0)
+                val time = mutableIntStateOf(0)
+                host.content {
+                    val follow =
+                        lyricsAutoScroll(
+                            state,
+                            { target.intValue },
+                            tween(200, easing = LinearEasing),
+                            0,
+                            playbackPosition = { time.intValue },
+                        )
+                    LyricsLazyColumn(
+                        List(30) { LyricsListItem(it, 100) },
+                        state,
+                        modifier = follow,
+                        itemSpacing = 0.dp,
+                        scrollChain = LyricsScrollChain(),
+                    ) {
+                        Box(Modifier.height(100.dp))
+                    }
+                }
+                repeat(3) { host.frame() }
+                target.intValue = 1
+                time.intValue = 16
+                repeat(25) { host.frame() }
+                val tailBefore = state.chain.offset(4)
+                assertTrue(tailBefore > 0.1f)
+                assertTrue(state.chain.active)
+
+                if (repeatClickAndStaleSample) {
+                    repeat(6) {
+                        // Mirrors KaraokeLyricsView's order: register follow before the player
+                        // publishes the new seek position. The UI state may first publish the
+                        // expected value, followed by a stale controller sample.
+                        state.resumeAutoScroll(seekPosition = 10_000, targetIndex = 1)
+                        host.frame()
+                        time.intValue = 10_000
+                        host.frame()
+                        time.intValue = 9_000
+                        host.frame()
+                    }
+                } else {
+                    repeat(18) {
+                        time.intValue += 16
+                        host.frame()
+                    }
+                }
+                state.chain.offset(4)
+            }
+        }
+
+        val naturalTail = tailOffsetAfterSameDuration(repeatClickAndStaleSample = false)
+        val clickedTail = tailOffsetAfterSameDuration(repeatClickAndStaleSample = true)
+        assertTrue(
+            clickedTail > naturalTail * 0.8f,
+            "Repeated same-row clicks must preserve adjacent spring motion: " +
+                "natural=$naturalTail clicked=$clickedTail",
+        )
+    }
+
+    @Test
+    fun clickNearFollowCompletionRetargetsBeforeThePreviousDestination() {
+        Host().use { host ->
+            val state = LyricsLazyListState()
+            val items = List(30) { LyricsListItem(it, 100) }
+            host.content {
+                val follow =
+                    lyricsAutoScroll(
+                        state,
+                        { 0 },
+                        tween(200, easing = LinearEasing),
+                        0,
+                    )
+                LyricsLazyColumn(items, state, modifier = follow, itemSpacing = 0.dp) {
+                    Box(Modifier.height(100.dp))
+                }
+            }
+            repeat(3) { host.frame() }
+
+            state.resumeAutoScroll(5000, 5)
+            repeat(11) { host.frame() }
+            assertTrue(state.position < 500.0)
+            assertNotNull(state.onImmediateFollowRequest)
+
+            state.resumeAutoScroll(6000, 6)
+            host.frame()
+            val firstFramePosition = state.position
+            host.frame()
+            assertEquals(6, state.followAnchorIndex)
+            assertTrue(
+                state.position > firstFramePosition + 15.0 && state.position < 490.0,
+                "A queued click near completion must redirect the in-flight scroll, " +
+                    "positions=$firstFramePosition -> ${state.position}",
+            )
+            repeat(60) { host.frame() }
+            assertEquals(600.0, state.position, 1.0)
         }
     }
 
@@ -470,11 +954,20 @@ class LyricsLazyListTest {
             )
             host.frame()
             assertEquals(3, clicked, "Hit testing must follow the spring-transformed item")
+            val tailBeforeDrag = state.chain.offset(3)
+            assertTrue(tailBeforeDrag > 0f, "Fixture must still have a moving spring tail")
             val drag = DragInteraction.Start()
             host.scope.launch { state.interactionSource.emit(drag) }
             repeat(3) { host.frame() }
-            assertFalse(state.chain.active)
-            assertEquals(0f, state.chain.offset(3))
+            assertTrue(state.isManualScrolling, "Dragging suspends automatic following")
+            assertTrue(state.chain.active, "Dragging preserves independently settling row springs")
+            assertTrue(state.chain.offset(3) in 0f..tailBeforeDrag && state.chain.offset(3) > 0f,
+                "Spring tail must continue settling instead of being reset to zero")
+            val manualPosition = state.position
+            val tailDuringDrag = state.chain.offset(3)
+            repeat(5) { host.frame() }
+            assertEquals(manualPosition, state.position, 0.001, "Automatic scroll stays suspended")
+            assertTrue(state.chain.offset(3) < tailDuringDrag, "Spring motion continues while dragging")
             host.scope.launch { state.interactionSource.emit(DragInteraction.Stop(drag)) }
             repeat(30) { host.frame() }
             target.intValue = 5

@@ -10,8 +10,13 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.first
 
 /** Manual interaction suspends following; the latest target wins, including during an animation. */
 @Composable
@@ -28,7 +33,12 @@ internal fun lyricsAutoScroll(
     val focusEnd by rememberUpdatedState(focusEndIndex)
     val playback by rememberUpdatedState(playbackPosition)
     var seekRevision by remember(state) { mutableIntStateOf(0) }
-    DisposableEffect(state) { onDispose { state.isManualScrolling = false } }
+    DisposableEffect(state) {
+        onDispose {
+            state.isManualScrolling = false
+            state.clearClickTarget(state.clickTargetRevision)
+        }
+    }
     var dragging by remember(state) { mutableStateOf(false) }
     var interaction by remember(state) { mutableIntStateOf(0) }
     val connection =
@@ -36,7 +46,7 @@ internal fun lyricsAutoScroll(
             object : NestedScrollConnection {
                 override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
                     if (source == NestedScrollSource.UserInput && available.y != 0f) {
-                        state.suspendChain()
+                        state.suspendAutoFollow(reason = 1)
                         state.isManualScrolling = true
                         interaction++
                     }
@@ -48,7 +58,7 @@ internal fun lyricsAutoScroll(
         state.interactionSource.interactions.collect {
             when (it) {
                 is DragInteraction.Start -> {
-                    state.suspendChain()
+                    state.suspendAutoFollow(reason = 2)
                     dragging = true
                     state.isManualScrolling = true
                     interaction++
@@ -88,25 +98,47 @@ internal fun lyricsAutoScroll(
                 previous = time
             }
     }
-    LaunchedEffect(state, animationSpec) {
-        var previousSeek = seekRevision
-        var previousResume = state.resumeRequest
-        snapshotFlow {
-                FollowTarget(
-                    if (state.isManualScrolling) -1 else target(),
-                    focusEnd(),
-                    seekRevision,
-                    state.resumeRequest,
-                )
-            }
-            .collectLatest { request ->
-                val cascade = request.seek == previousSeek || request.resume != previousResume
-                previousSeek = request.seek
-                previousResume = request.resume
-                if (request.index >= 0) {
-                    state.animateFollowToItem(request.index, request.end, cascade, animationSpec)
+    LaunchedEffect(state) {
+        snapshotFlow { state.clickTargetRevision to state.requestedClickTarget }
+            .collectLatest { (revision, index) ->
+                if (index >= 0) {
+                    withTimeoutOrNull(LyricsClickFollowTimeoutMillis) {
+                        snapshotFlow { target() }.first { it == index }
+                    }
+                    state.clearClickTarget(revision)
                 }
             }
+    }
+    LaunchedEffect(state, animationSpec) {
+        val requests = Channel<LyricsFollowRequest>(Channel.CONFLATED)
+        val immediateFollowRequest: (Int) -> Unit = { index ->
+            requests.trySend(LyricsFollowRequest(index, index))
+        }
+        state.onImmediateFollowRequest = immediateFollowRequest
+        try {
+            coroutineScope {
+                launch {
+                    snapshotFlow {
+                        val clickTarget = state.requestedClickTarget
+                        FollowTarget(
+                            index =
+                                if (state.isManualScrolling) -1
+                                else clickTarget.takeIf { it >= 0 } ?: target(),
+                            end = if (clickTarget >= 0) clickTarget else focusEnd(),
+                            seek = seekRevision,
+                            resume = state.resumeRequest,
+                        )
+                    }.collect { request ->
+                        requests.send(LyricsFollowRequest(request.index, request.end))
+                    }
+                }
+                state.animateFollowRequests(requests, animationSpec)
+            }
+        } finally {
+            if (state.onImmediateFollowRequest === immediateFollowRequest) {
+                state.onImmediateFollowRequest = null
+            }
+        }
     }
     return Modifier.nestedScroll(connection)
 }

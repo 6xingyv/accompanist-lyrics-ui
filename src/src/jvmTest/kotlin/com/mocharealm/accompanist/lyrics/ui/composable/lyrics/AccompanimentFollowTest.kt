@@ -12,13 +12,94 @@ import com.mocharealm.accompanist.lyrics.core.model.SyncedLyrics
 import com.mocharealm.accompanist.lyrics.core.model.karaoke.KaraokeAlignment
 import com.mocharealm.accompanist.lyrics.core.model.karaoke.KaraokeLine
 import com.mocharealm.accompanist.lyrics.core.model.karaoke.KaraokeSyllable
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.height
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import com.mocharealm.accompanist.lyrics.ui.composable.list.LyricsLazyListState
+import com.mocharealm.accompanist.lyrics.ui.composable.list.LyricsListItem
+import com.mocharealm.accompanist.lyrics.ui.composable.list.LyricsScrollChain
+import com.mocharealm.accompanist.lyrics.ui.internal.layout.LyricsLazyColumn
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 @OptIn(InternalComposeUiApi::class)
 class AccompanimentFollowTest {
+    @Test fun interludeBreathingHeightKeepsFollowingRowsOnAContinuousSpringPath() {
+        val time = mutableIntStateOf(0)
+        val state = LyricsLazyListState()
+        state.setInterludeItem(1)
+        val recomposer = FrameRecomposer(kotlinx.coroutines.Dispatchers.Unconfined)
+        val scene = CanvasLayersComposeScene(recomposer, size = IntSize(400, 900))
+        val canvas = Canvas(ImageBitmap(400, 900))
+        var nanos = 0L
+        fun frame() {
+            Snapshot.sendApplyNotifications()
+            nanos += 16_666_667L
+            recomposer.performFrame(nanos)
+            scene.measureAndLayout()
+            scene.draw(canvas)
+        }
+        try {
+            scene.setContent {
+                LyricsLazyColumn(
+                    items = List(20) { LyricsListItem(it, 100) },
+                    state = state,
+                    itemSpacing = 0.dp,
+                    beyondBounds = 500.dp,
+                    scrollChain = LyricsScrollChain(),
+                ) { index ->
+                    Column {
+                        if (index == 1) {
+                            KaraokeBreathingDots(
+                                alignment = KaraokeAlignment.Start,
+                                startTimeMs = 0,
+                                endTimeMs = 10_000,
+                                currentTimeProvider = { time.intValue },
+                                defaults = KaraokeBreathingDotsDefaults(),
+                                lineHeight = 40.dp,
+                            )
+                        }
+                        Box(Modifier.height(100.dp))
+                    }
+                }
+            }
+            val deadline = System.nanoTime() + 10_000_000_000L
+            while (state.items.isEmpty() && System.nanoTime() < deadline) {
+                frame()
+                Thread.sleep(5)
+            }
+            repeat(5) { frame() }
+            var previousHeight = state.heights.height(1)
+            var previousFollowingTop =
+                state.heights.top(2) - state.position + state.chain.offset(2)
+            var largestFollowingTopStep = 0.0
+            var observedBreathingGrowth = false
+            repeat(16) {
+                time.intValue += 16
+                frame()
+                val height = state.heights.height(1)
+                val followingTop = state.heights.top(2) - state.position + state.chain.offset(2)
+                val followingStep = followingTop - previousFollowingTop
+                largestFollowingTopStep =
+                    maxOf(largestFollowingTopStep, kotlin.math.abs(followingStep))
+                if (height != previousHeight) observedBreathingGrowth = true
+                previousHeight = height
+                previousFollowingTop = followingTop
+            }
+            assertTrue(observedBreathingGrowth, "The interlude dots should add measured height")
+            assertTrue(
+                largestFollowingTopStep < 3.0,
+                "Breathing height must not kick later rows into a speed jump: $largestFollowingTopStep px/frame",
+            )
+        } finally {
+            scene.close()
+            recomposer.close()
+        }
+    }
+
     @Test fun interludeUsesDisplayedIndexAfterEmbeddedAccompanimentIsRemoved() {
         val acc = KaraokeLine.AccompanimentKaraokeLine(
             listOf(KaraokeSyllable("echo", 0, 500)), null,

@@ -14,6 +14,9 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
 import com.mocharealm.accompanist.lyrics.ui.internal.effects.lyricsEdgeFade
+import com.mocharealm.accompanist.lyrics.ui.internal.effects.LyricsCaptionTransitions
+import com.mocharealm.accompanist.lyrics.ui.internal.effects.LocalLyricsCaptionTransitions
+import kotlinx.coroutines.flow.first
 import androidx.compose.ui.graphics.*
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
@@ -76,9 +79,10 @@ fun KaraokeLyricsView(
     breathingDotsDefaults: KaraokeBreathingDotsDefaults = KaraokeBreathingDotsDefaults(),
     phoneticTextStyle: TextStyle =
         normalLineTextStyle.copy(
-            fontSize = 13.sp,
+            fontSize = 18.sp,
             lineHeight = TextUnit.Unspecified,
-            fontWeight = FontWeight.Normal,
+            fontWeight = FontWeight.SemiBold,
+            textMotion = TextMotion.Static,
         ),
     blendMode: BlendMode = BlendMode.Plus,
     useBlurEffect: Boolean = true,
@@ -130,6 +134,13 @@ fun KaraokeLyricsView(
                 .map { it.height - it.phoneticHeight }
                 .maxOrNull()
             if (height == null) 40.dp else with(density) { height.toDp() }
+        }
+        val captionTransitions = remember(timeline, listState) { LyricsCaptionTransitions() }
+        LaunchedEffect(timeline, listState, showTranslation, showPhonetic) {
+            // Subcomposed captions start their transitions during the next measure.
+            withFrameNanos { }
+            snapshotFlow { captionTransitions.idle }.first { it }
+            listState.finishCaptionContentChange()
         }
         val previousCaptions =
             remember(timeline, listState) { booleanArrayOf(showTranslation, showPhonetic) }
@@ -210,95 +221,97 @@ fun KaraokeLyricsView(
                 animationSpec = tween(if (listState.isManualScrolling) 100 else 300),
                 label = "manualScrollFocusBlur",
             )
-        LyricsLazyColumn(
-            items = listItems,
-            state = listState,
-            itemSpacing = itemSpacing,
-            scrollChain = scrollChain,
-            beyondBounds = keepAliveZone,
-            contentPadding = PaddingValues(top = anchorOffset, bottom = maxHeight + keepAliveZone),
-            modifier =
-                Modifier.fillMaxSize()
-                    .then(followModifier)
-                    .graphicsLayer {
-                        compositingStrategy = CompositingStrategy.Offscreen
-                        this.blendMode = blendMode
-                    }
-                    .lyricsEdgeFade(topFade, bottomFade, anchorOffset),
-        ) { itemIndex ->
-            val index = sourceIndices[itemIndex]
-            val line = lyrics.lines[index]
-            val prepared = scene.lyrics.lines[index]
-            val focused = index in focus.allIndices
-            val distance =
-                maxOf(
-                    0,
-                    (focus.allIndices.firstOrNull() ?: focus.firstIndex) - index,
-                    index - (focus.allIndices.lastOrNull() ?: focus.firstIndex),
-                )
-            val blur by
-            animateFloatAsState(if (useBlurEffect) distance * blurDelta else 0f, tween(300))
-            Column {
-                if (index == 0 && focus.activeIntro)
-                    KaraokeBreathingDots(
-                        alignment =
-                            if (prepared?.rightAligned == true)
-                                KaraokeAlignment
-                                    .End
-                            else
-                                KaraokeAlignment
-                                    .Start,
-                        startTimeMs = 0,
-                        endTimeMs = timeline.introEnd,
-                        currentTimeProvider = timeProvider,
-                        defaults = breathingDotsDefaults,
-                        trailingSpacing = itemSpacing,
-                        lineHeight = breathingLineHeight,
+        CompositionLocalProvider(LocalLyricsCaptionTransitions provides captionTransitions) {
+            LyricsLazyColumn(
+                items = listItems,
+                state = listState,
+                itemSpacing = itemSpacing,
+                scrollChain = scrollChain,
+                beyondBounds = keepAliveZone,
+                contentPadding = PaddingValues(top = anchorOffset, bottom = maxHeight + keepAliveZone),
+                modifier =
+                    Modifier.fillMaxSize()
+                        .then(followModifier)
+                        .graphicsLayer {
+                            compositingStrategy = CompositingStrategy.Offscreen
+                            this.blendMode = blendMode
+                        }
+                        .lyricsEdgeFade(topFade, bottomFade, anchorOffset),
+            ) { itemIndex ->
+                val index = sourceIndices[itemIndex]
+                val line = lyrics.lines[index]
+                val prepared = scene.lyrics.lines[index]
+                val focused = index in focus.allIndices
+                val distance =
+                    maxOf(
+                        0,
+                        (focus.allIndices.firstOrNull() ?: focus.firstIndex) - index,
+                        index - (focus.allIndices.lastOrNull() ?: focus.firstIndex),
                     )
-                if (focus.activeInterludeIndex == index && index > 0)
-                    KaraokeBreathingDots(
-                        alignment =
-                            if (prepared?.rightAligned == true)
-                                KaraokeAlignment
-                                    .End
-                            else
-                                KaraokeAlignment
-                                    .Start,
-                        startTimeMs = timeline.interludeStarts[index],
-                        endTimeMs = timeline.interludeEnds[index],
-                        currentTimeProvider = timeProvider,
-                        defaults = breathingDotsDefaults,
-                        trailingSpacing = itemSpacing,
-                        lineHeight = breathingLineHeight,
-                    )
-                if (prepared !in scene.lyrics.embeddedLines)
-                    LyricsLineItem(
-                        isFocused = focused,
-                        isRightAligned =
-                            prepared?.rightAligned
-                                ?: ((line as? SyncedLine)?.content?.isRtl() == true),
-                        onLineClicked = {
-                            listState.resumeAutoScroll(line.start)
-                            onLineClicked(line)
-                        },
-                        onLinePressed = { onLinePressed(line) },
-                        blurRadius = { blur * focusBlurFactor.value },
-                    ) {
-                        if (prepared != null)
-                            PreparedLineText(
-                                prepared,
-                                timeline.state,
-                                scene.resources,
-                                verticalPadding = 0.dp,
-                                modifier =
-                                    if (line is KaraokeLine.AccompanimentKaraokeLine)
-                                        Modifier.padding(horizontal = 16.dp)
-                                    else Modifier,
-                                showTranslation = showTranslation,
-                                showPhonetic = showPhonetic,
-                                showDebugRectangles = showDebugRectangles,
-                            )
-                    }
+                val blur by
+                animateFloatAsState(if (useBlurEffect) distance * blurDelta else 0f, tween(300))
+                Column {
+                    if (index == 0 && focus.activeIntro)
+                        KaraokeBreathingDots(
+                            alignment =
+                                if (prepared?.rightAligned == true)
+                                    KaraokeAlignment
+                                        .End
+                                else
+                                    KaraokeAlignment
+                                        .Start,
+                            startTimeMs = 0,
+                            endTimeMs = timeline.introEnd,
+                            currentTimeProvider = timeProvider,
+                            defaults = breathingDotsDefaults,
+                            trailingSpacing = itemSpacing,
+                            lineHeight = breathingLineHeight,
+                        )
+                    if (focus.activeInterludeIndex == index && index > 0)
+                        KaraokeBreathingDots(
+                            alignment =
+                                if (prepared?.rightAligned == true)
+                                    KaraokeAlignment
+                                        .End
+                                else
+                                    KaraokeAlignment
+                                        .Start,
+                            startTimeMs = timeline.interludeStarts[index],
+                            endTimeMs = timeline.interludeEnds[index],
+                            currentTimeProvider = timeProvider,
+                            defaults = breathingDotsDefaults,
+                            trailingSpacing = itemSpacing,
+                            lineHeight = breathingLineHeight,
+                        )
+                    if (prepared !in scene.lyrics.embeddedLines)
+                        LyricsLineItem(
+                            isFocused = focused,
+                            isRightAligned =
+                                prepared?.rightAligned
+                                    ?: ((line as? SyncedLine)?.content?.isRtl() == true),
+                            onLineClicked = {
+                                listState.resumeAutoScroll(line.start, itemIndex)
+                                onLineClicked(line)
+                            },
+                            onLinePressed = { onLinePressed(line) },
+                            blurRadius = { blur * focusBlurFactor.value },
+                        ) {
+                            if (prepared != null)
+                                PreparedLineText(
+                                    prepared,
+                                    timeline.state,
+                                    scene.resources,
+                                    verticalPadding = 0.dp,
+                                    modifier =
+                                        if (line is KaraokeLine.AccompanimentKaraokeLine)
+                                            Modifier.padding(horizontal = 16.dp)
+                                        else Modifier,
+                                    showTranslation = showTranslation,
+                                    showPhonetic = showPhonetic,
+                                    showDebugRectangles = showDebugRectangles,
+                                )
+                        }
+                }
             }
         }
     }
