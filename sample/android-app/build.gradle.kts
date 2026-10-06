@@ -24,7 +24,8 @@ android {
         versionName = providers.gradleProperty("releaseVersion").orNull
             ?: "${rootProject.version}"
 
-        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        testInstrumentationRunner = providers.gradleProperty("testInstrumentationRunner").orNull
+            ?: "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
             useSupportLibrary = true
         }
@@ -92,8 +93,8 @@ android {
         abi {
             isEnable = true
             reset()
-            include("arm64-v8a")
-            include("armeabi-v7a")
+            include(*(providers.gradleProperty("lyricsSampleAbi").orNull?.split(',')
+                ?: listOf("arm64-v8a", "armeabi-v7a")).toTypedArray())
             isUniversalApk = false
         }
     }
