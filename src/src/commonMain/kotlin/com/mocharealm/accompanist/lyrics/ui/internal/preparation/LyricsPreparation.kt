@@ -176,19 +176,13 @@ private fun prepareLine(
         )
     val sweepFadeWidth =
         sweepWidths.getOrPut(style) {
-            val fontSize = style.fontSize
-            val emPixels =
-                when {
-                    fontSize.isSp || fontSize.isEm ->
-                        fontSize.value * density * fontScale
-                    else ->
-                        measurer
-                            .measure("Hg", style, softWrap = false)
-                            .size
-                            .height
-                            .toFloat()
-                }
-            (emPixels * 2f).takeIf { it.isFinite() && it > 0f } ?: 0.001f
+            measurer
+                .measure("M", style, softWrap = false)
+                .size
+                .width
+                .toFloat()
+                .takeIf { it.isFinite() && it > 0f }
+                ?: 0.001f
         }
     val rtl = line.syllables.joinToString("") { it.content }.isRtl()
     val rightAligned = if (line.alignment == KaraokeAlignment.End) !rtl else rtl
@@ -256,6 +250,8 @@ private fun prepareLine(
     var rowProfile: LyricsProfile? = null
     var rowWidth = 0f
     var top = 0f
+    val wrappedRowSpacing = 8f * density
+    var previousPhoneticSpacing = 0f
     fun flushRun() {
         if (rowGroups.isNotEmpty()) rowRuns.add(PreparedProfileRun(rowProfile!!, rowGroups))
         rowGroups = mutableListOf()
@@ -268,12 +264,18 @@ private fun prepareLine(
         }
         var baseline = 0f
         var descent = 0f
-        var phoneticHeight = 0f
+        var phoneticTextHeight = 0f
+        var hasPhonetics = false
         for (run in rowRuns) for (group in run.groups) for (unit in group.units) {
             baseline = maxOf(baseline, unit.text.baseline)
             descent = maxOf(descent, unit.text.height - unit.text.baseline)
-            phoneticHeight = maxOf(phoneticHeight, unit.phonetic?.size?.height?.toFloat() ?: 0f)
+            unit.phonetic?.let {
+                hasPhonetics = true
+                phoneticTextHeight = maxOf(phoneticTextHeight, it.size.height.toFloat())
+            }
         }
+        val phoneticGap = if (hasPhonetics) 4f * density else 0f
+        val phoneticHeight = phoneticTextHeight + phoneticGap
         val left = if (rightAligned) width - rowWidth else 0f
         var x = if (rtl) left + rowWidth else left
         val starts = mutableListOf<Int>()
@@ -286,23 +288,32 @@ private fun prepareLine(
         val windows = mutableListOf<RenderWindow>()
         for (run in rowRuns) for (group in run.groups) {
             val groupLeft = if (rtl) x - group.width else x
+            val groupRtl = group.preparedSourceText().isRtl(fallback = rtl)
+            val textLeft = groupLeft + if (groupRtl) group.width - group.textWidth else 0f
+            val unitEffects =
+                group.effects.scale || (group.effects.glow && !group.effects.glowAsGroup)
+            val groupGlowEnd =
+                if (group.effects.glow && group.effects.glowAsGroup)
+                    group.start + group.animationDuration
+                else Float.NEGATIVE_INFINITY
             group.pivot =
-                Offset(groupLeft + group.width / 2f, top + phoneticHeight + baseline + descent)
-            var localX = groupLeft + (group.width - group.textWidth) / 2f
+                Offset(textLeft + group.textWidth / 2f, top + baseline + descent)
+            var localX = textLeft + if (groupRtl) group.textWidth else 0f
             for ((index, unit) in group.units.withIndex()) {
                 val unitX =
                     if (group.sharedLayout)
-                        groupLeft + (group.width - group.textWidth) / 2f + unit.text.left -
-                            group.shapingLeft
-                    else localX
-                unit.position = Offset(unitX, top + phoneticHeight + baseline - unit.text.baseline)
+                        textLeft + unit.text.left - group.shapingLeft
+                    else if (groupRtl) localX - unit.width else localX
+                unit.position = Offset(unitX, top + baseline - unit.text.baseline)
                 unit.phoneticPosition =
                     Offset(
-                        (group.width - (unit.phonetic?.size?.width ?: 0)) / 2f + groupLeft - unitX,
-                        -(unit.phonetic?.size?.height?.toFloat() ?: 0f),
+                        groupLeft +
+                            (if (groupRtl) group.width - (unit.phonetic?.size?.width ?: 0) else 0f) -
+                            unitX,
+                        unit.text.baseline + descent + phoneticGap,
                     )
                 unit.animationStart =
-                    if (group.awesome && group.units.size > 1)
+                    if (unitEffects && group.units.size > 1)
                         group.start +
                             (group.duration - group.animationDuration) * index /
                                 (group.units.size - 1)
@@ -324,7 +335,7 @@ private fun prepareLine(
                                 .toInt(),
                         )
                     )
-                if (group.awesome)
+                if (unitEffects)
                     windows.add(
                         RenderWindow(
                             unit.animationStart.toInt(),
@@ -342,27 +353,38 @@ private fun prepareLine(
                     maxOf(
                         end,
                         unit.text.end,
-                        (unit.animationStart + group.animationDuration).toInt(),
+                        if (unitEffects) (unit.animationStart + group.animationDuration).toInt()
+                        else Int.MIN_VALUE,
                         if (group.effects.lift)
                             (unit.text.animation.start.toLong() + 700)
                                 .coerceAtMost(Int.MAX_VALUE.toLong())
                                 .toInt()
                         else Int.MIN_VALUE,
                     )
-                localX += unit.width
+                localX += if (groupRtl) -unit.width else unit.width
+            }
+            if (groupGlowEnd.isFinite()) {
+                windows.add(RenderWindow(group.start, groupGlowEnd.toInt()))
+                end = maxOf(end, groupGlowEnd.toInt())
             }
             group.staticPosition =
                 Offset(
-                    groupLeft + (group.width - group.textWidth) / 2f,
+                    textLeft,
                     group.units.first().position.y,
                 )
             group.effectsEnd =
-                group.units.maxOf {
-                    maxOf(
-                        it.animationStart + group.animationDuration,
-                        if (group.effects.lift) it.text.animation.start + 700f else 0f,
-                    )
-                }
+                maxOf(
+                    group.start.toFloat(),
+                    groupGlowEnd,
+                    group.units.maxOf {
+                        maxOf(
+                            if (unitEffects) it.animationStart + group.animationDuration
+                            else Float.NEGATIVE_INFINITY,
+                            if (group.effects.lift) it.text.animation.start + 700f
+                            else Float.NEGATIVE_INFINITY,
+                        )
+                    },
+                )
             x += if (rtl) -group.width else group.width
         }
         // Timing arrays are an index into physical geometry; hierarchy remains intact for drawing.
@@ -399,9 +421,11 @@ private fun prepareLine(
                 phoneticHeight + baseline + descent,
                 phoneticHeight,
                 sweepFadeWidth,
+                previousPhoneticSpacing,
             )
         )
-        top += phoneticHeight + baseline + descent
+        previousPhoneticSpacing = if (hasPhonetics) wrappedRowSpacing else 0f
+        top += phoneticHeight + baseline + descent + previousPhoneticSpacing
         rowRuns = mutableListOf()
         rowWidth = 0f
         rowProfile = null
@@ -467,49 +491,111 @@ private fun prepareLine(
     fun textStart(nestedLine: PreparedLine) =
         nestedLine.source.syllables.minOfOrNull { it.start } ?: nestedLine.source.start
     val orderedNested = nested.sortedBy { textStart(it) }
+    val translationText = line.translation?.takeIf { it.isNotBlank() }
+    val wrappedTranslation =
+        translationText?.let {
+            wrapTextWithBalancedLineBreaks(
+                it,
+                animatedTranslationStyle,
+                layoutWidth,
+                measurer,
+            )
+        }
+    val linePhoneticText = line.phonetic?.takeIf { showPhonetic && it.isNotBlank() }
+    val wrappedPhonetic =
+        linePhoneticText?.let { phonetic ->
+            val translationRows =
+                wrappedTranslation?.split(Regex("\\r\\n|\\r|\\n")).orEmpty()
+            val aligned = alignPhoneticLineBreaks(phonetic, translationRows)
+            wrapTextWithBalancedLineBreaks(
+                aligned,
+                animatedPhoneticStyle,
+                layoutWidth,
+                measurer,
+            )
+        }
     return PreparedLine(
             line,
             runs,
             rows,
             width,
-            top,
+            (top - previousPhoneticSpacing).coerceAtLeast(0f),
             rightAligned,
             orderedNested.filter { textStart(it) < mainTextStart },
             orderedNested.filter { textStart(it) >= mainTextStart },
-            line.translation
-                ?.takeIf { it.isNotBlank() }
-                ?.let {
-                    val wrapped =
-                        wrapTextWithBalancedLineBreaks(
-                            it,
-                            animatedTranslationStyle,
-                            layoutWidth,
-                            measurer,
-                        )
-                    measurer.measure(
-                        wrapped,
-                        animatedTranslationStyle.copy(
-                            textAlign = if (rightAligned) TextAlign.Right else TextAlign.Left
-                        ),
-                        constraints = Constraints(maxWidth = layoutWidth.toInt().coerceAtLeast(1)),
-                    )
-                },
-            if (showPhonetic)
-                line.phonetic
-                    ?.takeIf { it.isNotBlank() }
-                    ?.let {
-                        measurer.measure(
-                            it,
-                            animatedPhoneticStyle.copy(
-                                textAlign = if (rightAligned) TextAlign.Right else TextAlign.Left
-                            ),
-                            constraints =
-                                Constraints(maxWidth = layoutWidth.toInt().coerceAtLeast(1)),
-                        )
-                    }
-            else null,
+            wrappedTranslation?.let {
+                measurer.measure(
+                    it,
+                    animatedTranslationStyle.copy(
+                        textAlign = if (rightAligned) TextAlign.Right else TextAlign.Left
+                    ),
+                    constraints = Constraints(maxWidth = layoutWidth.toInt().coerceAtLeast(1)),
+                )
+            },
+            wrappedPhonetic?.let {
+                measurer.measure(
+                    it,
+                    animatedPhoneticStyle.copy(
+                        textAlign = if (rightAligned) TextAlign.Right else TextAlign.Left
+                    ),
+                    constraints = Constraints(maxWidth = layoutWidth.toInt().coerceAtLeast(1)),
+                )
+            },
         )
         .also { cache[line] = it }
+}
+
+/** Keep line-level phonetic captions on the same rows as their translation. */
+private fun alignPhoneticLineBreaks(phonetic: String, translationRows: List<String>): String {
+    if (translationRows.size < 2 || phonetic.any { it == '\n' || it == '\r' }) return phonetic
+    val rowCount = translationRows.size
+    val weights = translationRows.map { it.count { char -> !char.isWhitespace() }.coerceAtLeast(1) }
+    val totalWeight = weights.sum().toFloat()
+    val words = phonetic.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
+    if (words.isEmpty()) return phonetic
+
+    if (words.size >= rowCount) {
+        val result = ArrayList<String>(rowCount)
+        var wordStart = 0
+        var accumulatedWeight = 0
+        for (row in 0 until rowCount - 1) {
+            accumulatedWeight += weights[row]
+            val remainingRows = rowCount - row - 1
+            val target = (words.size * accumulatedWeight / totalWeight).toInt()
+            val wordEnd = target.coerceIn(wordStart + 1, words.size - remainingRows)
+            result.add(words.subList(wordStart, wordEnd).joinToString(" "))
+            wordStart = wordEnd
+        }
+        result.add(words.subList(wordStart, words.size).joinToString(" "))
+        return result.joinToString("\n")
+    }
+
+    // Kana romanization may not contain spaces. Split it at grapheme boundaries in proportion
+    // to the translation row lengths rather than letting it ignore authored translation rows.
+    val boundaries = graphemeBoundaries(phonetic)
+    val candidates = (1 until phonetic.length).filter { boundaries[it] }
+    if (candidates.size < rowCount - 1) return phonetic
+    val result = ArrayList<String>(rowCount)
+    var start = 0
+    var accumulatedWeight = 0
+    for (row in 0 until rowCount - 1) {
+        accumulatedWeight += weights[row]
+        val remainingRows = rowCount - row - 1
+        val target = (phonetic.length * accumulatedWeight / totalWeight).toInt()
+        val firstCandidate = candidates.indexOfFirst { it > start }
+        val lastCandidate = candidates.size - remainingRows
+        if (firstCandidate < 0 || firstCandidate > lastCandidate) return phonetic
+        val end =
+            candidates
+                .subList(firstCandidate, lastCandidate + 1)
+                .filter { phonetic.substring(start, it).isNotBlank() }
+                .minByOrNull { kotlin.math.abs(it - target) }
+                ?: return phonetic
+        result.add(phonetic.substring(start, end).trim())
+        start = end
+    }
+    result.add(phonetic.substring(start).trim())
+    return result.joinToString("\n")
 }
 
 private fun appendBalancedRows(

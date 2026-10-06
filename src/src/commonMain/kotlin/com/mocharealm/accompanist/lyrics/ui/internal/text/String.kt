@@ -26,15 +26,21 @@ internal fun String.containsJapanese(): Boolean = any { it.isJapanese() }
 
 internal fun String.containsKorean(): Boolean = any { it.isKorean() }
 
-internal fun String.isRtl(): Boolean {
-    for (value in this) {
-        when (Character.getDirectionality(value)) {
+internal fun String.isRtl(fallback: Boolean = false): Boolean {
+    var index = 0
+    while (index < length) {
+        val value = this[index++]
+        val codePoint =
+            if (value.isHighSurrogate() && index < length && this[index].isLowSurrogate())
+                0x10000 + ((value.code - 0xD800) shl 10) + this[index++].code - 0xDC00
+            else value.code
+        when (Character.getDirectionality(codePoint)) {
             Character.DIRECTIONALITY_LEFT_TO_RIGHT -> return false
             Character.DIRECTIONALITY_RIGHT_TO_LEFT,
             Character.DIRECTIONALITY_RIGHT_TO_LEFT_ARABIC -> return true
         }
     }
-    return false
+    return fallback
 }
 
 internal fun Char.isProfilePunctuation(): Boolean =

@@ -20,4 +20,6 @@ internal constructor(
     val height: Float,
     val phoneticHeight: Float,
     val sweepFadeWidth: Float,
+    /** Extra space after the preceding wrapped row's inline phonetics. */
+    val phoneticSpacingBefore: Float = 0f,
 )

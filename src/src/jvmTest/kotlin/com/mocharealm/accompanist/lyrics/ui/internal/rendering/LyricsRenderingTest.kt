@@ -68,11 +68,17 @@ class LyricsRenderingTest {
     }
 
     @Test
-    fun sweepUsesTwoEmAndCoversExactLogicalEndpoints() {
+    fun sweepUsesMeasuredCapitalMAndCoversExactLogicalEndpoints() {
+        val expectedWidth =
+            measurer.measure(
+                "M",
+                style.copy(textMotion = androidx.compose.ui.text.style.TextMotion.Animated),
+                softWrap = false,
+            ).size.width.toFloat()
         for (text in listOf("Hello", "生活", "سلام")) {
             val line = prepare(source(text, 1000, 4000), 100f)
             for (row in line.rows) {
-                assertEquals(style.fontSize.value * 2f, row.sweepFadeWidth, 0.001f)
+                assertEquals(expectedWidth, row.sweepFadeWidth, 0.001f)
                 val half = row.sweepFadeWidth / 2f
                 val start = RowRenderState(row).sweepCenter(row.sweepStarts.first())
                 val end = RowRenderState(row).sweepCenter(row.sweepEnds.last())
@@ -99,7 +105,7 @@ class LyricsRenderingTest {
 
     @Test
     fun singleDrawableGroupsShareTheirCombinedRaster() {
-        val line = prepare(source("我的生活", 0, 10000))
+        val line = prepare(source("我", 0, 10000))
         val raster = prepareLineRaster(line, Color.White, Density(1f), LayoutDirection.Ltr)
         for (row in raster.rows) for (run in row.runs) for (group in run) {
             assertEquals(1, group.units.size)

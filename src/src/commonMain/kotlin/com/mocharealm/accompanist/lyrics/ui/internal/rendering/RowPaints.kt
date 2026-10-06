@@ -17,6 +17,6 @@ internal class RowPaints(color: Color) {
         Array<RenderEffect?>(65) {
             if (it == 0) null else BlurEffect(10f * it / 64f, 10f * it / 64f, TileMode.Decal)
         }
-    val phoneticColor = color.copy(alpha = color.alpha * 0.4f)
+    val phoneticColor = color
     val debugStroke = Stroke(1f)
 }

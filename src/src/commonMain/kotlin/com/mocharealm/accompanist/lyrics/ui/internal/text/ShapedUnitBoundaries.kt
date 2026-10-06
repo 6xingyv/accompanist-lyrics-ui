@@ -22,7 +22,10 @@ internal expect fun graphemeBoundaries(text: String): BooleanArray
  * ambiguous boundaries instead of reshaping isolated characters and losing joining/kerning. It uses
  * the same raster scale as the text atlas and runs only during preparation.
  */
-internal fun protectShapedUnits(units: List<ProfileTextUnit>): List<ProfileTextUnit> {
+internal fun protectShapedUnits(
+    units: List<ProfileTextUnit>,
+    requireClearInk: Boolean = true,
+): List<ProfileTextUnit> {
     if (units.size < 2) return units
     val result = ArrayList<ProfileTextUnit>(units.size)
     var begin = 0
@@ -48,7 +51,9 @@ internal fun protectShapedUnits(units: List<ProfileTextUnit>): List<ProfileTextU
                         else -> Float.NaN
                     }
                 }
-            val clear = clearInkCuts(layout, cuts)
+            val clear =
+                if (requireClearInk) clearInkCuts(layout, cuts)
+                else BooleanArray(cuts.size) { cuts[it].isFinite() }
             var first = begin
             for (index in begin until end - 1) {
                 val a = units[index].sourceRange

@@ -20,25 +20,41 @@ object AndroidPhoneticProvider : PhoneticProvider {
 
     override val phoneticLevel: PhoneticLevel = PhoneticLevel.SYLLABLE
 
-    override fun getPhonetic(string: String): String {
+    override fun getPhonetic(string: String): String = getPhonetic(string, null)
+
+    override fun getPhonetic(string: String, languageTag: String?): String {
         if (string.isBlank() || string.isPunctuation()) return string
 
-        return when {
-            string.containsKorean() -> {
-                koTransliterator.transliterate(string).lowercase()
-            }
+        val language =
+            languageTag
+                ?.substringBefore('-')
+                ?.substringBefore('_')
+                ?.lowercase()
 
-            string.containsJapanese() -> {
-                jpTransliterator.transliterate(string).lowercase()
-            }
+        return when (language) {
+            // Han characters are shared across Chinese and Japanese, so prefer the source
+            // language when TTML provides one instead of treating every Han string as Pinyin.
+            "ko" -> koTransliterator.transliterate(string).lowercase()
+            "ja" -> jpTransliterator.transliterate(string).lowercase()
+            "zh" -> Pinyin.toPinyin(string, " ").lowercase()
+            else ->
+                when {
+                    string.containsKorean() -> {
+                        koTransliterator.transliterate(string).lowercase()
+                    }
 
-            string.isPureCjk() -> {
-                Pinyin.toPinyin(string, " ").lowercase()
-            }
+                    string.containsJapanese() -> {
+                        jpTransliterator.transliterate(string).lowercase()
+                    }
 
-            else -> {
-                genericTransliterator.transliterate(string).lowercase()
-            }
+                    string.isPureCjk() -> {
+                        Pinyin.toPinyin(string, " ").lowercase()
+                    }
+
+                    else -> {
+                        genericTransliterator.transliterate(string).lowercase()
+                    }
+                }
         }
     }
 }

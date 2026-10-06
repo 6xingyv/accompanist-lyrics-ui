@@ -128,16 +128,19 @@ open class DefaultLyricsProfile : LyricsProfile {
         measurer: TextMeasurer,
         style: TextStyle,
     ): List<ProfileTextUnit> =
-        protectShapedUnits(
-            prepareWithLayout(
-                group,
-                measurer,
-                style,
-                line.layout.takeIf {
-                    it.layoutInput.text.text ==
-                        group.joinToString("") { syllable -> syllable.content }
-                },
-            )
+        prepareGroupPhonetics(
+            group,
+            protectUnits(
+                prepareWithLayout(
+                    group,
+                    measurer,
+                    style,
+                    line.layout.takeIf {
+                        it.layoutInput.text.text ==
+                            group.joinToString("") { syllable -> syllable.content }
+                    },
+                ),
+            ),
         )
 
     override fun prepare(
@@ -145,8 +148,30 @@ open class DefaultLyricsProfile : LyricsProfile {
         measurer: TextMeasurer,
         style: TextStyle,
     ): List<ProfileTextUnit> {
-        return protectShapedUnits(prepareWithLayout(group, measurer, style, null))
+        return prepareGroupPhonetics(
+            group,
+            protectUnits(prepareWithLayout(group, measurer, style, null)),
+        )
     }
+
+    /**
+     * A shaped word may have several independently animated syllables or glyph slices. Its
+     * pronunciation is one caption, independent of those drawable boundaries and font ligatures.
+     * Source phonetics already carry word separators; timed fragments inside a word concatenate.
+     */
+    protected open fun prepareGroupPhonetics(
+        group: List<KaraokeSyllable>,
+        units: List<ProfileTextUnit>,
+    ): List<ProfileTextUnit> {
+        if (units.isEmpty() || group.none { !it.phonetic.isNullOrBlank() }) return units
+        val phonetic = group.joinToString("") { it.phonetic.orEmpty() }.ifBlank { null }
+        return units.mapIndexed { index, unit ->
+            unit.copy(phonetic = if (index == 0) phonetic else null)
+        }
+    }
+
+    protected open fun protectUnits(units: List<ProfileTextUnit>): List<ProfileTextUnit> =
+        protectShapedUnits(units)
 
     protected open fun prepareWithLayout(
         group: List<KaraokeSyllable>,

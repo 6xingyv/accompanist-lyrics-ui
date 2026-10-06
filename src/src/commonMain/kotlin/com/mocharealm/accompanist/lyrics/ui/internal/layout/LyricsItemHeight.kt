@@ -13,7 +13,8 @@ internal fun PreparedLine.settledHeight(
 ): Float {
     if (nested && !playback.line(this).visible.value && !anticipateAccompaniment) return 0f
     var extent = height + if (nested) 16f * density else 0f
-    if (!phoneticShown) for (row in rows) extent -= row.phoneticHeight
+    if (!phoneticShown) for (row in rows)
+        extent -= row.phoneticHeight + row.phoneticSpacingBefore
     if (translationShown) extent += translation?.size?.height ?: 0
     if (phoneticShown) extent += phonetic?.size?.height ?: 0
     if ((translationShown && translation != null) || (phoneticShown && phonetic != null))

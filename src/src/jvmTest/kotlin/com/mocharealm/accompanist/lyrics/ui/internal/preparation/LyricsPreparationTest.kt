@@ -89,7 +89,7 @@ class LyricsPreparationTest {
     }
 
     @Test
-    fun sweepFadeWidthUsesTwoEmForSampleSfPro() {
+    fun sweepFadeWidthUsesMeasuredCapitalMForSampleSfPro() {
         val font =
             androidx.compose.ui.text.platform.Font(
                 java.io.File("../sample/shared/src/commonMain/composeResources/font/sf_pro.ttf")
@@ -113,7 +113,13 @@ class LyricsPreparationTest {
                     false,
                     translationStyle = androidx.compose.ui.text.TextStyle(),
                 )
-            assertEquals(size * 2f, line.rows.single().sweepFadeWidth, 0.001f)
+            val expectedWidth =
+                measurer.measure(
+                    "M",
+                    sf.copy(textMotion = androidx.compose.ui.text.style.TextMotion.Animated),
+                    softWrap = false,
+                ).size.width.toFloat()
+            assertEquals(expectedWidth, line.rows.single().sweepFadeWidth, 0.001f)
         }
     }
 
@@ -332,6 +338,139 @@ class LyricsPreparationTest {
                 .flatMap { it.units }
                 .map { it.position }
         assertEquals(wholePositions, splitPositions)
+    }
+
+    @Test
+    fun inlinePhoneticsAlignWithOriginalStartForLtrAndRtl() {
+        for ((text, rtl) in
+            listOf("生活" to false, "سلام" to true, "שלום" to true, "𞤀𞤣𞤤𞤢𞤥" to true)) {
+            for (alignment in listOf(KaraokeAlignment.Start, KaraokeAlignment.End)) {
+                for (phonetic in listOf("i", "pronunciation wider than the original phrase")) {
+                    val line = prepare(source(text).copy(
+                        alignment = alignment,
+                        syllables = listOf(KaraokeSyllable(text, 1000, 3000, phonetic = phonetic)),
+                    ))
+                    assertEquals(rtl, line.rows.single().rtl, text)
+                    assertEquals(if (alignment == KaraokeAlignment.End) !rtl else rtl, line.rightAligned)
+                    val group = line.rows.single().runs.single().groups.single()
+                    val unit = group.units.first { it.phonetic != null }
+                    val caption = assertNotNull(unit.phonetic)
+                    val groupLeft = if (line.rightAligned) 500f - group.width else 0f
+                    val expectedStart = groupLeft + if (rtl) group.width else 0f
+                    val textStart = group.staticPosition.x + if (rtl) group.textWidth else 0f
+                    val phoneticStart = unit.position.x + unit.phoneticPosition.x +
+                        if (rtl) caption.size.width.toFloat() else 0f
+                    assertEquals(expectedStart, textStart, 0.001f, "$text original start")
+                    assertEquals(expectedStart, phoneticStart, 0.001f, "$text phonetic start")
+                    assertEquals(group.staticPosition.x + group.textWidth / 2f, group.pivot.x, 0.001f)
+                }
+            }
+        }
+    }
+
+    @Test
+    fun expandedPhoneticGroupsReserveSpaceWithMixedReadingDirections() {
+        val cases = listOf(
+            listOf("生活" to false, "道路" to false),
+            listOf("سلام " to true, "عالم" to true),
+            listOf("Hello " to false, "سلام" to true),
+            listOf("سلام " to true, "Hello" to false),
+        )
+        for (words in cases) {
+            val line = prepare(source(words.joinToString("") { it.first }).copy(
+                syllables = words.mapIndexed { index, (text, _) ->
+                    KaraokeSyllable(text, 1000 + index * 1000, 2000 + index * 1000,
+                        phonetic = if (index == 0) "a substantially longer pronunciation" else "i")
+                },
+            ))
+            val row = line.rows.single()
+            val groups = row.runs.flatMap { it.groups }
+            assertEquals(2, groups.size)
+            assertTrue(groups.first().width > groups.first().textWidth)
+            for ((index, group) in groups.withIndex()) {
+                val rtl = words[index].second
+                val unit = group.units.first { it.phonetic != null }
+                val caption = assertNotNull(unit.phonetic)
+                assertEquals(
+                    group.staticPosition.x + if (rtl) group.textWidth else 0f,
+                    unit.position.x + unit.phoneticPosition.x + if (rtl) caption.size.width.toFloat() else 0f,
+                    0.001f,
+                )
+            }
+            fun reservedLeft(index: Int): Float {
+                val group = groups[index]
+                return group.staticPosition.x - if (words[index].second) group.width - group.textWidth else 0f
+            }
+            if (row.rtl)
+                assertEquals(reservedLeft(0), reservedLeft(1) + groups[1].width, 0.001f)
+            else
+                assertEquals(reservedLeft(0) + groups[0].width, reservedLeft(1), 0.001f)
+        }
+    }
+
+    @Test
+    fun cjkCharacterSlicesPreserveShapedPixelsAndGraphemes() {
+        for ((text, characterCount) in
+            listOf("生活" to 2, "哈哈" to 2, "か\u3099く" to 2, "きょう" to 3, "한글" to 2)) {
+            val group = CjkProfile.groups(listOf(KaraokeSyllable(text, 1000, 7000))).single()
+            val units = CjkProfile.prepare(group, measurer, style)
+            assertEquals(characterCount, units.size, text)
+            val whole = measurer.measure(text, style, softWrap = false)
+            fun image(draw: androidx.compose.ui.graphics.drawscope.DrawScope.() -> Unit): IntArray {
+                val width = whole.size.width + 48
+                val height = whole.size.height + 48
+                val bitmap = ImageBitmap(width, height)
+                CanvasDrawScope().draw(
+                    Density(1f),
+                    LayoutDirection.Ltr,
+                    Canvas(bitmap),
+                    Size(width.toFloat(), height.toFloat()),
+                ) {
+                    translate(24f, 24f, draw)
+                }
+                return IntArray(width * height).also { bitmap.readPixels(it) }
+            }
+            val actual = image {
+                for (unit in units) translate(unit.left, 0f) {
+                    with(CjkProfile) { draw(unit, Color.White, Shadow.None) }
+                }
+            }
+            val expected = image { drawText(whole, Color.White) }
+            assertContentEquals(expected, actual, "$text must retain its shaped pixels")
+        }
+    }
+
+    @Test
+    fun cjkGroupedPhoneticsKeepCharacterLiftClocks() {
+        for (phonetic in listOf(null, "sheng huo pronunciation")) {
+            val line =
+                prepare(
+                    source("生活", 1000, 7000).copy(
+                        syllables = listOf(KaraokeSyllable("生活", 1000, 7000, phonetic = phonetic))
+                    )
+                )
+            val group = line.rows.single().runs.single().groups.single()
+            assertEquals(2, group.units.size)
+            assertEquals(listOf(1000, 4000), group.animationUnits.map { it.timing.start })
+            assertEquals(listOf(4000, 7000), group.animationUnits.map { it.timing.end })
+            assertFalse(group.commonSource)
+            assertSame(group.units.first().text.layout, group.units.last().text.layout)
+            assertTrue(group.effects.lift && group.effects.glow && group.effects.glowAsGroup)
+            assertEquals(6000f, group.duration)
+            assertEquals(5800f, group.effectsEnd)
+            if (phonetic != null) {
+                val first = group.units.first()
+                val pronunciation = assertNotNull(first.phonetic)
+                assertNull(group.units.last().phonetic)
+                assertEquals(phonetic, pronunciation.layoutInput.text.text)
+                assertTrue(group.width > group.textWidth)
+                assertEquals(
+                    group.staticPosition.x,
+                    first.position.x + first.phoneticPosition.x,
+                    0.001f,
+                )
+            }
+        }
     }
 
     @Test

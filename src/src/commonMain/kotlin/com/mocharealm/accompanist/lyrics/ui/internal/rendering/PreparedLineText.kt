@@ -4,7 +4,7 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.*
 import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
+import androidx.compose.ui.AbsoluteAlignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.graphics.*
@@ -18,17 +18,9 @@ import androidx.compose.ui.unit.dp
 import com.mocharealm.accompanist.lyrics.core.model.karaoke.KaraokeLine
 import com.mocharealm.accompanist.lyrics.ui.internal.effects.LyricsReveal
 import com.mocharealm.accompanist.lyrics.ui.internal.effects.LyricsRevealSpring
-import com.mocharealm.accompanist.lyrics.ui.internal.effects.revealAlpha
-import com.mocharealm.accompanist.lyrics.ui.internal.effects.revealBlurIndex
-import com.mocharealm.accompanist.lyrics.ui.internal.effects.revealScale
 import com.mocharealm.accompanist.lyrics.ui.internal.diagnostics.traceLyrics
 import com.mocharealm.accompanist.lyrics.ui.internal.playback.LyricsPlaybackState
 import com.mocharealm.accompanist.lyrics.ui.preparation.PreparedLine
-import com.mocharealm.accompanist.lyrics.ui.internal.rendering.LyricsRenderResources
-import com.mocharealm.accompanist.lyrics.ui.internal.rendering.RowGlowLayers
-import com.mocharealm.accompanist.lyrics.ui.internal.rendering.RowPaints
-import com.mocharealm.accompanist.lyrics.ui.internal.rendering.drawPreparedRow
-import kotlin.math.roundToInt
 
 @Composable
 internal fun PreparedLineText(
@@ -53,13 +45,8 @@ internal fun PreparedLineText(
     LaunchedEffect(resources, prepared) { resources.prepareRaster(prepared) }
     val accompanimentAlpha =
         if (prepared.source is KaraokeLine.AccompanimentKaraokeLine) 0.6f else 1f
-    val alignment = if (prepared.rightAligned) Alignment.End else Alignment.Start
-    val phoneticProgress =
-        animateFloatAsState(
-            if (showPhonetic) 1f else 0f,
-            LyricsRevealSpring,
-            label = "inlinePhonetic",
-        )
+    // Prepared geometry already resolves reading direction into a physical edge.
+    val alignment = if (prepared.rightAligned) AbsoluteAlignment.Right else AbsoluteAlignment.Left
     LyricsReveal(
         visible = playback.line(prepared).visible.value,
         animateInitial = prepared.source is KaraokeLine.AccompanimentKaraokeLine,
@@ -91,38 +78,28 @@ internal fun PreparedLineText(
                 showDebugRectangles = showDebugRectangles,
             )
             // Separate draw scopes mean a ticking row cannot invalidate its static neighbours.
-            Column(Modifier.fillMaxWidth()) {
+            Column(
+                Modifier.fillMaxWidth(),
+                horizontalAlignment = alignment,
+            ) {
                 for ((index, row) in prepared.rows.withIndex()) {
                     val clock = playback.row(row).time
                     val renderState = resources.row(row)
+                    val layers = raster?.rows?.getOrNull(index)
+                    val textHeight = row.height - row.phoneticHeight
                     Box(
                         Modifier.fillMaxWidth()
-                            .layout { measurable, constraints ->
-                                val placeable = measurable.measure(constraints)
-                                val hidden =
-                                    row.phoneticHeight * (1f - phoneticProgress.value.coerceIn(0f, 1f))
-                                layout(
-                                    placeable.width,
-                                    (placeable.height - hidden).roundToInt().coerceAtLeast(0),
-                                ) {
-                                    placeable.place(0, 0)
-                                }
-                            }
-                            .height(with(density) { row.height.toDp() })
+                            .height(with(density) { textHeight.toDp() })
                             .drawWithCache {
-                                val layers = raster?.rows?.getOrNull(index)
                                 val glows =
                                     layers
-                                        ?.takeIf { it.hasGlow || it.hasPhonetics }
+                                        ?.takeIf { it.hasGlow }
                                         ?.let {
                                             traceLyrics("Lyrics.layerCache") { RowGlowLayers(this, it) }
                                         }
                                 onDrawBehind {
                                     val preparedLayers = layers ?: return@onDrawBehind
-                                    val progress = phoneticProgress.value.coerceIn(0f, 1f)
-                                    translate(
-                                        top = -row.top - row.phoneticHeight * (1f - progress)
-                                    ) {
+                                    translate(top = -row.top) {
                                         drawPreparedRow(
                                             row,
                                             clock.intValue,
@@ -132,12 +109,54 @@ internal fun PreparedLineText(
                                             showDebugRectangles,
                                             preparedLayers,
                                             glows,
-                                            progress,
+                                            drawPhonetics = false,
                                         )
                                     }
                                 }
                             }
                     )
+                    if (row.phoneticHeight > 0f) {
+                        // Playback only sweeps pronunciation. Text lift/glow stay above;
+                        // caption visibility uses the same reveal as translations.
+                        val rowWidth = row.runs.sumOf { run ->
+                            run.groups.sumOf { it.width.toDouble() }
+                        }.toFloat()
+                        val followingGap =
+                            prepared.rows.getOrNull(index + 1)?.phoneticSpacingBefore ?: 0f
+                        LyricsReveal(showPhonetic, keepContent = true) {
+                            Column {
+                                Box(
+                                    Modifier.size(
+                                        with(density) { rowWidth.toDp() },
+                                        with(density) { row.phoneticHeight.toDp() },
+                                    ).drawWithCache {
+                                        // Layout rounds caption width to pixels; compensate here
+                                        // so end-aligned pronunciation keeps the original x origin.
+                                        val rowLeft =
+                                            if (prepared.rightAligned) prepared.width - size.width
+                                            else 0f
+                                        onDrawBehind {
+                                            val preparedLayers = layers ?: return@onDrawBehind
+                                            translate(left = -rowLeft, top = -row.top - textHeight) {
+                                                drawPreparedRow(
+                                                    row,
+                                                    clock.intValue,
+                                                    renderState,
+                                                    activeColor,
+                                                    paints,
+                                                    showDebugRectangles,
+                                                    preparedLayers,
+                                                    drawOriginal = false,
+                                                )
+                                            }
+                                        }
+                                    }
+                                )
+                                if (followingGap > 0f)
+                                    Spacer(Modifier.height(with(density) { followingGap.toDp() }))
+                            }
+                        }
+                    }
                 }
             }
             if (prepared.translation != null || prepared.phonetic != null) {
@@ -162,7 +181,7 @@ internal fun PreparedLineText(
                 )
             }
             prepared.translation?.let { layout ->
-                LyricsReveal(showTranslation) {
+                LyricsReveal(showTranslation, keepContent = true) {
                     Canvas(
                         Modifier.size(
                             with(density) { layout.size.width.toDp() },
@@ -177,7 +196,7 @@ internal fun PreparedLineText(
                 }
             }
             prepared.phonetic?.let { layout ->
-                LyricsReveal(showPhonetic) {
+                LyricsReveal(showPhonetic, keepContent = true) {
                     Canvas(
                         Modifier.size(
                             with(density) { layout.size.width.toDp() },

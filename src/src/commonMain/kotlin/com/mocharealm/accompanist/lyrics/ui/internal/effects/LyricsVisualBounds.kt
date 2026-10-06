@@ -16,21 +16,23 @@ internal val LyricsVisualBottom = HorizontalAlignmentLine(::maxOf)
 internal fun Modifier.lyricsVisualLayer(block: GraphicsLayerScope.() -> Unit): Modifier =
     layout { measurable, constraints ->
         val child = measurable.measure(constraints)
-        val top =
-            child[LyricsVisualTop].let { if (it == AlignmentLine.Unspecified) 0 else minOf(0, it) }
-        val bottom =
-            child[LyricsVisualBottom].let {
-                if (it == AlignmentLine.Unspecified) child.height else maxOf(child.height, it)
-            }
-        // Three times the reveal blur radius, outside the retained unscaled drawing bounds.
-        val visualOutsets =
-            LayerOutsets(
-                left = 24.dp,
-                top = (-top).toDp() + 24.dp,
-                right = 24.dp,
-                bottom = (bottom - child.height).toDp() + 24.dp,
-            )
         layout(child.width, child.height) {
+            // Querying descendants during measure can place them before their parent enters
+            // Android's RectList. Retained drawing bounds only belong to the placement layer.
+            val top =
+                child[LyricsVisualTop].let { if (it == AlignmentLine.Unspecified) 0 else minOf(0, it) }
+            val bottom =
+                child[LyricsVisualBottom].let {
+                    if (it == AlignmentLine.Unspecified) child.height else maxOf(child.height, it)
+                }
+            // Three times the reveal blur radius, outside the retained unscaled drawing bounds.
+            val visualOutsets =
+                LayerOutsets(
+                    left = 24.dp,
+                    top = (-top).toDp() + 24.dp,
+                    right = 24.dp,
+                    bottom = (bottom - child.height).toDp() + 24.dp,
+                )
             child.placeWithLayer(0, 0) {
                 block()
                 clip = false

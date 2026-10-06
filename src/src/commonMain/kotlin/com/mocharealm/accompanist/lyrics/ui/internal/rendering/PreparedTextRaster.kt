@@ -15,9 +15,6 @@ import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
-import com.mocharealm.accompanist.lyrics.ui.internal.effects.revealAlpha
-import com.mocharealm.accompanist.lyrics.ui.internal.effects.revealBlurIndex
-import com.mocharealm.accompanist.lyrics.ui.internal.effects.revealScale
 import com.mocharealm.accompanist.lyrics.ui.internal.diagnostics.traceLyrics
 import com.mocharealm.accompanist.lyrics.ui.preparation.PreparedLine
 import com.mocharealm.accompanist.lyrics.ui.preparation.PreparedRow
@@ -68,7 +65,8 @@ internal class PreparedRowLayers(
         }
 
     val hasGlow = runs.any { run -> run.any { it.hasGlow } }
-    val hasPhonetics = runs.any { run -> run.any { it.hasPhonetics } }
+    val hasPhonetics =
+        runs.any { run -> run.any { group -> group.units.any { it.phonetic != null } } }
 
     init {
         atlas.finish()
@@ -91,7 +89,6 @@ internal class PreparedRowLayers(
 
 internal class GroupLayers(val combined: TextLayer?, val units: Array<UnitLayers>) {
     val hasGlow = units.any { it.glow }
-    val hasPhonetics = units.any { it.phonetic != null }
 }
 
 internal class UnitLayers(val text: TextLayer, val glow: Boolean, val phonetic: TextLayer?)
@@ -110,27 +107,12 @@ internal class RowGlowLayers(
                 arrayOfNulls<GraphicsLayer>(raster.runs[r][g].units.size)
             }
         }
-    private val phoneticLayers =
-        Array(raster.runs.size) { r ->
-            Array(raster.runs[r].size) { g ->
-                arrayOfNulls<GraphicsLayer>(raster.runs[r][g].units.size)
-            }
-        }
-
     fun glow(runIndex: Int, groupIndex: Int, unitIndex: Int): GraphicsLayer? {
         val unit = raster.runs[runIndex][groupIndex].units[unitIndex]
         if (!unit.glow) return null
         return glowLayers[runIndex][groupIndex][unitIndex]
             ?: createLayer(unit.text, offscreen = true).also {
                 glowLayers[runIndex][groupIndex][unitIndex] = it
-            }
-    }
-
-    fun phonetic(runIndex: Int, groupIndex: Int, unitIndex: Int): GraphicsLayer? {
-        val tile = raster.runs[runIndex][groupIndex].units[unitIndex].phonetic ?: return null
-        return phoneticLayers[runIndex][groupIndex][unitIndex]
-            ?: createLayer(tile, offscreen = false).also {
-                phoneticLayers[runIndex][groupIndex][unitIndex] = it
             }
     }
 
@@ -391,31 +373,4 @@ internal fun prepareLineRaster(
     return PreparedLineRaster(
         line.rows.map { PreparedRowLayers(density, direction, it, color, paints, tileCache) },
     )
-}
-
-internal fun DrawScope.drawPhonetic(
-    tile: TextLayer?,
-    layer: GraphicsLayer?,
-    layout: androidx.compose.ui.text.TextLayoutResult,
-    color: Color,
-    alpha: Float,
-    progress: Float,
-    paints: RowPaints,
-) {
-    if (progress <= 0f) return
-    if (layer != null && tile != null) {
-        layer.scaleX = revealScale(progress)
-        layer.scaleY = layer.scaleX
-        layer.alpha = alpha * revealAlpha(progress)
-        layer.renderEffect = paints.blurEffects[revealBlurIndex(progress)]
-        translate(-tile.padding.toFloat(), -tile.padding.toFloat()) { drawLayer(layer) }
-    } else {
-        scale(
-            revealScale(progress),
-            pivot = Offset(layout.size.width / 2f, layout.size.height / 2f),
-        ) {
-            if (tile != null) with(tile) { draw(alpha * revealAlpha(progress)) }
-            else drawText(layout, color.copy(alpha = color.alpha * revealAlpha(progress)))
-        }
-    }
 }

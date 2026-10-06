@@ -2,6 +2,9 @@ package com.mocharealm.accompanist.lyrics.ui.profile
 
 import com.mocharealm.accompanist.lyrics.core.model.karaoke.KaraokeSyllable
 import com.mocharealm.accompanist.lyrics.ui.internal.text.*
+import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.text.TextMeasurer
+import androidx.compose.ui.text.TextStyle
 
 object CjkProfile : DefaultLyricsProfile() {
     override fun effects(
@@ -10,7 +13,75 @@ object CjkProfile : DefaultLyricsProfile() {
     ): ProfileGroupEffects {
         val duration =
             (units.maxOfOrNull { it.end } ?: 0).toLong() - (units.minOfOrNull { it.start } ?: 0)
-        return ProfileGroupEffects(glow = !accompaniment && duration >= 1000)
+        return ProfileGroupEffects(glow = !accompaniment && duration >= 1000, glowAsGroup = true)
+    }
+
+    override fun prepareWithLayout(
+        group: List<KaraokeSyllable>,
+        measurer: TextMeasurer,
+        style: TextStyle,
+        initialLayout: TextLayoutResult?,
+    ): List<ProfileTextUnit> {
+        val whole = super.prepareWithLayout(group, measurer, style, initialLayout).single()
+        // groups() retains the source word for phonetic layout and glow. Its grapheme timings
+        // become separate drawables so those words still lift one character at a time.
+        return whole.timing.mapIndexed { index, timing ->
+            val range = requireNotNull(timing.sourceRange)
+            val from = whole.layout.getHorizontalPosition(range.min, usePrimaryDirection = true)
+            val to = whole.layout.getHorizontalPosition(range.max, usePrimaryDirection = true)
+            val left = minOf(from, to)
+            val right = maxOf(from, to)
+            ProfileTextUnit(
+                layout = whole.layout,
+                left = left,
+                right = right,
+                start = timing.start,
+                end = timing.end,
+                phonetic = if (index == 0) whole.phonetic else null,
+                timing = listOf(timing.copy(left = 0f, right = right - left)),
+                sourceRange = timing.sourceRange,
+            )
+        }
+    }
+
+    override fun protectUnits(units: List<ProfileTextUnit>): List<ProfileTextUnit> =
+        // CJK graphemes move within separate advance cells. Requiring transparent guard columns
+        // also merges normal adjacent characters; grapheme and overlapping-cell checks suffice.
+        protectShapedUnits(units, requireClearInk = false)
+
+    override fun wrap(
+        units: List<ProfileTextUnit>,
+        measurer: TextMeasurer,
+        maxWidth: Float,
+    ): List<List<ProfileTextUnit>> {
+        if (units.isEmpty()) return emptyList()
+        if (units.any { it.width > maxWidth || it.layout.lineCount > 1 })
+            return super.wrap(units, measurer, maxWidth)
+        val widths = FloatArray(units.size + 1)
+        for (index in units.indices) widths[index + 1] = widths[index] + units[index].width
+        if (widths.last() <= maxWidth) return listOf(units)
+
+        // Preserve balanced Unicode wrapping after splitting a source word into drawables.
+        val offsets = IntArray(units.size + 1)
+        val text = buildString {
+            for ((index, unit) in units.withIndex()) {
+                val source = unit.layout.layoutInput.text.text
+                val range = requireNotNull(unit.sourceRange)
+                append(source, range.min, range.max)
+                offsets[index + 1] = length
+            }
+        }
+        val localeTag =
+            units.first().layout.layoutInput.style.localeList?.firstOrNull()?.toLanguageTag()
+        val legal = lineBreakBoundaries(text, localeTag).toSet()
+        val candidates = (1 until units.size).map { index ->
+            LineBreakCandidate(index, if (offsets[index] in legal) 0.0 else EmergencyBreakPenalty)
+        }
+        val breaks = balancedLineBreaks(units.size, candidates, maxWidth) { from, to ->
+            widths[to] - widths[from]
+        } ?: return super.wrap(units, measurer, maxWidth)
+        var start = 0
+        return breaks.map { end -> units.subList(start, end).also { start = end } }
     }
 
     override fun matches(syllable: KaraokeSyllable): Boolean {
@@ -55,12 +126,9 @@ object CjkProfile : DefaultLyricsProfile() {
                 ) index++
                 ranges.add(start until index)
             }
+            val word = mutableListOf<KaraokeSyllable>()
             ranges.forEachIndexed { i, range ->
-                val target =
-                    if (!boundaries[sourceOffset + range.first] && result.isNotEmpty())
-                        result.last()
-                    else mutableListOf<KaraokeSyllable>().also(result::add)
-                target.add(
+                word.add(
                     syllable.copy(
                         content = syllable.content.substring(range),
                         start =
@@ -74,6 +142,13 @@ object CjkProfile : DefaultLyricsProfile() {
                         phonetic = if (i == 0) syllable.phonetic else null,
                     )
                 )
+            }
+            if (word.isNotEmpty()) {
+                // Keep a source timing segment together for its pronunciation caption;
+                // timings remain split per grapheme for the sweep and character lift.
+                if (syllable.content.isNotEmpty() && !boundaries[sourceOffset] && result.isNotEmpty())
+                    result.last().addAll(word)
+                else result.add(word)
             }
             sourceOffset += syllable.content.length
         }

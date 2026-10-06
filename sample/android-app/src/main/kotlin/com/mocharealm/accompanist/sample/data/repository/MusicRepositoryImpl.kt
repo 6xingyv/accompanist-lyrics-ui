@@ -17,6 +17,7 @@ import com.mocharealm.accompanist.lyrics.core.model.SyncedLyrics
 import com.mocharealm.accompanist.lyrics.core.model.karaoke.KaraokeLine
 import com.mocharealm.accompanist.lyrics.core.model.synced.SyncedLine
 import com.mocharealm.accompanist.lyrics.core.parser.AutoParser
+import com.mocharealm.accompanist.sample.data.utils.AndroidPhoneticProvider
 import com.mocharealm.accompanist.sample.domain.model.MusicItem
 import com.mocharealm.accompanist.sample.domain.repository.LocalFileSelection
 import com.mocharealm.accompanist.sample.domain.repository.MusicRepository
@@ -32,7 +33,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 class MusicRepositoryImpl(private val context: Context) : MusicRepository {
-    private val autoParser = AutoParser()
+    private val autoParser = AutoParser(AndroidPhoneticProvider)
     private val resolver: ContentResolver
         get() = context.contentResolver
 
