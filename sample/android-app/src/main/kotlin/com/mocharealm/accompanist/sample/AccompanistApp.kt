@@ -9,6 +9,9 @@ import org.koin.core.context.startKoin
 class AccompanistApp : Application() {
     override fun onCreate() {
         super.onCreate()
+        if (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0) {
+            AndroidLyricsSpringTraceRecorder.start(this)
+        }
         startKoin {
             modules(dataModule, uiModule)
             androidContext(this@AccompanistApp)
