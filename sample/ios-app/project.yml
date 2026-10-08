@@ -1,0 +1,36 @@
+name: AccompanistIos
+options:
+  deploymentTarget:
+    iOS: '15.0'
+settings:
+  base:
+    SWIFT_VERSION: '6.0'
+    CODE_SIGNING_ALLOWED: NO
+    GENERATE_INFOPLIST_FILE: YES
+    CURRENT_PROJECT_VERSION: '1'
+    MARKETING_VERSION: '2.0.0'
+targets:
+  AccompanistIos:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources/AccompanistIos
+      - path: Resources/compose-resources
+        type: folder
+        buildPhase: resources
+    settings:
+      base:
+        INFOPLIST_FILE: Info.plist
+        PRODUCT_BUNDLE_IDENTIFIER: com.mocharealm.accompanist.ios.sample
+        PRODUCT_NAME: Accompanist
+        TARGETED_DEVICE_FAMILY: '1,2'
+        OTHER_LDFLAGS: ['$(inherited)', '-ObjC']
+    dependencies:
+      - framework: Frameworks/AccompanistSample.xcframework
+        embed: false
+      - sdk: AVFoundation.framework
+      - sdk: UIKit.framework
+      - sdk: Metal.framework
+      - sdk: CoreText.framework
+      - sdk: libc++.tbd
+      - sdk: libicucore.tbd

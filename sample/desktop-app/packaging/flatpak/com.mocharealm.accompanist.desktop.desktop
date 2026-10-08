@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Accompanist
+Comment=Lyrics following your music player
+Exec=accompanist
+Icon=com.mocharealm.accompanist.desktop
+Terminal=false
+Categories=AudioVideo;Audio;

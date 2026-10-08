@@ -88,6 +88,11 @@ On macOS, the same Kotlin sources use the ordinary Apple toolchain. Compile
 with `python3 tools/ios-local/package.py .`, then run `xtool dev build --ipa`
 from this directory.
 
+CI uses macOS/Xcode to build the Release framework and an unsigned device IPA.
+It invokes `tools/packaging/ios.sh` independently of the local xtool build above;
+the IPA can be signed and installed with xtool. Version tags attach it to the
+GitHub Release alongside the desktop/Android demos and all Maven publications.
+
 ## Install on a connected iPhone
 
 With xtool already authenticated, unlock the phone, accept its trust prompt, and run:

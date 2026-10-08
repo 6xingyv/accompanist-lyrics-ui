@@ -1,17 +1,21 @@
 """Wrap the static Kotlin framework and copy generated Compose resources for xtool."""
 from pathlib import Path
+import argparse
 import plistlib
 import re
 import shutil
-import sys
 
-root = Path(sys.argv[1])
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("root", type=Path)
+parser.add_argument("--configuration", choices=("debug", "release"), default="debug")
+args = parser.parse_args()
+root = args.root
 app = root / "sample/ios-app"
 # Compose aborts during startup when this required frame scheduling key is absent.
 with (app / "Info.plist").open("rb") as source:
     if plistlib.load(source).get("CADisableMinimumFrameDurationOnPhone") is not True:
         raise ValueError("iOS Info.plist must enable CADisableMinimumFrameDurationOnPhone")
-framework = root / "sample/shared/build/bin/iosArm64/debugFramework/AccompanistSample.framework"
+framework = root / f"sample/shared/build/bin/iosArm64/{args.configuration}Framework/AccompanistSample.framework"
 bundle = app / "Frameworks/AccompanistSample.xcframework"
 shutil.copytree(framework, bundle / "ios-arm64/AccompanistSample.framework", dirs_exist_ok=True)
 with (bundle / "Info.plist").open("wb") as out:

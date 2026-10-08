@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.mocharealm.accompanist.desktop</id>
+  <name>Accompanist</name>
+  <summary>Lyrics following your music player</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>Apache-2.0</project_license>
+  <description><p>Display timed lyrics, translations and pronunciation while following an MPRIS music player.</p></description>
+  <launchable type="desktop-id">com.mocharealm.accompanist.desktop.desktop</launchable>
+  <url type="homepage">https://github.com/6xingyv/accompanist-lyrics-ui</url>
+</component>

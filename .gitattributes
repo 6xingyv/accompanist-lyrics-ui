@@ -1,1 +1,4 @@
 tools/ios-local/*.sh text eol=lf
+gradlew text eol=lf
+tools/packaging/*.sh text eol=lf
+.github/**/*.yml text eol=lf

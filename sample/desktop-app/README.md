@@ -143,4 +143,13 @@ library and embeds it in the app; end users need no native compiler.
 The macOS bundle has a stable bundle identifier, an Apple Events usage description
 and hardened-runtime entitlements for automation, JVM JIT and native libraries.
 Release distribution still needs the developer's signing/notarization
-credentials. There is no AppImage packaging.
+credentials. CI also builds a Linux Flatpak from the bundled application:
+
+```bash
+./gradlew :sample:desktop-app:createDistributable
+bash tools/packaging/flatpak.sh 2.0.0-rc.2
+```
+
+The Flatpak follows MPRIS players and reads lyrics from the home directory.
+CI uploads Windows x64 EXE, macOS ARM64/x64 DMG and Linux x64 Flatpak artifacts.
+Version tags attach the same packages to the GitHub Release.

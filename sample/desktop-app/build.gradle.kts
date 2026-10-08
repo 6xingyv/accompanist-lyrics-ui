@@ -130,10 +130,18 @@ compose {
             javaHome = desktopJbr.get().metadata.installationPath.asFile.absolutePath
 
             nativeDistributions {
-                modules("java.desktop", "java.net.http", "java.prefs", "jdk.unsupported")
+                modules("java.desktop", "java.net.http", "java.prefs", "jdk.unsupported", "jdk.crypto.ec")
                 targetFormats(TargetFormat.Dmg, TargetFormat.Exe)
                 packageName = "Accompanist"
-                packageVersion = "1.0.0"
+                packageVersion = rootProject.version.toString().substringBefore('-')
+                description = "Lyrics following your music player"
+                vendor = "MochaRealm"
+                windows {
+                    perUserInstall = true
+                    menuGroup = "Accompanist"
+                    shortcut = true
+                    upgradeUuid = "f1c0fda8-a867-4ead-bf77-c2b56f1a3112"
+                }
                 macOS {
                     bundleID = "com.mocharealm.accompanist.desktop"
                     minimumSystemVersion = "12.0"
