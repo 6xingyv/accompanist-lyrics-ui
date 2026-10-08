@@ -26,11 +26,11 @@ class BreathingDotsTest {
     fun lightsProgressThroughWholeMiddleWindowAndSlotClosesSmoothly() {
         val dots = PreparedBreathingDots(1000, 11000, KaraokeBreathingDotsDefaults())
         assertEquals(0f, dots.elapsed(1000))
-        for (index in 0..2) assertEquals(0.4f, dots.dotAlpha(index, dots.enterEnd))
+        for (index in 0..2) assertEquals(0.2f, dots.dotAlpha(index, dots.enterEnd))
         val midpoint = (dots.enterEnd + dots.exitStart) / 2f
         assertEquals(1f, dots.dotAlpha(0, midpoint))
-        assertEquals(0.7f, dots.dotAlpha(1, midpoint), 0.0001f)
-        assertEquals(0.4f, dots.dotAlpha(2, midpoint))
+        assertEquals(0.6f, dots.dotAlpha(1, midpoint), 0.0001f)
+        assertEquals(0.2f, dots.dotAlpha(2, midpoint))
         for (index in 0..2) assertEquals(1f, dots.dotAlpha(index, dots.exitStart), 0.0001f)
         assertEquals(0.5f, dots.visibility(110f), 0.0001f)
         assertEquals(0.5f, dots.visibility(dots.duration - 110f), 0.0001f)
