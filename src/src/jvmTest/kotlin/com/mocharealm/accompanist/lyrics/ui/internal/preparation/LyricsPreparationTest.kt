@@ -442,8 +442,25 @@ class LyricsPreparationTest {
                 }
             }
             val expected = image { drawText(whole, Color.White) }
-            assertContentEquals(expected, actual,
-                "$text must retain its shaped pixels; cells=${units.map { it.left to it.right }}")
+            val imageWidth = whole.size.width + 48
+            val fractionalCuts = units.dropLast(1).map { 24f + it.right }
+                .filter { it != kotlin.math.floor(it) }
+                .map { kotlin.math.floor(it).toInt() }.toSet()
+            for (index in expected.indices) {
+                if (expected[index] == actual[index]) continue
+                val x = index % imageWidth
+                val y = index / imageWidth
+                assertTrue(x in fractionalCuts, "$text differs away from a clip edge at ($x, $y)")
+                val before = expected[index] ushr 24
+                val after = actual[index] ushr 24
+                // Compose's antialiased clips split coverage c and 1-c. Source-over gives
+                // a - a²*c*(1-c), so the maximum edge loss is a²/4, plus byte rounding.
+                val maximumLoss = kotlin.math.ceil(before * before / (4.0 * 255)).toInt() + 1
+                assertTrue(after in (before - maximumLoss).coerceAtLeast(0)..before,
+                    "$text loses glyph coverage at ($x, $y): $before -> $after")
+                if (after > 0) assertEquals(expected[index] and 0xFFFFFF,
+                    actual[index] and 0xFFFFFF, "$text changes glyph color at ($x, $y)")
+            }
         }
     }
 
