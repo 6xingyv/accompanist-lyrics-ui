@@ -9,6 +9,7 @@ import org.koin.core.context.startKoin
 class AccompanistApp : Application() {
     override fun onCreate() {
         super.onCreate()
+        com.mocharealm.accompanist.sample.data.utils.AndroidPhoneticProvider.initialize(this)
         if (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0) {
             AndroidLyricsSpringTraceRecorder.start(this)
         }

@@ -9,6 +9,8 @@ media3Session = "1.11.0"
 compose = "1.12.0"
 kotlinx-serialization = "2.4.10"
 icu4j = "78.3"
+lyricsCore = "0.5.0"
+lyricsPhonetics = "0.1.0"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -18,7 +20,11 @@ androidx-activity-compose = { group = "androidx.activity", name = "activity-comp
 kotlinx-coroutines-guava = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-guava", version = "1.11.0" }
 androidx-media3-exoplayer = { group = "androidx.media3", name = "media3-exoplayer", version.ref = "media3Exoplayer" }
 androidx-media3-session = { group = "androidx.media3", name = "media3-session", version.ref = "media3Session" }
-accompanist-lyrics-core = { module = "com.mocharealm.accompanist:lyrics-core", version = "0.4.7" }
+accompanist-lyrics-core = { module = "com.mocharealm.accompanist:lyrics-core", version.ref = "lyricsCore" }
+accompanist-lyrics-phonetics-runtime = { module = "com.mocharealm.accompanist:lyrics-phonetics-runtime", version.ref = "lyricsPhonetics" }
+accompanist-lyrics-phonetics-data-mandarin = { module = "com.mocharealm.accompanist:lyrics-phonetics-data-mandarin", version.ref = "lyricsPhonetics" }
+accompanist-lyrics-phonetics-data-cantonese = { module = "com.mocharealm.accompanist:lyrics-phonetics-data-cantonese", version.ref = "lyricsPhonetics" }
+accompanist-lyrics-phonetics-data-japanese = { module = "com.mocharealm.accompanist:lyrics-phonetics-data-japanese", version.ref = "lyricsPhonetics" }
 gaze-capsule = { module = "com.mocharealm.gaze:capsule", version = "2.1.1-patch2" }
 koin-bom = { group = "io.insert-koin", name = "koin-bom", version = "4.2.2" }
 koin-compose = { group = "io.insert-koin", name = "koin-compose" }

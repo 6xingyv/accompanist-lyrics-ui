@@ -17,8 +17,9 @@ internal constructor(
     val textWidth =
         if (sharedLayout) (units.maxOfOrNull { it.text.right } ?: 0f) - shapingLeft
         else units.sumOf { it.width.toDouble() }.toFloat()
-    val width =
-        maxOf(textWidth, units.maxOfOrNull { it.phonetic?.size?.width?.toFloat() ?: 0f } ?: 0f)
+    internal val phoneticWidth =
+        units.maxOfOrNull { it.phonetic?.size?.width?.toFloat() ?: 0f } ?: 0f
+    val width = maxOf(textWidth, phoneticWidth)
     private val textUnits = units.map { it.text }
     val staticText = profile.combine(textUnits)
     internal val phoneticIndices = units.indices.filter { units[it].phonetic != null }.toIntArray()

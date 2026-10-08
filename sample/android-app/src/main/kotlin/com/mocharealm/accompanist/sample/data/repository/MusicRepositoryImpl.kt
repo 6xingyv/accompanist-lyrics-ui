@@ -33,7 +33,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 class MusicRepositoryImpl(private val context: Context) : MusicRepository {
-    private val autoParser = AutoParser(AndroidPhoneticProvider)
+    private val phonetics = AndroidPhoneticProvider.apply { initialize(context) }
+    private val autoParser = AutoParser(fallbackPhoneticProvider = phonetics)
     private val resolver: ContentResolver
         get() = context.contentResolver
 

@@ -118,9 +118,7 @@ internal fun PreparedLineText(
                     if (row.phoneticHeight > 0f) {
                         // Playback only sweeps pronunciation. Text lift/glow stay above;
                         // caption visibility uses the same reveal as translations.
-                        val rowWidth = row.runs.sumOf { run ->
-                            run.groups.sumOf { it.width.toDouble() }
-                        }.toFloat()
+                        val rowWidth = row.width
                         val followingGap =
                             prepared.rows.getOrNull(index + 1)?.phoneticSpacingBefore ?: 0f
                         LyricsReveal(showPhonetic, keepContent = true) {

@@ -22,4 +22,6 @@ internal constructor(
     val sweepFadeWidth: Float,
     /** Extra space after the preceding wrapped row's inline phonetics. */
     val phoneticSpacingBefore: Float = 0f,
+    /** Actual row advance, including spacing reserved between pronunciation captions. */
+    val width: Float = runs.sumOf { run -> run.groups.sumOf { it.width.toDouble() } }.toFloat(),
 )

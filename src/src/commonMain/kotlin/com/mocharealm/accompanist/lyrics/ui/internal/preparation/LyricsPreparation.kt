@@ -26,6 +26,7 @@ private data class PreparedAtom(
     val profile: LyricsProfile,
     val group: PreparedGroup,
     val sourceText: String,
+    val phoneticGapBefore: Float = 0f,
 )
 
 /**
@@ -82,11 +83,13 @@ internal fun prepareLyricsInternal(
                 is SyncedLine ->
                     prepareLine(
                         KaraokeLine.MainKaraokeLine(
-                            listOf(KaraokeSyllable(line.content, line.start, line.end)),
+                            listOf(KaraokeSyllable(line.content, line.start, line.end, languageTag = line.languageTag)),
                             line.translation,
                             KaraokeAlignment.Start,
                             line.start,
                             line.end,
+                            phonetic = line.phonetic,
+                            languageTag = line.languageTag,
                         ),
                         profiles,
                         measurer,
@@ -238,15 +241,27 @@ private fun prepareLine(
                 },
             )
         }
-    val atoms =
-        runs.flatMap { run ->
-            run.groups.map { group ->
-                PreparedAtom(run.profile, group, group.preparedSourceText())
-            }
+    val phoneticSpaceWidth by lazy(LazyThreadSafetyMode.NONE) {
+        measurer.measure(" ", animatedPhoneticStyle, softWrap = false).size.width.toFloat()
+    }
+    val atoms = buildList {
+        for (run in runs) for (group in run.groups) {
+            val atom = PreparedAtom(run.profile, group, group.preparedSourceText())
+            val previous = lastOrNull()
+            add(
+                atom.copy(
+                    phoneticGapBefore =
+                        if (previous != null)
+                            phoneticWordGap(previous, atom, rtl) { phoneticSpaceWidth }
+                        else 0f,
+                )
+            )
         }
+    }
     val rows = mutableListOf<PreparedRow>()
     var rowRuns = mutableListOf<PreparedProfileRun>()
     var rowGroups = mutableListOf<PreparedGroup>()
+    val rowGaps = mutableListOf<Float>()
     var rowProfile: LyricsProfile? = null
     var rowWidth = 0f
     var top = 0f
@@ -286,7 +301,10 @@ private fun prepareLine(
         var end = Int.MIN_VALUE
         var sweepEnd = Int.MIN_VALUE
         val windows = mutableListOf<RenderWindow>()
+        var groupIndex = 0
         for (run in rowRuns) for (group in run.groups) {
+            val gap = rowGaps[groupIndex++]
+            x += if (rtl) -gap else gap
             val groupLeft = if (rtl) x - group.width else x
             val groupRtl = group.preparedSourceText().isRtl(fallback = rtl)
             val textLeft = groupLeft + if (groupRtl) group.width - group.textWidth else 0f
@@ -422,11 +440,13 @@ private fun prepareLine(
                 phoneticHeight,
                 sweepFadeWidth,
                 previousPhoneticSpacing,
+                width = rowWidth,
             )
         )
         previousPhoneticSpacing = if (hasPhonetics) wrappedRowSpacing else 0f
         top += phoneticHeight + baseline + descent + previousPhoneticSpacing
         rowRuns = mutableListOf()
+        rowGaps.clear()
         rowWidth = 0f
         rowProfile = null
     }
@@ -439,8 +459,10 @@ private fun prepareLine(
                 rowProfile = profile
             }
             val group = atoms[current].group
+            val gap = if (current > start) atoms[current].phoneticGapBefore else 0f
             rowGroups.add(group)
-            rowWidth += group.width
+            rowGaps.add(gap)
+            rowWidth += gap + group.width
             current++
         }
         flushRow()
@@ -545,6 +567,28 @@ private fun prepareLine(
         .also { cache[line] = it }
 }
 
+/** Add only the missing caption separation when either word is wider in pronunciation. */
+private fun phoneticWordGap(
+    previous: PreparedAtom,
+    next: PreparedAtom,
+    rtl: Boolean,
+    spaceWidth: () -> Float,
+): Float {
+    val before = previous.group
+    val after = next.group
+    if (before.phoneticWidth <= 0f || after.phoneticWidth <= 0f) return 0f
+    if (before.phoneticWidth <= before.textWidth && after.phoneticWidth <= after.textWidth)
+        return 0f
+    // Captions align to their own script's reading edge, including within a mixed-direction row.
+    val trailingSlack =
+        if (previous.sourceText.isRtl(fallback = rtl) == rtl) before.width - before.phoneticWidth
+        else 0f
+    val leadingSlack =
+        if (next.sourceText.isRtl(fallback = rtl) != rtl) after.width - after.phoneticWidth
+        else 0f
+    return (spaceWidth() - trailingSlack - leadingSlack).coerceAtLeast(0f)
+}
+
 /** Keep line-level phonetic captions on the same rows as their translation. */
 private fun alignPhoneticLineBreaks(phonetic: String, translationRows: List<String>): String {
     if (translationRows.size < 2 || phonetic.any { it == '\n' || it == '\r' }) return phonetic
@@ -633,11 +677,13 @@ private fun appendBalancedRows(
     }
     val widths = FloatArray(end - start + 1)
     for (index in start until end) {
-        widths[index - start + 1] = widths[index - start] + atoms[index].group.width
+        widths[index - start + 1] =
+            widths[index - start] + atoms[index].phoneticGapBefore + atoms[index].group.width
     }
     val selected =
         balancedLineBreaks(end - start, candidates, maxWidth) { from, to ->
-            widths[to] - widths[from]
+            // A caption gap belongs between words, never before the first word of a new row.
+            widths[to] - widths[from] - atoms[start + from].phoneticGapBefore
         }
     if (selected != null) {
         var rowStart = start
@@ -654,12 +700,14 @@ private fun appendBalancedRows(
     var rowWidth = 0f
     for (index in start until end) {
         val group = atoms[index].group
-        if (index > rowStart && rowWidth + group.width > maxWidth) {
+        var gap = if (index > rowStart) atoms[index].phoneticGapBefore else 0f
+        if (index > rowStart && rowWidth + gap + group.width > maxWidth) {
             appendRows(rowStart, index)
             rowStart = index
             rowWidth = 0f
+            gap = 0f
         }
-        rowWidth += group.width
+        rowWidth += gap + group.width
     }
     appendRows(rowStart, end)
 }

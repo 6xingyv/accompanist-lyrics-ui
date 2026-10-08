@@ -104,7 +104,9 @@ object CjkProfile : DefaultLyricsProfile() {
 
     override fun groups(syllables: List<KaraokeSyllable>): List<List<KaraokeSyllable>> {
         val result = mutableListOf<MutableList<KaraokeSyllable>>()
-        val boundaries = graphemeBoundaries(syllables.joinToString("") { it.content })
+        val text = syllables.joinToString("") { it.content }
+        val boundaries = graphemeBoundaries(text)
+        val words = wordBoundaries(syllables, text)
         var sourceOffset = 0
         for (syllable in syllables) {
             var start = 0
@@ -144,14 +146,45 @@ object CjkProfile : DefaultLyricsProfile() {
                 )
             }
             if (word.isNotEmpty()) {
-                // Keep a source timing segment together for its pronunciation caption;
-                // timings remain split per grapheme for the sweep and character lift.
-                if (syllable.content.isNotEmpty() && !boundaries[sourceOffset] && result.isNotEmpty())
+                // A timing boundary inside a dictionary word must not reserve another caption
+                // width. Keep that word together while retaining every grapheme's own timing.
+                // Never split an existing source caption without a character-reading alignment.
+                if (
+                    result.isNotEmpty() &&
+                        (!boundaries[sourceOffset] || !words[sourceOffset])
+                )
                     result.last().addAll(word)
                 else result.add(word)
             }
             sourceOffset += syllable.content.length
         }
+        return result
+    }
+
+    private fun wordBoundaries(syllables: List<KaraokeSyllable>, text: String): BooleanArray {
+        val result = BooleanArray(text.length + 1)
+        var runStart = 0
+        var offset = 0
+        var localeTag: String? = null
+        fun finishRun() {
+            for (boundary in platformWordBreakBoundaries(text.substring(runStart, offset), localeTag)) {
+                result[runStart + boundary] = true
+            }
+            result[runStart] = true
+            result[offset] = true
+        }
+        for (syllable in syllables) {
+            if (syllable.content.isEmpty()) continue
+            if (syllable.languageTag != localeTag) {
+                if (offset > runStart) finishRun()
+                runStart = offset
+                localeTag = syllable.languageTag
+            }
+            offset += syllable.content.length
+        }
+        if (offset > runStart) finishRun()
+        result[0] = true
+        result[text.length] = true
         return result
     }
 }

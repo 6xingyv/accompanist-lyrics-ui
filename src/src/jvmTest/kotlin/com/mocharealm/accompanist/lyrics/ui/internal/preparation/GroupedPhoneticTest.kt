@@ -13,6 +13,42 @@ import kotlin.test.*
 
 class GroupedPhoneticTest {
     @Test
+    fun projectedChineseBoundariesSurviveFinalCaptionPreparation() {
+        val cases = listOf(
+            Triple(listOf("为", "你", "着", "迷"), listOf("wei", "ni", "zhao", "mi"), "wei ni zhao mi"),
+            Triple(listOf("你", "好"), listOf("nei", "hou"), "nei hou"),
+            Triple(listOf("你好", "世界"), listOf("ni hao", "shi jie"), "ni hao shi jie"),
+            Triple(listOf("着迷"), listOf("zhao mi"), "zhao mi"),
+        )
+        for ((parts, readings, expected) in cases) {
+            val syllables = parts.mapIndexed { index, text ->
+                KaraokeSyllable(text, index * 100, (index + 1) * 100, phonetic = readings[index],
+                    phoneticSeparatorBefore = if (index == 0) "" else " ")
+            }
+            val units = CjkProfile.prepare(syllables, measurer, style)
+            assertEquals(listOf(expected), units.mapNotNull { it.phonetic })
+            val prepared = prepare(source(parts.joinToString("")).copy(syllables = syllables))
+            val captions = prepared.rows.flatMap { it.runs }.flatMap { it.groups }.flatMap { it.units }.mapNotNull { it.phonetic }
+            assertEquals(expected, captions.joinToString(" ") { it.layoutInput.text.text })
+            assertEquals(units.map { it.timing }, CjkProfile.prepare(syllables.map { it.copy(phonetic = null) }, measurer, style).map { it.timing })
+        }
+        // A boundary belongs between captions; it does not pad the start of a new visual group.
+        val syllables = listOf(KaraokeSyllable("银", 0, 100, "yin", phoneticSeparatorBefore = " "),
+            KaraokeSyllable("，", 100, 200), KaraokeSyllable("行", 200, 300, "hang", phoneticSeparatorBefore = " "))
+        assertEquals(listOf("yin hang"), CjkProfile.prepare(syllables, measurer, style).mapNotNull { it.phonetic })
+    }
+
+    @Test
+    fun legacyJapaneseHanFragmentsStillConcatenate() {
+        val syllables = listOf(KaraokeSyllable("今", 0, 100, "kyo", languageTag = "ja"),
+            KaraokeSyllable("日", 100, 200, "u", languageTag = "ja"))
+        assertEquals(listOf("kyou"), CjkProfile.prepare(syllables, measurer, style).mapNotNull { it.phonetic })
+        val prepared = prepare(source("今日").copy(syllables = syllables))
+        assertEquals(listOf("kyou"), prepared.rows.flatMap { it.runs }.flatMap { it.groups }.flatMap { it.units }
+            .mapNotNull { it.phonetic }.map { it.layoutInput.text.text })
+    }
+
+    @Test
     fun splitWordsHaveOneJoinedPronunciationAcrossWritingSystems() {
         val cases = listOf(
             Triple(listOf("to", "night"), listOf("to", "night"), LatinProfile),

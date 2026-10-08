@@ -157,18 +157,27 @@ open class DefaultLyricsProfile : LyricsProfile {
     /**
      * A shaped word may have several independently animated syllables or glyph slices. Its
      * pronunciation is one caption, independent of those drawable boundaries and font ligatures.
-     * Source phonetics already carry word separators; timed fragments inside a word concatenate.
+     * Caption boundaries belong to the pronunciation provider, not to animation or script dispatch.
+     * Legacy timed word fragments concatenate; generated projections retain explicit separators.
      */
     protected open fun prepareGroupPhonetics(
         group: List<KaraokeSyllable>,
         units: List<ProfileTextUnit>,
     ): List<ProfileTextUnit> {
         if (units.isEmpty() || group.none { !it.phonetic.isNullOrBlank() }) return units
-        val phonetic = group.joinToString("") { it.phonetic.orEmpty() }.ifBlank { null }
+        val phonetic = joinedPhonetic(group)
         return units.mapIndexed { index, unit ->
             unit.copy(phonetic = if (index == 0) phonetic else null)
         }
     }
+
+    private fun joinedPhonetic(group: List<KaraokeSyllable>): String? = buildString {
+        for (syllable in group) {
+            val caption = syllable.phonetic ?: continue
+            if (isNotEmpty() && caption.isNotEmpty()) append(syllable.phoneticSeparatorBefore)
+            append(caption)
+        }
+    }.ifBlank { null }
 
     protected open fun protectUnits(units: List<ProfileTextUnit>): List<ProfileTextUnit> =
         protectShapedUnits(units)
@@ -212,7 +221,7 @@ open class DefaultLyricsProfile : LyricsProfile {
                 layout.size.width.toFloat(),
                 group.minOf { it.start },
                 group.maxOf { it.end },
-                group.mapNotNull { it.phonetic }.joinToString(" ").ifBlank { null },
+                joinedPhonetic(group),
                 timing,
                 sourceRange = TextRange(0, offset),
             )

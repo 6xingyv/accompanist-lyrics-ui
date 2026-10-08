@@ -7,6 +7,17 @@ plugins {
     alias(libs.plugins.stability.analyzer)
 }
 
+val phoneticTestPacks by configurations.creating {
+    isCanBeConsumed = false
+    isCanBeResolved = true
+    isTransitive = false
+}
+val phoneticTestResourceDir = layout.buildDirectory.dir("generated/phonetic-test-resources")
+val extractPhoneticTestPacks by tasks.registering(Sync::class) {
+    from({ phoneticTestPacks.map { zipTree(it) } })
+    into(phoneticTestResourceDir)
+}
+
 fun getSecretProperty(key: String): String? {
     return System.getenv(key)
         ?: project.findProperty(key) as? String
@@ -15,6 +26,10 @@ fun getSecretProperty(key: String): String? {
 android {
     namespace = "com.mocharealm.accompanist.sample"
     compileSdk = 37
+    testOptions.unitTests.all {
+        it.dependsOn(extractPhoneticTestPacks)
+        it.classpath += files(phoneticTestResourceDir)
+    }
 
     defaultConfig {
         applicationId = "com.mocharealm.accompanist.demo"
@@ -89,6 +104,8 @@ android {
         }
     }
 
+    androidResources { noCompress += "lpd" }
+
     splits {
         abi {
             isEnable = true
@@ -107,10 +124,18 @@ kotlin {
 }
 
 dependencies {
+    for (pack in listOf(
+        libs.accompanist.lyrics.phonetics.data.mandarin,
+        libs.accompanist.lyrics.phonetics.data.cantonese,
+        libs.accompanist.lyrics.phonetics.data.japanese,
+    )) {
+        phoneticTestPacks(variantOf(pack) { classifier("resources"); artifactType("zip") })
+    }
     implementation(project(":sample:shared"))
     implementation(project(":src"))
 
     testImplementation(kotlin("test-junit"))
+    testImplementation(libs.icu4j) // Exercise the same Hangul-Latin rule set without Android stubs.
 
     implementation(compose.runtime)
     implementation(compose.foundation)
@@ -134,7 +159,10 @@ dependencies {
     implementation(libs.androidx.media3.session)
     implementation(files("src/main/libs/lib-decoder-ffmpeg-release.aar"))
     implementation(libs.cloudy)
-    implementation(libs.tinyPinyin)
+    implementation(libs.accompanist.lyrics.phonetics.runtime)
+    implementation(libs.accompanist.lyrics.phonetics.data.mandarin)
+    implementation(libs.accompanist.lyrics.phonetics.data.cantonese)
+    implementation(libs.accompanist.lyrics.phonetics.data.japanese)
     implementation(libs.kotlinx.coroutines.guava)
 }
 
