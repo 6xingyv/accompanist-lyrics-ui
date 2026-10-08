@@ -1,5 +1,7 @@
 package com.mocharealm.accompanist.lyrics.ui.composable.lyrics
 
+import com.mocharealm.accompanist.lyrics.ui.internal.test.TestSceneDispatcher
+
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.snapshots.Snapshot
@@ -24,7 +26,6 @@ import com.mocharealm.accompanist.lyrics.ui.composable.list.LyricsLazyListState
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
-import kotlinx.coroutines.Dispatchers
 
 @OptIn(InternalComposeUiApi::class)
 class BreathingDotsLayoutTest {
@@ -41,12 +42,14 @@ class BreathingDotsLayoutTest {
             })
             val time = mutableIntStateOf(5000)
             val state = LyricsLazyListState()
-            val recomposer = FrameRecomposer(Dispatchers.Unconfined)
+            val dispatcher = TestSceneDispatcher()
+            val recomposer = FrameRecomposer(dispatcher)
             val scene = CanvasLayersComposeScene(recomposer, size = IntSize(600, 1400))
             val canvas = Canvas(ImageBitmap(600, 1400))
             var expectedRowHeight = 0
             var nanos = 0L
             fun frame() {
+                dispatcher.runCurrent()
                 Snapshot.sendApplyNotifications()
                 nanos += 16_666_667L
                 recomposer.performFrame(nanos)
@@ -96,6 +99,7 @@ class BreathingDotsLayoutTest {
             } finally {
                 scene.close()
                 recomposer.close()
+                dispatcher.runCurrent()
             }
         }
     }

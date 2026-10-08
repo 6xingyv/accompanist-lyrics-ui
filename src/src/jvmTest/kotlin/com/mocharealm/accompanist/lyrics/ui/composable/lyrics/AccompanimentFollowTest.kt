@@ -1,5 +1,7 @@
 package com.mocharealm.accompanist.lyrics.ui.composable.lyrics
 
+import com.mocharealm.accompanist.lyrics.ui.internal.test.TestSceneDispatcher
+
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.snapshots.Snapshot
 import androidx.compose.ui.InternalComposeUiApi
@@ -31,11 +33,13 @@ class AccompanimentFollowTest {
         val time = mutableIntStateOf(0)
         val state = LyricsLazyListState()
         state.setInterludeItem(1)
-        val recomposer = FrameRecomposer(kotlinx.coroutines.Dispatchers.Unconfined)
+        val dispatcher = TestSceneDispatcher()
+        val recomposer = FrameRecomposer(dispatcher)
         val scene = CanvasLayersComposeScene(recomposer, size = IntSize(400, 900))
         val canvas = Canvas(ImageBitmap(400, 900))
         var nanos = 0L
         fun frame() {
+            dispatcher.runCurrent()
             Snapshot.sendApplyNotifications()
             nanos += 16_666_667L
             recomposer.performFrame(nanos)
@@ -97,6 +101,7 @@ class AccompanimentFollowTest {
         } finally {
             scene.close()
             recomposer.close()
+            dispatcher.runCurrent()
         }
     }
 
@@ -115,11 +120,13 @@ class AccompanimentFollowTest {
         )
         val lyrics = SyncedLyrics(listOf(main, acc, next))
         val state = LyricsLazyListState()
-        val recomposer = FrameRecomposer(kotlinx.coroutines.Dispatchers.Unconfined)
+        val dispatcher = TestSceneDispatcher()
+        val recomposer = FrameRecomposer(dispatcher)
         val scene = CanvasLayersComposeScene(recomposer, size = IntSize(400, 900))
         val canvas = Canvas(ImageBitmap(400, 900))
         var nanos = 0L
         fun frame() {
+            dispatcher.runCurrent()
             Snapshot.sendApplyNotifications()
             nanos += 16_666_667L
             recomposer.performFrame(nanos)
@@ -145,6 +152,7 @@ class AccompanimentFollowTest {
         } finally {
             scene.close()
             recomposer.close()
+            dispatcher.runCurrent()
         }
     }
 
@@ -173,11 +181,13 @@ class AccompanimentFollowTest {
         ))
         val time = mutableIntStateOf(160000)
         val state = LyricsLazyListState()
-        val recomposer = FrameRecomposer(kotlinx.coroutines.Dispatchers.Unconfined)
+        val dispatcher = TestSceneDispatcher()
+        val recomposer = FrameRecomposer(dispatcher)
         val scene = CanvasLayersComposeScene(frameRecomposer = recomposer, size = IntSize(400, 900))
         val canvas = Canvas(ImageBitmap(400, 900))
         var nanos = 0L
         fun frame() {
+            dispatcher.runCurrent()
             Snapshot.sendApplyNotifications()
             nanos += 16_666_667L
             recomposer.performFrame(nanos)
@@ -208,6 +218,6 @@ class AccompanimentFollowTest {
                     if (time.intValue >= 169000) assertTrue(kotlin.math.abs(aggregateTop) <= 1.0, "Aggregate must settle at anchor: $aggregateTop")
                 }
             }
-        } finally { scene.close(); recomposer.close() }
+        } finally { scene.close(); recomposer.close(); dispatcher.runCurrent() }
     }
 }

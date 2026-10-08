@@ -1,5 +1,7 @@
 package com.mocharealm.accompanist.lyrics.ui.composable.lyrics
 
+import com.mocharealm.accompanist.lyrics.ui.internal.test.TestSceneDispatcher
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -13,7 +15,6 @@ import androidx.compose.ui.scene.CanvasLayersComposeScene
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import com.mocharealm.accompanist.lyrics.ui.internal.effects.lyricsEdgeFade
-import kotlinx.coroutines.Dispatchers
 import kotlin.math.abs
 import kotlin.test.*
 
@@ -24,13 +25,15 @@ class LyricsFadeTest {
         var top by mutableStateOf<LyricsFade>(LyricsFade.ToAnchor(16.dp))
         var bottom by mutableStateOf<LyricsFade>(LyricsFade.Fraction(0.5f))
         var anchor by mutableStateOf(40.dp)
-        val recomposer = FrameRecomposer(Dispatchers.Unconfined)
+        val dispatcher = TestSceneDispatcher()
+        val recomposer = FrameRecomposer(dispatcher)
         val scene = CanvasLayersComposeScene(recomposer, size = IntSize(100, 100))
         val bitmap = ImageBitmap(100, 200)
         val canvas = Canvas(bitmap)
         val clear = Paint().apply { blendMode = BlendMode.Clear }
         var nanos = 0L
         fun check(height: Int, topLength: Float, bottomLength: Float) {
+            dispatcher.runCurrent()
             Snapshot.sendApplyNotifications()
             nanos += 16_666_667L
             recomposer.performFrame(nanos)
@@ -67,6 +70,7 @@ class LyricsFadeTest {
         } finally {
             scene.close()
             recomposer.close()
+            dispatcher.runCurrent()
         }
     }
 }

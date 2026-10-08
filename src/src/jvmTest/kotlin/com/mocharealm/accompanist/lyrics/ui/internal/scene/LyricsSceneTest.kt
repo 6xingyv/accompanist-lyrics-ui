@@ -1,5 +1,7 @@
 package com.mocharealm.accompanist.lyrics.ui.internal.scene
 
+import com.mocharealm.accompanist.lyrics.ui.internal.test.TestSceneDispatcher
+
 import androidx.compose.runtime.*
 import androidx.compose.runtime.snapshots.Snapshot
 import androidx.compose.ui.InternalComposeUiApi
@@ -26,7 +28,6 @@ import com.mocharealm.accompanist.lyrics.ui.preparation.MeasuredLyricsLine
 import com.mocharealm.accompanist.lyrics.ui.profile.ProfileTextUnit
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.*
-import kotlinx.coroutines.Dispatchers
 
 @OptIn(InternalComposeUiApi::class)
 class LyricsSceneTest {
@@ -54,12 +55,14 @@ class LyricsSceneTest {
         val color = mutableStateOf(Color.White)
         val width = mutableFloatStateOf(400f)
         val provider = mutableStateOf<() -> Int>({ 1000 })
-        val recomposer = FrameRecomposer(Dispatchers.Unconfined)
+        val dispatcher = TestSceneDispatcher()
+        val recomposer = FrameRecomposer(dispatcher)
         val host = CanvasLayersComposeScene(recomposer, size = IntSize(500, 500))
         val canvas = Canvas(ImageBitmap(500, 500))
         var published: LyricsScene? = null
         var nanos = 0L
         fun frame() {
+            dispatcher.runCurrent()
             Snapshot.sendApplyNotifications()
             nanos += 16_666_667L
             recomposer.performFrame(nanos)
@@ -116,6 +119,7 @@ class LyricsSceneTest {
         } finally {
             host.close()
             recomposer.close()
+            dispatcher.runCurrent()
         }
     }
 }

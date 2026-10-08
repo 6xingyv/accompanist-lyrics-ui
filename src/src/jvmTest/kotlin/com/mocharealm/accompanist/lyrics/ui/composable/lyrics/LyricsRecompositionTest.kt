@@ -1,5 +1,7 @@
 package com.mocharealm.accompanist.lyrics.ui.composable.lyrics
 
+import com.mocharealm.accompanist.lyrics.ui.internal.test.TestSceneDispatcher
+
 import androidx.compose.runtime.Composer
 import androidx.compose.runtime.CompositionTracer
 import androidx.compose.runtime.InternalComposeTracingApi
@@ -44,11 +46,13 @@ class LyricsRecompositionTest {
         val translation = mutableStateOf(true)
         val phonetic = mutableStateOf(true)
         val state = LyricsLazyListState()
-        val recomposer = FrameRecomposer(kotlinx.coroutines.Dispatchers.Unconfined)
+        val dispatcher = TestSceneDispatcher()
+        val recomposer = FrameRecomposer(dispatcher)
         val scene = CanvasLayersComposeScene(frameRecomposer = recomposer, size = IntSize(400, 900))
         val canvas = Canvas(ImageBitmap(400, 900))
         var nanos = 0L
         fun frame() {
+            dispatcher.runCurrent()
             Snapshot.sendApplyNotifications()
             nanos += 16_666_667L
             recomposer.performFrame(nanos)
@@ -75,7 +79,7 @@ class LyricsRecompositionTest {
                     assertEquals(0f, state.chain.offset(3), 0.1f, "Caption resize must not excite the anchor spring")
                 }
             }
-        } finally { scene.close(); recomposer.close() }
+        } finally { scene.close(); recomposer.close(); dispatcher.runCurrent() }
     }
 
     @Test
@@ -101,11 +105,13 @@ class LyricsRecompositionTest {
         val lyrics = SyncedLyrics(listOf(acc, main))
         val position = mutableIntStateOf(3400)
         val state = LyricsLazyListState()
-        val recomposer = FrameRecomposer(kotlinx.coroutines.Dispatchers.Unconfined)
+        val dispatcher = TestSceneDispatcher()
+        val recomposer = FrameRecomposer(dispatcher)
         val scene = CanvasLayersComposeScene(frameRecomposer = recomposer, size = IntSize(600, 900))
         val canvas = Canvas(ImageBitmap(600, 900))
         var nanos = 0L
         fun frame() {
+            dispatcher.runCurrent()
             Snapshot.sendApplyNotifications()
             nanos += 16_666_667L
             recomposer.performFrame(nanos)
@@ -148,6 +154,7 @@ class LyricsRecompositionTest {
         } finally {
             scene.close()
             recomposer.close()
+            dispatcher.runCurrent()
         }
     }
 
@@ -219,12 +226,14 @@ class LyricsRecompositionTest {
             )
         val captions = mutableStateOf(true)
         val position = mutableIntStateOf(1000)
-        val recomposer = FrameRecomposer(kotlinx.coroutines.Dispatchers.Unconfined)
+        val dispatcher = TestSceneDispatcher()
+        val recomposer = FrameRecomposer(dispatcher)
         val scene = CanvasLayersComposeScene(frameRecomposer = recomposer, size = IntSize(600, 900))
         val bitmap = ImageBitmap(600, 900)
         val canvas = Canvas(bitmap)
         var nanos = 0L
         fun frame() {
+            dispatcher.runCurrent()
             Snapshot.sendApplyNotifications()
             nanos += 16_666_667L
             recomposer.performFrame(nanos)
@@ -387,6 +396,7 @@ class LyricsRecompositionTest {
         } finally {
             scene.close()
             recomposer.close()
+            dispatcher.runCurrent()
             Composer.setTracer(null)
         }
     }

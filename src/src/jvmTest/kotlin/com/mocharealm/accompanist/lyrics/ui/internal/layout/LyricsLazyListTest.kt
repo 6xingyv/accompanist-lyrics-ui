@@ -1,5 +1,7 @@
 package com.mocharealm.accompanist.lyrics.ui.internal.layout
 
+import com.mocharealm.accompanist.lyrics.ui.internal.test.TestSceneDispatcher
+
 import com.mocharealm.accompanist.lyrics.ui.composable.list.*
 import com.mocharealm.accompanist.lyrics.ui.diagnostics.LyricsSpringTrace
 import java.nio.ByteBuffer
@@ -1032,7 +1034,8 @@ class LyricsLazyListTest {
     }
 
     private class Host : AutoCloseable {
-        val recomposer = FrameRecomposer(Dispatchers.Unconfined)
+        val dispatcher = TestSceneDispatcher()
+        val recomposer = FrameRecomposer(dispatcher)
         val scene = CanvasLayersComposeScene(recomposer, size = IntSize(400, 600))
         val canvas = Canvas(ImageBitmap(400, 600))
         var millis = 0L
@@ -1048,6 +1051,7 @@ class LyricsLazyListTest {
 
         fun frame(step: Long = 10L) {
             millis += step
+            dispatcher.runCurrent()
             Snapshot.sendApplyNotifications()
             recomposer.performFrame(millis * 1_000_000)
             scene.measureAndLayout()
@@ -1057,6 +1061,7 @@ class LyricsLazyListTest {
         override fun close() {
             scene.close()
             recomposer.close()
+            dispatcher.runCurrent()
         }
     }
 

@@ -1,5 +1,7 @@
 package com.mocharealm.accompanist.lyrics.ui.composable.lyrics
 
+import com.mocharealm.accompanist.lyrics.ui.internal.test.TestSceneDispatcher
+
 import androidx.compose.foundation.layout.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.snapshots.Snapshot
@@ -26,7 +28,6 @@ import com.mocharealm.accompanist.lyrics.ui.internal.test.prepare
 import com.mocharealm.accompanist.lyrics.ui.internal.test.source
 import com.mocharealm.accompanist.lyrics.ui.preparation.PreparedLyrics
 import com.mocharealm.accompanist.lyrics.ui.profile.*
-import kotlinx.coroutines.Dispatchers
 import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlin.test.*
@@ -39,11 +40,13 @@ class InlinePhoneticRevealTest {
         var creations = 0
         var disposals = 0
         var height = -1
-        val recomposer = FrameRecomposer(Dispatchers.Unconfined)
+        val dispatcher = TestSceneDispatcher()
+        val recomposer = FrameRecomposer(dispatcher)
         val scene = CanvasLayersComposeScene(recomposer, size = IntSize(300, 200))
         val canvas = Canvas(ImageBitmap(300, 200))
         var nanos = 0L
         fun frame() {
+            dispatcher.runCurrent()
             Snapshot.sendApplyNotifications()
             nanos += 16_666_667L
             recomposer.performFrame(nanos)
@@ -76,6 +79,7 @@ class InlinePhoneticRevealTest {
         } finally {
             scene.close()
             recomposer.close()
+            dispatcher.runCurrent()
         }
         assertEquals(1, disposals)
     }
@@ -99,7 +103,8 @@ class InlinePhoneticRevealTest {
             val resources = LyricsRenderResources(lyrics, Color.White, Density(1f), direction)
             val raster = resources.raster(line)
             val paints = RowPaints(Color.White)
-            val recomposer = FrameRecomposer(Dispatchers.Unconfined)
+            val dispatcher = TestSceneDispatcher()
+            val recomposer = FrameRecomposer(dispatcher)
             val scene = CanvasLayersComposeScene(recomposer, size = IntSize(300, 200))
             val actual = ImageBitmap(300, 200)
             val canvas = Canvas(actual)
@@ -114,6 +119,7 @@ class InlinePhoneticRevealTest {
                 for (time in listOf(0, 1500, Int.MAX_VALUE)) {
                     playback.row(row).time.intValue = time
                     repeat(3) {
+                        dispatcher.runCurrent()
                         Snapshot.sendApplyNotifications()
                         nanos += 16_666_667L
                         recomposer.performFrame(nanos)
@@ -140,6 +146,7 @@ class InlinePhoneticRevealTest {
             } finally {
                 scene.close()
                 recomposer.close()
+                dispatcher.runCurrent()
             }
         }
     }
@@ -168,11 +175,13 @@ class InlinePhoneticRevealTest {
                 var shown by mutableStateOf(initiallyShown)
                 var actualHeight = 0
                 var referenceHeight = 0
-                val recomposer = FrameRecomposer(Dispatchers.Unconfined)
+                val dispatcher = TestSceneDispatcher()
+                val recomposer = FrameRecomposer(dispatcher)
                 val scene = CanvasLayersComposeScene(recomposer, size = IntSize(320, 800))
                 val canvas = Canvas(ImageBitmap(320, 800))
                 var nanos = 0L
                 fun frame() {
+                    dispatcher.runCurrent()
                     Snapshot.sendApplyNotifications()
                     nanos += 16_666_667L
                     recomposer.performFrame(nanos)
@@ -214,6 +223,7 @@ class InlinePhoneticRevealTest {
                 } finally {
                     scene.close()
                     recomposer.close()
+                    dispatcher.runCurrent()
                 }
             }
         }

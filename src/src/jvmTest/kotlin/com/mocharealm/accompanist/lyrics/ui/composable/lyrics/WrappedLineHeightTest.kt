@@ -1,5 +1,7 @@
 package com.mocharealm.accompanist.lyrics.ui.composable.lyrics
 
+import com.mocharealm.accompanist.lyrics.ui.internal.test.TestSceneDispatcher
+
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.snapshots.Snapshot
@@ -19,7 +21,6 @@ import com.mocharealm.accompanist.lyrics.ui.profile.ProfileTextUnit
 import com.mocharealm.accompanist.lyrics.ui.profile.DefaultLyricsProfile
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.test.*
-import kotlinx.coroutines.Dispatchers
 
 @OptIn(InternalComposeUiApi::class)
 class WrappedLineHeightTest {
@@ -45,11 +46,13 @@ class WrappedLineHeightTest {
             )
         val lyrics = SyncedLyrics(listOf(line))
         val state = LyricsLazyListState()
-        val recomposer = FrameRecomposer(Dispatchers.Unconfined)
+        val dispatcher = TestSceneDispatcher()
+        val recomposer = FrameRecomposer(dispatcher)
         val scene = CanvasLayersComposeScene(recomposer, size = IntSize(320, 900))
         val canvas = Canvas(ImageBitmap(320, 900))
         var nanos = 0L
         fun frame() {
+            dispatcher.runCurrent()
             Snapshot.sendApplyNotifications()
             nanos += 16_666_667L
             recomposer.performFrame(nanos)
@@ -88,6 +91,7 @@ class WrappedLineHeightTest {
         } finally {
             scene.close()
             recomposer.close()
+            dispatcher.runCurrent()
         }
     }
 }

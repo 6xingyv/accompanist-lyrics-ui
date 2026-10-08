@@ -17,7 +17,7 @@ import com.mocharealm.accompanist.lyrics.core.model.synced.SyncedLine
 import com.mocharealm.accompanist.lyrics.ui.composable.list.LyricsLazyListState
 import com.mocharealm.accompanist.lyrics.ui.profile.FallbackProfile
 import kotlin.test.*
-import kotlinx.coroutines.Dispatchers
+import com.mocharealm.accompanist.lyrics.ui.internal.test.TestSceneDispatcher
 
 @OptIn(InternalComposeUiApi::class)
 class LyricsAnchorTest {
@@ -31,13 +31,15 @@ class LyricsAnchorTest {
         var anchor by mutableStateOf<LyricsAnchor>(LyricsAnchor.Fixed(32.dp))
         var height by mutableStateOf(600.dp)
         val time = mutableIntStateOf(5000)
-        val recomposer = FrameRecomposer(Dispatchers.Unconfined)
+        val dispatcher = TestSceneDispatcher()
+        val recomposer = FrameRecomposer(dispatcher)
         val scene = CanvasLayersComposeScene(recomposer, size = IntSize(400, 1000))
         val bitmap = ImageBitmap(400, 1000)
         val canvas = Canvas(bitmap)
         val clear = Paint().apply { blendMode = BlendMode.Clear }
         var nanos = 0L
         fun frame() {
+            dispatcher.runCurrent()
             Snapshot.sendApplyNotifications()
             nanos += 16_666_667L
             recomposer.performFrame(nanos)
@@ -49,9 +51,8 @@ class LyricsAnchorTest {
             repeat(150) { frame(); Thread.sleep(2) }
             val pixels = IntArray(400 * 1000)
             // Inactive items use 40% opacity; the focused lyric is brighter.
-            // Geometry readiness does not guarantee on-demand rasters have arrived. Allow
-            // their worker to finish under full-suite load, keeping the pixel assertion intact.
-            val deadline = System.nanoTime() + 20_000_000_000L
+            // Raster publication is asynchronous; wait for focused pixels as well as geometry.
+            val deadline = System.nanoTime() + 10_000_000_000L
             var first: Int
             do {
                 bitmap.readPixels(pixels)
@@ -60,7 +61,7 @@ class LyricsAnchorTest {
                 frame()
                 Thread.sleep(2)
             } while (System.nanoTime() < deadline)
-            assertTrue(first >= 0, "Focused lyric must be visibly drawn after raster preparation: time=${time.intValue}, anchor=$anchor, ready=${state.ready}, position=${state.position}")
+            assertTrue(first >= 0, "Focused lyric must be visibly drawn after raster preparation: time=${time.intValue}, anchor=$anchor, ready=${state.ready}, position=${state.position}, maxAlpha=${pixels.maxOf { it ushr 24 }}")
             return first / 400
         }
         try {
@@ -102,6 +103,7 @@ class LyricsAnchorTest {
         } finally {
             scene.close()
             recomposer.close()
+            dispatcher.runCurrent()
         }
     }
 }

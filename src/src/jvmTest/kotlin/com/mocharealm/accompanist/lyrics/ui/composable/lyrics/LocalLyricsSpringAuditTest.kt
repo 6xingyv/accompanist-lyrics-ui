@@ -1,5 +1,7 @@
 package com.mocharealm.accompanist.lyrics.ui.composable.lyrics
 
+import com.mocharealm.accompanist.lyrics.ui.internal.test.TestSceneDispatcher
+
 import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.FloatTweenSpec
@@ -91,7 +93,8 @@ class LocalLyricsSpringAuditTest {
                 val time = mutableIntStateOf(if (playthrough) 0 else main.first().start)
                 var phoneticShown by mutableStateOf(true)
                 var translationShown by mutableStateOf(true)
-                val recomposer = FrameRecomposer(Dispatchers.Unconfined)
+                val dispatcher = TestSceneDispatcher()
+                val recomposer = FrameRecomposer(dispatcher)
                 val scene = CanvasLayersComposeScene(recomposer, size = IntSize(400, 900))
                 val canvas = Canvas(ImageBitmap(400, 900))
                 lateinit var scope: CoroutineScope
@@ -107,6 +110,7 @@ class LocalLyricsSpringAuditTest {
                     if (play) time.intValue += 16
                     millis += 16
                     state.chain.traceMarker(200, eventIndex = phase, eventValue = time.intValue.toDouble(), eventValue2 = millis.toDouble())
+                    dispatcher.runCurrent()
                     Snapshot.sendApplyNotifications()
                     recomposer.performFrame(millis * 1_000_000)
                     scene.measureAndLayout()
@@ -320,6 +324,7 @@ class LocalLyricsSpringAuditTest {
                     trace.close()
                     scene.close()
                     recomposer.close()
+                    dispatcher.runCurrent()
                 }
             } catch (failure: Throwable) {
                 if (failure is VirtualMachineError) throw failure

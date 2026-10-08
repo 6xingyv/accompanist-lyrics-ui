@@ -1,5 +1,7 @@
 package com.mocharealm.accompanist.lyrics.ui.composable.lyrics
 
+import com.mocharealm.accompanist.lyrics.ui.internal.test.TestSceneDispatcher
+
 import com.mocharealm.accompanist.lyrics.ui.internal.effects.LyricsReveal
 
 import androidx.compose.foundation.Canvas
@@ -17,7 +19,6 @@ import androidx.compose.ui.scene.CanvasLayersComposeScene
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import kotlin.test.*
-import kotlinx.coroutines.Dispatchers
 
 @OptIn(InternalComposeUiApi::class)
 class LyricsRevealTest {
@@ -25,7 +26,8 @@ class LyricsRevealTest {
     fun shrinkingItemKeepsPixelsOutsideLayoutForEveryRevealOrigin() {
         for (origin in
             listOf(TransformOrigin.Center, TransformOrigin(0f, 0f), TransformOrigin(1f, 1f))) {
-            val recomposer = FrameRecomposer(Dispatchers.Unconfined)
+            val dispatcher = TestSceneDispatcher()
+            val recomposer = FrameRecomposer(dispatcher)
             val scene = CanvasLayersComposeScene(recomposer, size = IntSize(300, 400))
             val bitmap = ImageBitmap(300, 400)
             val canvas = Canvas(bitmap)
@@ -34,6 +36,7 @@ class LyricsRevealTest {
             var itemHeight = 0
             var nanos = 0L
             fun frame() {
+                dispatcher.runCurrent()
                 Snapshot.sendApplyNotifications()
                 nanos += 16_666_667
                 recomposer.performFrame(nanos)
@@ -91,13 +94,15 @@ class LyricsRevealTest {
             } finally {
                 scene.close()
                 recomposer.close()
+                dispatcher.runCurrent()
             }
         }
     }
 
     @Test
     fun exitRetainsContentAndCanReverseBeforeDisposal() {
-        val recomposer = FrameRecomposer(Dispatchers.Unconfined)
+        val dispatcher = TestSceneDispatcher()
+        val recomposer = FrameRecomposer(dispatcher)
         val scene = CanvasLayersComposeScene(recomposer, size = IntSize(200, 200))
         val bitmap = ImageBitmap(200, 200)
         val canvas = Canvas(bitmap)
@@ -107,6 +112,7 @@ class LyricsRevealTest {
         var textMeasures = 0
         var nanos = 0L
         fun frame() {
+            dispatcher.runCurrent()
             Snapshot.sendApplyNotifications()
             nanos += 16_666_667
             recomposer.performFrame(nanos)
@@ -162,6 +168,7 @@ class LyricsRevealTest {
         } finally {
             scene.close()
             recomposer.close()
+            dispatcher.runCurrent()
         }
     }
 }

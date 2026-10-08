@@ -1,5 +1,7 @@
 package com.mocharealm.accompanist.lyrics.ui.composable.lyrics
 
+import com.mocharealm.accompanist.lyrics.ui.internal.test.TestSceneDispatcher
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
@@ -13,7 +15,6 @@ import androidx.compose.ui.platform.FrameRecomposer
 import androidx.compose.ui.scene.CanvasLayersComposeScene
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.Dispatchers
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -24,7 +25,8 @@ class LyricsFocusTest {
     fun focusUpdatesRenderedAlphaScaleAndBlurInBothDirections() {
         val focused = mutableStateOf(true)
         val blur = mutableFloatStateOf(0f)
-        val recomposer = FrameRecomposer(Dispatchers.Unconfined)
+        val dispatcher = TestSceneDispatcher()
+        val recomposer = FrameRecomposer(dispatcher)
         val scene = CanvasLayersComposeScene(recomposer, size = IntSize(100, 100))
         val bitmap = ImageBitmap(100, 100)
         val canvas = Canvas(bitmap)
@@ -32,6 +34,7 @@ class LyricsFocusTest {
         var nanos = 0L
         fun settle(): Int {
             repeat(120) {
+                dispatcher.runCurrent()
                 Snapshot.sendApplyNotifications()
                 nanos += 16_666_667L
                 recomposer.performFrame(nanos)
@@ -65,6 +68,7 @@ class LyricsFocusTest {
         } finally {
             scene.close()
             recomposer.close()
+            dispatcher.runCurrent()
         }
     }
 }
