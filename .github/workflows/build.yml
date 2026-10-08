@@ -18,6 +18,7 @@ permissions:
 jobs:
   version:
     runs-on: ubuntu-24.04
+    timeout-minutes: 35
     outputs:
       version: ${{ steps.version.outputs.version }}
       prerelease: ${{ steps.version.outputs.prerelease }}
@@ -46,6 +47,37 @@ jobs:
               raise SystemExit('Use a tag such as v2.0.0 or v2.0.0-rc.2')
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
               output.write(f'version={version}\nprerelease={str("-" in version).lower()}\n')
+          PY
+
+      - name: Wait for dependency publications
+        shell: bash
+        run: |
+          python3 -u - <<'PY'
+          import time, tomllib
+          from pathlib import Path
+          from urllib.error import HTTPError, URLError
+          from urllib.request import Request, urlopen
+          versions = tomllib.loads(Path('gradle/libs.versions.toml').read_text())['versions']
+          dependencies = [('lyrics-core', versions['lyricsCore'])]
+          dependencies += [(f'lyrics-phonetics-{module}', versions['lyricsPhonetics'])
+                           for module in ['runtime', 'data-mandarin', 'data-cantonese', 'data-japanese']]
+          deadline = time.monotonic() + 30 * 60
+          while True:
+              missing = []
+              for artifact, version in dependencies:
+                  url = f'https://repo.maven.apache.org/maven2/com/mocharealm/accompanist/{artifact}/{version}/{artifact}-{version}.pom'
+                  try:
+                      with urlopen(Request(url, method='HEAD'), timeout=10):
+                          pass
+                  except (HTTPError, URLError, TimeoutError):
+                      missing.append(f'{artifact}:{version}')
+              if not missing:
+                  print('All release dependencies are available on Maven Central')
+                  break
+              if time.monotonic() >= deadline:
+                  raise SystemExit(f'Maven dependencies are still unavailable: {missing}')
+              print(f'Waiting for Maven Central: {missing}')
+              time.sleep(30)
           PY
 
   android:
