@@ -11,6 +11,7 @@ import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.LineBreak
+import androidx.compose.ui.text.style.TextMotion
 import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.createFontFamilyResolver
 import androidx.compose.ui.unit.Density
@@ -413,12 +414,14 @@ class LyricsPreparationTest {
 
     @Test
     fun cjkCharacterSlicesPreserveShapedPixelsAndGraphemes() {
+        // Preparation uses animated text metrics, including for system fallback fonts.
+        val glyphStyle = style.copy(textMotion = TextMotion.Animated)
         for ((text, characterCount) in
             listOf("生活" to 2, "哈哈" to 2, "か\u3099く" to 2, "きょう" to 3, "한글" to 2)) {
             val group = CjkProfile.groups(listOf(KaraokeSyllable(text, 1000, 7000))).flatten()
-            val units = CjkProfile.prepare(group, measurer, style)
+            val units = CjkProfile.prepare(group, measurer, glyphStyle)
             assertEquals(characterCount, units.size, text)
-            val whole = measurer.measure(text, style, softWrap = false)
+            val whole = measurer.measure(text, glyphStyle, softWrap = false)
             fun image(draw: androidx.compose.ui.graphics.drawscope.DrawScope.() -> Unit): IntArray {
                 val width = whole.size.width + 48
                 val height = whole.size.height + 48
@@ -439,7 +442,8 @@ class LyricsPreparationTest {
                 }
             }
             val expected = image { drawText(whole, Color.White) }
-            assertContentEquals(expected, actual, "$text must retain its shaped pixels")
+            assertContentEquals(expected, actual,
+                "$text must retain its shaped pixels; cells=${units.map { it.left to it.right }}")
         }
     }
 
@@ -711,8 +715,15 @@ class LyricsPreparationTest {
             assertTrue(group.width <= 101f)
             for (unit in group.units) assertTrue(unit.position.x + unit.width <= 101f)
         }
-        val units = groups.flatMap { it.units }
-        assertTrue(units.all { it.text.layout === units.first().text.layout })
+        for (group in groups) {
+            assertTrue(group.sharedLayout, "Each wrapped group keeps a single shaped layout")
+        }
+        // Fonts without safe ink cuts reshape each wrapped fragment instead of slicing glyphs.
+        assertEquals("Supercalifragilisticexpialidocious", groups.joinToString("") { group ->
+            val combined = assertNotNull(group.staticText)
+            val range = assertNotNull(combined.sourceRange)
+            combined.layout.layoutInput.text.text.substring(range.min, range.max)
+        })
     }
 
     @Test

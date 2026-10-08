@@ -1167,9 +1167,14 @@ class LyricsLazyListTest {
             host.scope.launch { state.interactionSource.emit(DragInteraction.Stop(drag)) }
             host.frame()
             assertTrue(state.isManualScrolling, "Releasing must retain clear text during the delay")
-            runBlocking { delay(150) }
-            repeat(3) { host.frame() }
-            assertFalse(state.isManualScrolling)
+            // Snapshot collectors and the delay continuation also need owner-thread frames.
+            // Waiting without pumping frames can postpone the start of the resume timer.
+            val deadline = System.nanoTime() + 2_000_000_000L
+            while (state.isManualScrolling && System.nanoTime() < deadline) {
+                runBlocking { delay(10) }
+                host.frame()
+            }
+            assertFalse(state.isManualScrolling, "Following resumes after the release delay")
             val secondDrag = DragInteraction.Start()
             host.scope.launch { state.interactionSource.emit(secondDrag) }
             host.frame()
