@@ -22,7 +22,7 @@ jobs:
     needs: packages
     runs-on: macos-26
     environment: android-release
-    timeout-minutes: 60
+    timeout-minutes: 80
     steps:
       - uses: actions/checkout@v7
         with:
@@ -45,7 +45,8 @@ jobs:
           if [[ -z "$ORG_GRADLE_PROJECT_signingInMemoryKeyId" ]]; then
             unset ORG_GRADLE_PROJECT_signingInMemoryKeyId
           fi
-          bash ./gradlew --no-daemon --max-workers=2 '-Dorg.gradle.jvmargs=-Xmx3g -XX:MaxMetaspaceSize=768m' "-PreleaseVersion=$VERSION" :src:publishToMavenCentral
+          bash ./gradlew --no-daemon --max-workers=2 '-Dorg.gradle.jvmargs=-Xmx3g -XX:MaxMetaspaceSize=768m' \
+            -PSONATYPE_CLOSE_TIMEOUT_SECONDS=3600 "-PreleaseVersion=$VERSION" :src:publishToMavenCentral
 
   release:
     needs: [packages, publish]

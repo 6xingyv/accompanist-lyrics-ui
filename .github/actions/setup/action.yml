@@ -10,6 +10,35 @@ runs:
     - uses: actions/setup-python@v7
       with:
         python-version: '3.12'
+    - name: Download JetBrains Runtime SDK
+      id: jbr
+      shell: bash
+      run: |
+        python3 - <<'PY'
+        import hashlib, os, shutil
+        from pathlib import Path
+        from urllib.request import urlopen
+        platform = {'Windows': 'windows', 'Linux': 'linux', 'macOS': 'osx'}[os.environ['RUNNER_OS']]
+        arch = {'X64': 'x64', 'ARM64': 'aarch64'}[os.environ['RUNNER_ARCH']]
+        name = f'jbrsdk-21.0.11-{platform}-{arch}-b1163.116.tar.gz'
+        url = f'https://cache-redirector.jetbrains.com/intellij-jbr/{name}'
+        archive = Path(os.environ['RUNNER_TEMP']) / name
+        with urlopen(url, timeout=60) as source, archive.open('wb') as output:
+            shutil.copyfileobj(source, output)
+        with urlopen(url + '.checksum', timeout=30) as source:
+            expected = source.read().decode().split()[0]
+        with archive.open('rb') as source:
+            actual = hashlib.file_digest(source, 'sha512').hexdigest()
+        if actual != expected:
+            raise SystemExit('JetBrains Runtime SDK checksum mismatch')
+        with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+            output.write(f'archive={archive}\n')
+        PY
+    - uses: actions/setup-java@v6
+      with:
+        distribution: jdkfile
+        java-version: '21'
+        jdk-file: ${{ steps.jbr.outputs.archive }}
     - uses: android-actions/setup-android@v4
       with:
         packages: 'platform-tools platforms;android-37.0 build-tools;36.0.0 build-tools;37.0.0'
