@@ -1,0 +1,16 @@
+name: Build tools
+description: Set up Java, Python, Android and Gradle
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-java@v6
+      with:
+        distribution: temurin
+        java-version: '21'
+    - uses: actions/setup-python@v7
+      with:
+        python-version: '3.12'
+    - uses: android-actions/setup-android@v4
+      with:
+        packages: 'platform-tools platforms;android-37.0 build-tools;36.0.0 build-tools;37.0.0'
+    - uses: gradle/actions/setup-gradle@v6

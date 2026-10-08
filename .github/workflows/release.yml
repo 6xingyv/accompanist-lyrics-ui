@@ -8,120 +8,29 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}-${{ github.sha }}
+  group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  build:
+  packages:
+    uses: ./.github/workflows/build.yml
+    with:
+      release: true
+    secrets: inherit
+
+  publish:
+    needs: packages
+    runs-on: macos-26
     environment: android-release
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    outputs:
-      version: ${{ steps.version.outputs.version }}
-      prerelease: ${{ steps.version.outputs.prerelease }}
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-
-      - uses: actions/setup-java@v6
-        with:
-          distribution: temurin
-          java-version: '21'
-
-      - uses: android-actions/setup-android@v4
-
-      - uses: gradle/actions/setup-gradle@v6
-
-      - name: Resolve version
-        id: version
-        shell: bash
-        run: |
-          version="${GITHUB_REF_NAME#v}"
-          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
-            echo '::error::Use a version tag such as v2.0.0 or v2.0.0-rc.1'
-            exit 1
-          fi
-          if [[ "$version" == *-SNAPSHOT ]]; then
-            echo '::error::SNAPSHOT versions are reserved for branch builds; use a release or prerelease tag.'
-            exit 1
-          fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          if [[ "$version" == *-* ]]; then
-            echo 'prerelease=true' >> "$GITHUB_OUTPUT"
-          else
-            echo 'prerelease=false' >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Configure APK signing
+      - uses: ./.github/actions/setup
+      - name: Publish all library targets to Maven Central
         env:
-          STORE_BASE64: ${{ secrets.RELEASE_STORE_BASE64 }}
-          STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
-        shell: bash
-        run: |
-          if [[ -z "$STORE_BASE64" || -z "$STORE_PASSWORD" || -z "$KEY_ALIAS" || -z "$KEY_PASSWORD" ]]; then
-            echo '::error::Tag releases require RELEASE_STORE_BASE64, RELEASE_STORE_PASSWORD, RELEASE_KEY_ALIAS, and RELEASE_KEY_PASSWORD in the android-release environment.'
-            exit 1
-          fi
-          umask 077
-          printf '%s' "$STORE_BASE64" | base64 --decode > "$RUNNER_TEMP/release.keystore"
-          if [[ ! -s "$RUNNER_TEMP/release.keystore" ]]; then
-            echo '::error::RELEASE_STORE_BASE64 did not produce a keystore file.'
-            exit 1
-          fi
-          echo "RELEASE_STORE_FILE=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
-
-      - name: Install Android build tools
-        run: sdkmanager 'platforms;android-37.0' 'build-tools;37.0.0'
-
-      - name: Test and package
-        env:
-          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
-          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
-          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
-          VERSION: ${{ steps.version.outputs.version }}
-        shell: bash
-        run: |
-          bash ./gradlew --no-daemon --max-workers=2 \
-            '-Dorg.gradle.jvmargs=-Xmx3g -XX:MaxMetaspaceSize=768m' \
-            "-PreleaseVersion=$VERSION" -PciPackaging=true \
-            :src:jvmTest :sample:shared:jvmTest :sample:desktop-app:classes \
-            :sample:android-app:assembleRelease :src:publishAllPublicationsToCiRepository
-
-      - name: Collect packages
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-          VARIANT: release
-        shell: bash
-        run: |
-          mkdir -p dist
-          for abi in arm64-v8a armeabi-v7a; do
-            cp "sample/android-app/build/outputs/apk/$VARIANT/android-app-$abi-$VARIANT.apk" \
-              "dist/lyrics-ui-sample-$VERSION-$abi-$VARIANT.apk"
-          done
-          (cd build/ci-maven && zip -qr "../../dist/lyrics-ui-$VERSION-maven.zip" .)
-          (cd dist && sha256sum *.apk *.zip > SHA256SUMS.txt)
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: lyrics-ui-${{ steps.version.outputs.version }}
-          path: dist/*
-          if-no-files-found: error
-          retention-days: 30
-      - name: Upload test reports
-        if: always()
-        uses: actions/upload-artifact@v6
-        with:
-          name: test-reports-${{ github.sha }}
-          path: |
-            src/build/reports/tests/
-            sample/shared/build/reports/tests/
-          retention-days: 14
-      - name: Publish to Maven Central
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ needs.packages.outputs.version }}
           ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
           ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
           ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_IN_MEMORY_KEY }}
@@ -129,43 +38,55 @@ jobs:
           ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_IN_MEMORY_KEY_PASSWORD }}
         shell: bash
         run: |
-          if [[ -z "$ORG_GRADLE_PROJECT_mavenCentralUsername" || -z "$ORG_GRADLE_PROJECT_mavenCentralPassword" || -z "$ORG_GRADLE_PROJECT_signingInMemoryKey" || -z "$ORG_GRADLE_PROJECT_signingInMemoryKeyPassword" ]]; then
-            echo '::error::Maven Central credentials/signing key are required for releases.'
+          if [[ -z "$ORG_GRADLE_PROJECT_mavenCentralUsername" || -z "$ORG_GRADLE_PROJECT_mavenCentralPassword" || -z "$ORG_GRADLE_PROJECT_signingInMemoryKey" ]]; then
+            echo '::error::Maven Central credentials and a signing key are required.'
             exit 1
           fi
-          # An unset optional key ID must not be passed as an empty Gradle property.
           if [[ -z "$ORG_GRADLE_PROJECT_signingInMemoryKeyId" ]]; then
             unset ORG_GRADLE_PROJECT_signingInMemoryKeyId
           fi
-          bash ./gradlew --no-daemon --max-workers=2 \
-            '-Dorg.gradle.jvmargs=-Xmx3g -XX:MaxMetaspaceSize=768m' \
-            "-PreleaseVersion=$VERSION" :src:publishToMavenCentral
-
-      - name: Remove signing material
-        if: always()
-        shell: bash
-        run: rm -f -- "$RUNNER_TEMP/release.keystore"
+          bash ./gradlew --no-daemon --max-workers=2 '-Dorg.gradle.jvmargs=-Xmx3g -XX:MaxMetaspaceSize=768m' "-PreleaseVersion=$VERSION" :src:publishToMavenCentral
 
   release:
-    needs: build
-    runs-on: ubuntu-latest
+    needs: [packages, publish]
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: write
     steps:
       - uses: actions/download-artifact@v8
         with:
-          name: lyrics-ui-${{ needs.build.outputs.version }}
+          pattern: lyrics-ui-${{ needs.packages.outputs.version }}-*
+          merge-multiple: true
           path: dist
+      - name: Verify assets and write checksums
+        env:
+          VERSION: ${{ needs.packages.outputs.version }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          version = os.environ['VERSION']
+          expected = [f'lyrics-ui-{version}-maven.zip']
+          expected += [f'lyrics-ui-sample-{version}-{platform}.{suffix}' for platform, suffix in [
+              ('windows-x64', 'exe'), ('macos-arm64', 'dmg'), ('macos-x64', 'dmg'),
+              ('linux-x64', 'flatpak'), ('ios-arm64-unsigned', 'ipa'),
+              ('android-arm64-v8a-release', 'apk'), ('android-armeabi-v7a-release', 'apk')]]
+          missing = [name for name in expected if not (Path('dist') / name).is_file()]
+          if missing:
+              raise SystemExit(f'Missing release assets: {missing}')
+          PY
+          (cd dist && sha256sum -- *.apk *.exe *.dmg *.flatpak *.ipa *.zip > SHA256SUMS.txt)
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
-          PRERELEASE: ${{ needs.build.outputs.prerelease }}
+          PRERELEASE: ${{ needs.packages.outputs.prerelease }}
         shell: bash
         run: |
-          # Create as draft so assets are attached before publishing an immutable release.
+          # Attach every platform package before publishing the immutable release.
           if gh release view "$TAG" --json isDraft > release.json; then
             if [[ "$(jq -r .isDraft release.json)" != true ]]; then
               echo '::error::This tag already has a published release; refusing to replace its assets.'

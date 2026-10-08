@@ -3,122 +3,17 @@ name: CI
 on:
   push:
     branches: ['**']
+  pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}-${{ github.sha }}
-  cancel-in-progress: false
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  build:
-    environment: android-release
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    outputs:
-      version: ${{ steps.version.outputs.version }}
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - uses: actions/setup-java@v6
-        with:
-          distribution: temurin
-          java-version: '21'
-      - uses: android-actions/setup-android@v4
-      - uses: gradle/actions/setup-gradle@v6
-
-      - name: Configure APK signing
-        env:
-          STORE_BASE64: ${{ secrets.RELEASE_STORE_BASE64 }}
-          STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
-        shell: bash
-        run: |
-          if [[ -z "$STORE_BASE64" || -z "$STORE_PASSWORD" || -z "$KEY_ALIAS" || -z "$KEY_PASSWORD" ]]; then
-            echo '::error::CI release APKs require all four APK signing secrets in the android-release environment.'
-            exit 1
-          fi
-          umask 077
-          printf '%s' "$STORE_BASE64" | base64 --decode > "$RUNNER_TEMP/release.keystore"
-          if [[ ! -s "$RUNNER_TEMP/release.keystore" ]]; then
-            echo '::error::RELEASE_STORE_BASE64 did not produce a keystore file.'
-            exit 1
-          fi
-          echo "RELEASE_STORE_FILE=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
-
-      - name: Resolve snapshot version
-        id: version
-        shell: bash
-        run: echo "version=0.0.0-${GITHUB_SHA:0:12}-SNAPSHOT" >> "$GITHUB_OUTPUT"
-
-      - name: Install Android build tools
-        run: sdkmanager 'platforms;android-37.0' 'build-tools;37.0.0'
-
-      - name: Test and package release APKs
-        env:
-          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
-          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
-          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
-          VERSION: ${{ steps.version.outputs.version }}
-        shell: bash
-        run: |
-          bash ./gradlew --no-daemon --max-workers=2 \
-            '-Dorg.gradle.jvmargs=-Xmx3g -XX:MaxMetaspaceSize=768m' \
-            "-PreleaseVersion=$VERSION" -PciPackaging=true \
-            :src:jvmTest :sample:shared:jvmTest :sample:desktop-app:classes \
-            :benchmark:assembleNonMinifiedRelease :sample:android-app:assembleNonMinifiedRelease \
-            :sample:android-app:assembleRelease :src:publishAllPublicationsToCiRepository
-
-      - name: Collect packages
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-          VARIANT: release
-        shell: bash
-        run: |
-          mkdir -p dist
-          for abi in arm64-v8a armeabi-v7a; do
-            cp "sample/android-app/build/outputs/apk/$VARIANT/android-app-$abi-$VARIANT.apk" \
-              "dist/lyrics-ui-sample-$VERSION-$abi-$VARIANT.apk"
-          done
-          (cd build/ci-maven && zip -qr "../../dist/lyrics-ui-$VERSION-maven.zip" .)
-          (cd dist && sha256sum *.apk *.zip > SHA256SUMS.txt)
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: lyrics-ui-${{ steps.version.outputs.version }}
-          path: dist/*
-          if-no-files-found: error
-          retention-days: 30
-
-      - name: Upload test reports
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: test-reports-${{ github.sha }}
-          path: |
-            src/build/reports/tests/
-            sample/shared/build/reports/tests/
-          retention-days: 14
-
-      - name: Remove signing material
-        if: always()
-        shell: bash
-        run: rm -f -- "$RUNNER_TEMP/release.keystore"
-
-#      - name: Publish snapshot to Maven Central
-#        env:
-#          VERSION: ${{ steps.version.outputs.version }}
-#          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
-#          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
-#        shell: bash
-#        run: |
-#          if [[ -z "$ORG_GRADLE_PROJECT_mavenCentralUsername" || -z "$ORG_GRADLE_PROJECT_mavenCentralPassword" ]]; then
-#            echo '::notice::Snapshot publishing skipped; configure MAVEN_CENTRAL_USERNAME and MAVEN_CENTRAL_PASSWORD to enable it.'
-#            exit 0
-#          fi
-#          bash ./gradlew --no-daemon --max-workers=2 \
-#            '-Dorg.gradle.jvmargs=-Xmx3g -XX:MaxMetaspaceSize=768m' \
-#            "-PreleaseVersion=$VERSION" -PciPackaging=true :src:publishToMavenCentral
+  packages:
+    uses: ./.github/workflows/build.yml
+    secrets: inherit

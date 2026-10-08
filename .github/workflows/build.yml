@@ -1,0 +1,279 @@
+name: Build packages
+
+on:
+  workflow_call:
+    inputs:
+      release:
+        type: boolean
+        default: false
+    outputs:
+      version:
+        value: ${{ jobs.version.outputs.version }}
+      prerelease:
+        value: ${{ jobs.version.outputs.prerelease }}
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Resolve version
+        id: version
+        env:
+          RELEASE: ${{ inputs.release }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os, re
+          from pathlib import Path
+          release = os.environ['RELEASE'] == 'true'
+          if release:
+              if os.environ['GITHUB_REF_TYPE'] != 'tag':
+                  raise SystemExit('Release builds require a version tag')
+              version = os.environ['GITHUB_REF_NAME'].removeprefix('v')
+          else:
+              base = re.search(r'getOrElse\("([0-9]+\.[0-9]+\.[0-9]+)[^"]*"\)', Path('build.gradle.kts').read_text())[1]
+              version = f'{base}-{os.environ["GITHUB_SHA"][:12]}-SNAPSHOT'
+          if not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?', version) or (release and version.endswith('-SNAPSHOT')):
+              raise SystemExit('Use a tag such as v2.0.0 or v2.0.0-rc.2')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'version={version}\nprerelease={str("-" in version).lower()}\n')
+          PY
+
+  android:
+    needs: version
+    runs-on: ubuntu-24.04
+    environment: android-release
+    timeout-minutes: 60
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - name: Configure release APK signing
+        if: inputs.release
+        env:
+          STORE_BASE64: ${{ secrets.RELEASE_STORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          if [[ -z "$STORE_BASE64" || -z "$STORE_PASSWORD" || -z "$KEY_ALIAS" || -z "$KEY_PASSWORD" ]]; then
+            echo '::error::All four APK signing secrets are required in android-release.'
+            exit 1
+          fi
+          umask 077
+          printf '%s' "$STORE_BASE64" | base64 --decode > "$RUNNER_TEMP/release.keystore"
+          test -s "$RUNNER_TEMP/release.keystore"
+          echo "RELEASE_STORE_FILE=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
+      - name: Test Android and build benchmark APKs
+        shell: bash
+        run: |
+          bash ./gradlew --no-daemon --max-workers=2 '-Dorg.gradle.jvmargs=-Xmx3g -XX:MaxMetaspaceSize=768m' "-PreleaseVersion=$VERSION" -PciPackaging=true \
+            :sample:android-app:testDebugUnitTest \
+            :benchmark:assembleNonMinifiedRelease :sample:android-app:assembleNonMinifiedRelease
+      - name: Build debug demo
+        if: ${{ !inputs.release }}
+        shell: bash
+        run: bash ./gradlew --no-daemon --max-workers=2 '-Dorg.gradle.jvmargs=-Xmx3g -XX:MaxMetaspaceSize=768m' "-PreleaseVersion=$VERSION" -PciPackaging=true :sample:android-app:assembleDebug
+      - name: Build signed release demo
+        if: inputs.release
+        env:
+          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+        shell: bash
+        run: bash ./gradlew --no-daemon --max-workers=2 '-Dorg.gradle.jvmargs=-Xmx3g -XX:MaxMetaspaceSize=768m' "-PreleaseVersion=$VERSION" -PciPackaging=true :sample:android-app:assembleRelease
+      - name: Collect APKs
+        env:
+          VARIANT: ${{ inputs.release && 'release' || 'debug' }}
+        shell: bash
+        run: |
+          mkdir -p dist
+          for abi in arm64-v8a armeabi-v7a; do
+            cp "sample/android-app/build/outputs/apk/$VARIANT/android-app-$abi-$VARIANT.apk" \
+              "dist/lyrics-ui-sample-$VERSION-android-$abi-$VARIANT.apk"
+          done
+      - uses: actions/upload-artifact@v7
+        with:
+          name: lyrics-ui-${{ env.VERSION }}-android
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+      - name: Test reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-reports-${{ env.VERSION }}-android
+          path: sample/android-app/build/reports/tests/
+          retention-days: 14
+      - name: Remove signing material
+        if: always()
+        shell: bash
+        run: rm -f -- "$RUNNER_TEMP/release.keystore"
+
+  desktop:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2025
+            platform: windows-x64
+            task: packageExe
+            extension: exe
+          - os: macos-26
+            platform: macos-arm64
+            task: packageDmg
+            extension: dmg
+          - os: macos-26-intel
+            platform: macos-x64
+            task: packageDmg
+            extension: dmg
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - name: Test and package desktop demo
+        shell: bash
+        run: |
+          bash ./gradlew --no-daemon --max-workers=2 '-Dorg.gradle.jvmargs=-Xmx3g -XX:MaxMetaspaceSize=768m' "-PreleaseVersion=$VERSION" -PciPackaging=true \
+            :sample:desktop-app:test :sample:desktop-app:${{ matrix.task }}
+      - name: Collect installer
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          EXTENSION: ${{ matrix.extension }}
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os, shutil
+          from pathlib import Path
+          packages = list(Path('sample/desktop-app/build/compose/binaries/main').rglob(f'*.{os.environ["EXTENSION"]}'))
+          if len(packages) != 1:
+              raise SystemExit(f'Expected one installer, found {packages}')
+          Path('dist').mkdir(exist_ok=True)
+          shutil.copy2(packages[0], f'dist/lyrics-ui-sample-{os.environ["VERSION"]}-{os.environ["PLATFORM"]}.{os.environ["EXTENSION"]}')
+          PY
+      - uses: actions/upload-artifact@v7
+        with:
+          name: lyrics-ui-${{ env.VERSION }}-${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+      - name: Test reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-reports-${{ env.VERSION }}-${{ matrix.platform }}
+          path: sample/desktop-app/build/reports/tests/
+          retention-days: 14
+
+  flatpak:
+    needs: version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - name: Install Flatpak and display tools
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak xvfb desktop-file-utils
+      - name: Test JVM and build bundled desktop app
+        shell: bash
+        run: |
+          xvfb-run -a bash ./gradlew --no-daemon --max-workers=2 '-Dorg.gradle.jvmargs=-Xmx3g -XX:MaxMetaspaceSize=768m' "-PreleaseVersion=$VERSION" -PciPackaging=true \
+            :src:jvmTest :sample:shared:jvmTest :sample:desktop-app:test :sample:desktop-app:createDistributable
+      - name: Package Flatpak
+        shell: bash
+        run: |
+          desktop-file-validate sample/desktop-app/packaging/flatpak/*.desktop
+          bash tools/packaging/flatpak.sh "$VERSION"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: lyrics-ui-${{ env.VERSION }}-linux-x64
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+      - name: Test reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-reports-${{ env.VERSION }}-linux
+          path: |
+            src/build/reports/tests/
+            sample/shared/build/reports/tests/
+            sample/desktop-app/build/reports/tests/
+          retention-days: 14
+
+  apple:
+    needs: version
+    runs-on: macos-26
+    timeout-minutes: 90
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - name: Test and build all library publications and iOS framework
+        shell: bash
+        run: |
+          bash ./gradlew --no-daemon --max-workers=2 '-Dorg.gradle.jvmargs=-Xmx3g -XX:MaxMetaspaceSize=768m' "-PreleaseVersion=$VERSION" -PciPackaging=true \
+            :src:jvmTest :sample:shared:jvmTest :src:publishAllPublicationsToCiRepository \
+            :sample:shared:linkReleaseFrameworkIosArm64
+      - name: Build iOS device demo
+        shell: bash
+        run: |
+          brew install xcodegen
+          bash tools/packaging/ios.sh "$VERSION"
+      - name: Archive Maven repository
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os, shutil
+          from pathlib import Path
+          repository = Path('build/ci-maven')
+          for module, suffix in [('lyrics-ui', 'pom'), ('lyrics-ui-jvm', 'jar'), ('lyrics-ui-android', 'aar'), ('lyrics-ui-iosarm64', 'klib')]:
+              path = repository / 'com/mocharealm/accompanist' / module / os.environ['VERSION'] / f'{module}-{os.environ["VERSION"]}.{suffix}'
+              if not path.is_file():
+                  raise SystemExit(f'Missing publication: {path}')
+          shutil.make_archive(f'dist/lyrics-ui-{os.environ["VERSION"]}-maven', 'zip', repository)
+          PY
+      - uses: actions/upload-artifact@v7
+        with:
+          name: lyrics-ui-${{ env.VERSION }}-apple
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+      - name: Test reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-reports-${{ env.VERSION }}-apple
+          path: |
+            src/build/reports/tests/
+            sample/shared/build/reports/tests/
+          retention-days: 14
