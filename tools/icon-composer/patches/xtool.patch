@@ -1,0 +1,273 @@
+diff --git a/Documentation/xtool.docc/Control.md b/Documentation/xtool.docc/Control.md
+index babd0c2..5e15ebc 100644
+--- a/Documentation/xtool.docc/Control.md
++++ b/Documentation/xtool.docc/Control.md
+@@ -106,7 +106,25 @@ iconPath: Resources/AppIcon.png
+ 
+ > Tip:
+ >
+-> Your app icon must be a png, and it should ideally have a resolution of 1024x1024px.
++> A PNG icon should ideally have a resolution of 1024x1024px.
++
++The SwiftPM packer also accepts an Icon Composer directory:
++
++```yaml
++iconPath: Resources/AppIcon.icon
++```
++
++This experimental path compiles SVG layers, groups, fills, and materials into
++`Assets.car` using AssetKit. It generates flat legacy PNGs and the matching
++Info.plist declarations. It requires `rsvg-convert` (`librsvg2-tools` on Linux,
++`brew install librsvg` on macOS). Keep the whole `.icon` directory, including
++`icon.json` and `Assets/`. Do not also add it to `resources`.
++
++Unsupported document fields cause a build error. See
++[AssetKit's supported subset and verification status](https://github.com/xtool-org/AssetKit/blob/main/docs/icon-composer.md).
++An existing top-level `Assets.car` conflicts with the generated catalog;
++catalog merging is not supported. The Xcode project generator currently does
++not support `iconPath`.
+ 
+ ## Add entitlements
+ 
+diff --git a/Package.swift b/Package.swift
+index ebb159b..cc18968 100644
+--- a/Package.swift
++++ b/Package.swift
+@@ -1,4 +1,4 @@
+-// swift-tools-version:6.2
++// swift-tools-version:6.3
+ 
+ import PackageDescription
+ 
+@@ -48,6 +48,7 @@ let package = Package(
+         ),
+     ],
+     dependencies: [
++        .package(url: "https://github.com/xtool-org/AssetKit", .upToNextMinor(from: "1.0.0")),
+         .package(url: "https://github.com/xtool-org/xtool-core", .upToNextMinor(from: "1.5.0")),
+         .package(url: "https://github.com/xtool-org/SwiftyMobileDevice", .upToNextMinor(from: "1.7.0")),
+         .package(url: "https://github.com/xtool-org/zsign", .upToNextMinor(from: "1.9.0")),
+@@ -187,6 +188,8 @@ let package = Package(
+             name: "PackLib",
+             dependencies: [
+                 "XUtils",
++                .product(name: "AssetKit", package: "AssetKit"),
++                .product(name: "Dependencies", package: "swift-dependencies"),
+                 .product(name: "Superutils", package: "xtool-core"),
+                 .product(name: "Yams", package: "Yams"),
+                 .product(name: "XcodeGenKit", package: "XcodeGen", condition: .when(platforms: [.macOS])),
+diff --git a/Sources/PackLib/CompiledAppIcon.swift b/Sources/PackLib/CompiledAppIcon.swift
+new file mode 100644
+index 0000000..04a4053
+--- /dev/null
++++ b/Sources/PackLib/CompiledAppIcon.swift
+@@ -0,0 +1,43 @@
++import AssetKit
++import Foundation
++
++/// Resource bytes and plist declarations travel together throughout packing.
++struct CompiledAppIcon: Sendable {
++    let result: CompileResult
++
++    func validate(resources: [Plan.Resource]) throws {
++        let reserved = Set(["Assets.car"] + (result.appIconBundle?.looseFiles.map(\.name) ?? []))
++        for resource in resources {
++            if case .root(let source) = resource,
++               reserved.contains(URL(fileURLWithPath: source).lastPathComponent) {
++                throw StringError(
++                    "Icon Composer output conflicts with resource '\(source)'; catalog merging is not supported yet."
++                )
++            }
++        }
++    }
++
++    func write(to directory: URL) throws {
++        try Task.checkCancellation()
++        try result.carData.write(to: directory.appendingPathComponent("Assets.car"), options: .atomic)
++        for file in result.appIconBundle?.looseFiles ?? [] {
++            try Task.checkCancellation()
++            try file.data.write(to: directory.appendingPathComponent(file.name), options: .atomic)
++        }
++    }
++
++    func update(plist: inout [String: any Sendable]) {
++        guard let bundle = result.appIconBundle else { return }
++        for (key, value) in bundle.infoPlistAdditions {
++            if let additions = value as? [String: any Sendable],
++               var existing = plist[key] as? [String: any Sendable] {
++                // Preserve alternate-icon entries from the supplied plist.
++                existing.merge(additions) { _, generated in generated }
++                plist[key] = existing
++            } else {
++                plist[key] = value
++            }
++        }
++        plist.removeValue(forKey: "CFBundleIconFile")
++    }
++}
+diff --git a/Sources/PackLib/IconCompilerClient.swift b/Sources/PackLib/IconCompilerClient.swift
+new file mode 100644
+index 0000000..6da2a47
+--- /dev/null
++++ b/Sources/PackLib/IconCompilerClient.swift
+@@ -0,0 +1,22 @@
++import AssetKit
++import Dependencies
++import Foundation
++
++/// Compiling the icon once yields both the resource bytes and plist metadata.
++/// A dependency override can provide another compiler without changing Packer.
++struct IconCompilerClient: Sendable {
++    var compile: @Sendable (_ directory: URL, _ deploymentTarget: String) async throws -> CompileResult
++}
++
++extension IconCompilerClient: DependencyKey {
++    static let liveValue = Self { directory, deploymentTarget in
++        try await IconCompiler(deploymentTarget: deploymentTarget).compile(icon: directory)
++    }
++}
++
++extension DependencyValues {
++    var iconCompiler: IconCompilerClient {
++        get { self[IconCompilerClient.self] }
++        set { self[IconCompilerClient.self] = newValue }
++    }
++}
+diff --git a/Sources/PackLib/PackSchema.swift b/Sources/PackLib/PackSchema.swift
+index 297c424..4fad6b2 100644
+--- a/Sources/PackLib/PackSchema.swift
++++ b/Sources/PackLib/PackSchema.swift
+@@ -70,9 +70,9 @@ public struct PackSchema: Sendable {
+         }
+ 
+         if let iconPath = base.iconPath {
+-            let ext = URL(fileURLWithPath: iconPath).pathExtension
+-            guard ext == "png" else {
+-                throw StringError("xtool.yml: iconPath should have a 'png' path extension. Got '\(ext)'.")
++            let ext = URL(fileURLWithPath: iconPath).pathExtension.lowercased()
++            guard ext == "png" || ext == "icon" else {
++                throw StringError("xtool.yml: iconPath must be a .png file or an Icon Composer .icon directory. Got '\(ext)'.")
+             }
+         }
+     }
+diff --git a/Sources/PackLib/Packer.swift b/Sources/PackLib/Packer.swift
+index bd2057b..7e72c89 100644
+--- a/Sources/PackLib/Packer.swift
++++ b/Sources/PackLib/Packer.swift
+@@ -1,8 +1,10 @@
+ import Foundation
+ import XUtils
+ import Subprocess
++import Dependencies
+ 
+ public struct Packer: Sendable {
++    @Dependency(\.iconCompiler) private var iconCompiler
+     public let buildSettings: BuildSettings
+     public let plan: Plan
+ 
+@@ -100,7 +102,7 @@ public struct Packer: Sendable {
+ 
+         try await withThrowingTaskGroup(of: Void.self) { group in
+             for product in plan.allProducts {
+-                try pack(
++                try await pack(
+                     product: product,
+                     binDir: binDir,
+                     outputURL: product.directory(inApp: outputURL),
+@@ -131,7 +133,7 @@ public struct Packer: Sendable {
+         binDir: URL,
+         outputURL: URL,
+         _ group: inout ThrowingTaskGroup<Void, Error>
+-    ) throws {
++    ) async throws {
+         @Sendable func packFileToRoot(srcName: String) async throws {
+             let srcURL = URL(fileURLWithPath: srcName)
+             let destURL = outputURL.appendingPathComponent(srcURL.lastPathComponent)
+@@ -152,6 +154,14 @@ public struct Packer: Sendable {
+         // Ensure output directory is available
+         try? FileManager.default.createDirectory(at: outputURL, withIntermediateDirectories: true)
+ 
++        let compiledIcon = try await compileIcon(for: product)
++        if let compiledIcon {
++            try compiledIcon.validate(resources: product.resources)
++            group.addTask {
++                try compiledIcon.write(to: outputURL)
++            }
++        }
++
+         for command in product.resources {
+             group.addTask {
+                 switch command {
+@@ -179,7 +189,7 @@ public struct Packer: Sendable {
+                 }
+             }
+         }
+-        if let iconPath = product.iconPath {
++        if let iconPath = product.iconPath, compiledIcon == nil {
+             group.addTask {
+                 try await packFileToRoot(srcName: iconPath)
+             }
+@@ -188,27 +198,31 @@ public struct Packer: Sendable {
+             try await packFile(srcName: product.targetName, dstName: product.product)
+         }
+         group.addTask {
+-            var info = product.infoPlist
+-
+-            if product.type == .application {
+-                info["UIRequiredDeviceCapabilities"] = ["arm64"]
+-                info["LSRequiresIPhoneOS"] = true
+-                info["CFBundleSupportedPlatforms"] = Packer.cfBundleSupportedPlatforms(for: buildSettings.triple)
+-            }
++            try writeInfo(for: product, icon: compiledIcon, outputURL: outputURL)
++        }
++    }
+ 
+-            if let iconPath = product.iconPath {
+-                let iconName = URL(fileURLWithPath: iconPath).deletingPathExtension().lastPathComponent
+-                info["CFBundleIconFile"] = iconName
+-            }
++    private func compileIcon(for product: Plan.Product) async throws -> CompiledAppIcon? {
++        guard let path = product.iconPath else { return nil }
++        let url = URL(fileURLWithPath: path)
++        guard url.pathExtension.lowercased() == "icon" else { return nil }
++        return CompiledAppIcon(result: try await iconCompiler.compile(url, product.deploymentTarget))
++    }
+ 
+-            let infoPath = outputURL.appendingPathComponent("Info.plist")
+-            let encodedPlist = try PropertyListSerialization.data(
+-                fromPropertyList: info,
+-                format: .xml,
+-                options: 0
+-            )
+-            try encodedPlist.write(to: infoPath)
++    private func writeInfo(for product: Plan.Product, icon: CompiledAppIcon?, outputURL: URL) throws {
++        var info = product.infoPlist
++        if product.type == .application {
++            info["UIRequiredDeviceCapabilities"] = ["arm64"]
++            info["LSRequiresIPhoneOS"] = true
++            info["CFBundleSupportedPlatforms"] = Packer.cfBundleSupportedPlatforms(for: buildSettings.triple)
++        }
++        if let icon {
++            icon.update(plist: &info)
++        } else if let path = product.iconPath {
++            info["CFBundleIconFile"] = URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent
+         }
++        let encoded = try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
++        try encoded.write(to: outputURL.appendingPathComponent("Info.plist"))
+     }
+ 
+     static func cfBundleSupportedPlatforms(for triple: String) -> [String] {
+diff --git a/Sources/PackLib/XcodePacker.swift b/Sources/PackLib/XcodePacker.swift
+index 1126d58..e117fd1 100644
+--- a/Sources/PackLib/XcodePacker.swift
++++ b/Sources/PackLib/XcodePacker.swift
+@@ -15,6 +15,9 @@ public struct XcodePacker {
+ 
+     // swiftlint:disable:next function_body_length
+     public func createProject() async throws -> URL {
++        if let path = plan.app.iconPath, URL(fileURLWithPath: path).pathExtension.lowercased() == "icon" {
++            throw StringError("Icon Composer iconPath currently requires the SwiftPM packer.")
++        }
+         let xtoolDir: Path = "xtool"
+ 
+         let projectDir: Path = xtoolDir + ".xtool-tmp"

@@ -1,0 +1,7 @@
+version: 1
+bundleID: com.mocharealm.accompanist.ios.sample
+product: AccompanistIos
+infoPath: Info.plist
+iconPath: Accompanist.icon
+resources:
+  - Resources/compose-resources

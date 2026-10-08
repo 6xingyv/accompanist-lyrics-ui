@@ -9,6 +9,7 @@ plugins {
 }
 
 kotlin {
+    compilerOptions { freeCompilerArgs.add("-Xexpect-actual-classes") }
     android {
         namespace = "com.mocharealm.accompanist.sample.shared"
         compileSdk = 37
@@ -30,6 +31,20 @@ kotlin {
     jvm {
         compilerOptions {
             jvmTarget = JvmTarget.JVM_21
+        }
+    }
+
+    if (System.getProperty("os.name") == "Mac OS X" ||
+        providers.gradleProperty("enableIos").map(String::toBoolean).getOrElse(false)) {
+        iosArm64 {
+            binaries.framework {
+                baseName = "AccompanistSample"
+                isStatic = true
+                // Apple's transparent stepping extension is absent from Linux LLVM.
+                if (System.getProperty("os.name") == "Linux") {
+                    freeCompilerArgs += "-Xbinary=enableDebugTransparentStepping=false"
+                }
+            }
         }
     }
 

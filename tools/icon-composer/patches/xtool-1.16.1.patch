@@ -1,0 +1,248 @@
+diff --git a/Package.swift b/Package.swift
+index fe39331..9faefbd 100644
+--- a/Package.swift
++++ b/Package.swift
+@@ -1,4 +1,4 @@
+-// swift-tools-version:6.0
++// swift-tools-version:6.3
+ 
+ import PackageDescription
+ 
+@@ -40,6 +40,8 @@ let package = Package(
+         ),
+     ],
+     dependencies: [
++        .package(url: "https://github.com/xtool-org/AssetKit", .upToNextMinor(from: "1.0.0")),
++        .package(url: "https://github.com/xtool-org/xadi", .upToNextMinor(from: "0.4.2")),
+         .package(url: "https://github.com/xtool-org/xtool-core", .upToNextMinor(from: "1.4.0")),
+         .package(url: "https://github.com/xtool-org/SwiftyMobileDevice", .upToNextMinor(from: "1.5.0")),
+         .package(url: "https://github.com/xtool-org/zsign", .upToNextMinor(from: "1.7.0")),
+@@ -72,7 +74,6 @@ let package = Package(
+         .package(url: "https://github.com/yonaskolb/XcodeGen", from: "2.43.0"),
+     ],
+     targets: [
+-        .systemLibrary(name: "XADI"),
+         .target(
+             name: "CXKit",
+             dependencies: [
+@@ -99,7 +100,7 @@ let package = Package(
+                 "DeveloperAPI",
+                 "CXKit",
+                 "XUtils",
+-                .byName(name: "XADI", condition: .when(platforms: [.linux])),
++                .product(name: "XADI", package: "xadi", condition: .when(platforms: [.linux])),
+                 .product(name: "ConcurrencyExtras", package: "swift-concurrency-extras"),
+                 .product(name: "Dependencies", package: "swift-dependencies"),
+                 .product(name: "SwiftyMobileDevice", package: "SwiftyMobileDevice"),
+@@ -170,6 +171,8 @@ let package = Package(
+             name: "PackLib",
+             dependencies: [
+                 "XUtils",
++                .product(name: "AssetKit", package: "AssetKit"),
++                .product(name: "Dependencies", package: "swift-dependencies"),
+                 .product(name: "Yams", package: "Yams"),
+                 .product(name: "XcodeGenKit", package: "XcodeGen", condition: .when(platforms: [.macOS])),
+             ]
+diff --git a/Sources/PackLib/CompiledAppIcon.swift b/Sources/PackLib/CompiledAppIcon.swift
+new file mode 100644
+index 0000000..04a4053
+--- /dev/null
++++ b/Sources/PackLib/CompiledAppIcon.swift
+@@ -0,0 +1,43 @@
++import AssetKit
++import Foundation
++
++/// Resource bytes and plist declarations travel together throughout packing.
++struct CompiledAppIcon: Sendable {
++    let result: CompileResult
++
++    func validate(resources: [Plan.Resource]) throws {
++        let reserved = Set(["Assets.car"] + (result.appIconBundle?.looseFiles.map(\.name) ?? []))
++        for resource in resources {
++            if case .root(let source) = resource,
++               reserved.contains(URL(fileURLWithPath: source).lastPathComponent) {
++                throw StringError(
++                    "Icon Composer output conflicts with resource '\(source)'; catalog merging is not supported yet."
++                )
++            }
++        }
++    }
++
++    func write(to directory: URL) throws {
++        try Task.checkCancellation()
++        try result.carData.write(to: directory.appendingPathComponent("Assets.car"), options: .atomic)
++        for file in result.appIconBundle?.looseFiles ?? [] {
++            try Task.checkCancellation()
++            try file.data.write(to: directory.appendingPathComponent(file.name), options: .atomic)
++        }
++    }
++
++    func update(plist: inout [String: any Sendable]) {
++        guard let bundle = result.appIconBundle else { return }
++        for (key, value) in bundle.infoPlistAdditions {
++            if let additions = value as? [String: any Sendable],
++               var existing = plist[key] as? [String: any Sendable] {
++                // Preserve alternate-icon entries from the supplied plist.
++                existing.merge(additions) { _, generated in generated }
++                plist[key] = existing
++            } else {
++                plist[key] = value
++            }
++        }
++        plist.removeValue(forKey: "CFBundleIconFile")
++    }
++}
+diff --git a/Sources/PackLib/IconCompilerClient.swift b/Sources/PackLib/IconCompilerClient.swift
+new file mode 100644
+index 0000000..6da2a47
+--- /dev/null
++++ b/Sources/PackLib/IconCompilerClient.swift
+@@ -0,0 +1,22 @@
++import AssetKit
++import Dependencies
++import Foundation
++
++/// Compiling the icon once yields both the resource bytes and plist metadata.
++/// A dependency override can provide another compiler without changing Packer.
++struct IconCompilerClient: Sendable {
++    var compile: @Sendable (_ directory: URL, _ deploymentTarget: String) async throws -> CompileResult
++}
++
++extension IconCompilerClient: DependencyKey {
++    static let liveValue = Self { directory, deploymentTarget in
++        try await IconCompiler(deploymentTarget: deploymentTarget).compile(icon: directory)
++    }
++}
++
++extension DependencyValues {
++    var iconCompiler: IconCompilerClient {
++        get { self[IconCompilerClient.self] }
++        set { self[IconCompilerClient.self] = newValue }
++    }
++}
+diff --git a/Sources/PackLib/PackSchema.swift b/Sources/PackLib/PackSchema.swift
+index 406ef24..1c8e94a 100644
+--- a/Sources/PackLib/PackSchema.swift
++++ b/Sources/PackLib/PackSchema.swift
+@@ -67,9 +67,9 @@ public struct PackSchema: Sendable {
+         }
+ 
+         if let iconPath = base.iconPath {
+-            let ext = URL(fileURLWithPath: iconPath).pathExtension
+-            guard ext == "png" else {
+-                throw StringError("xtool.yml: iconPath should have a 'png' path extension. Got '\(ext)'.")
++            let ext = URL(fileURLWithPath: iconPath).pathExtension.lowercased()
++            guard ext == "png" || ext == "icon" else {
++                throw StringError("xtool.yml: iconPath must be a .png file or an Icon Composer .icon directory. Got '\(ext)'.")
+             }
+         }
+     }
+diff --git a/Sources/PackLib/Packer.swift b/Sources/PackLib/Packer.swift
+index 9712ead..0b2ccac 100644
+--- a/Sources/PackLib/Packer.swift
++++ b/Sources/PackLib/Packer.swift
+@@ -1,7 +1,9 @@
+ import Foundation
+ import XUtils
++import Dependencies
+ 
+ public struct Packer: Sendable {
++    @Dependency(\.iconCompiler) private var iconCompiler
+     public let buildSettings: BuildSettings
+     public let plan: Plan
+ 
+@@ -86,7 +88,7 @@ public struct Packer: Sendable {
+ 
+         try await withThrowingTaskGroup(of: Void.self) { group in
+             for product in plan.allProducts {
+-                try pack(
++                try await pack(
+                     product: product,
+                     binDir: binDir,
+                     outputURL: product.directory(inApp: outputURL),
+@@ -117,7 +119,7 @@ public struct Packer: Sendable {
+         binDir: URL,
+         outputURL: URL,
+         _ group: inout ThrowingTaskGroup<Void, Error>
+-    ) throws {
++    ) async throws {
+         @Sendable func packFileToRoot(srcName: String) async throws {
+             let srcURL = URL(fileURLWithPath: srcName)
+             let destURL = outputURL.appendingPathComponent(srcURL.lastPathComponent)
+@@ -138,6 +140,14 @@ public struct Packer: Sendable {
+         // Ensure output directory is available
+         try? FileManager.default.createDirectory(at: outputURL, withIntermediateDirectories: true)
+ 
++        let compiledIcon = try await compileIcon(for: product)
++        if let compiledIcon {
++            try compiledIcon.validate(resources: product.resources)
++            group.addTask {
++                try compiledIcon.write(to: outputURL)
++            }
++        }
++
+         for command in product.resources {
+             group.addTask {
+                 switch command {
+@@ -165,7 +175,7 @@ public struct Packer: Sendable {
+                 }
+             }
+         }
+-        if let iconPath = product.iconPath {
++        if let iconPath = product.iconPath, compiledIcon == nil {
+             group.addTask {
+                 try await packFileToRoot(srcName: iconPath)
+             }
+@@ -174,28 +184,34 @@ public struct Packer: Sendable {
+             try await packFile(srcName: product.targetName, dstName: product.product)
+         }
+         group.addTask {
+-            var info = product.infoPlist
+-
+-            if product.type == .application {
+-                info["UIRequiredDeviceCapabilities"] = ["arm64"]
+-                info["LSRequiresIPhoneOS"] = true
+-                info["CFBundleSupportedPlatforms"] = ["iPhoneOS"]
+-            }
++            try writeInfo(for: product, icon: compiledIcon, outputURL: outputURL)
++        }
++    }
+ 
+-            if let iconPath = product.iconPath {
+-                let iconName = URL(fileURLWithPath: iconPath).deletingPathExtension().lastPathComponent
+-                info["CFBundleIconFile"] = iconName
+-            }
++    private func compileIcon(for product: Plan.Product) async throws -> CompiledAppIcon? {
++        guard let path = product.iconPath else { return nil }
++        let url = URL(fileURLWithPath: path)
++        guard url.pathExtension.lowercased() == "icon" else { return nil }
++        return CompiledAppIcon(result: try await iconCompiler.compile(url, product.deploymentTarget))
++    }
+ 
+-            let infoPath = outputURL.appendingPathComponent("Info.plist")
+-            let encodedPlist = try PropertyListSerialization.data(
+-                fromPropertyList: info,
+-                format: .xml,
+-                options: 0
+-            )
+-            try encodedPlist.write(to: infoPath)
++    private func writeInfo(for product: Plan.Product, icon: CompiledAppIcon?, outputURL: URL) throws {
++        var info = product.infoPlist
++        if product.type == .application {
++            info["UIRequiredDeviceCapabilities"] = ["arm64"]
++            info["LSRequiresIPhoneOS"] = true
++            info["CFBundleSupportedPlatforms"] = ["iPhoneOS"]
+         }
++        if let icon {
++            icon.update(plist: &info)
++        } else if let path = product.iconPath {
++            info["CFBundleIconFile"] = URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent
++        }
++        let encoded = try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
++        try encoded.write(to: outputURL.appendingPathComponent("Info.plist"))
+     }
++
++
+ }
+ 
+ extension Plan.Product {

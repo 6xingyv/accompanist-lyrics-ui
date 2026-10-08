@@ -1,0 +1,6 @@
+headers = unicode/uchar.h
+headerFilter = unicode/**
+package = com.mocharealm.accompanist.lyrics.ui.icu
+compilerOpts = -DU_DISABLE_RENAMING=1
+linkerOpts = -licucore
+nonStrictEnums = UCharDirection UErrorCode

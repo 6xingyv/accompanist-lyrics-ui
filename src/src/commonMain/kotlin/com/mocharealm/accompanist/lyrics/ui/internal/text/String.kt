@@ -14,6 +14,9 @@ internal expect fun Char.isArabic(): Boolean
 
 internal expect fun Char.isDevanagari(): Boolean
 
+/** Unicode bidi class: 0 = L, 1 = R, 13 = AL; other values do not establish direction. */
+internal expect fun platformCodePointDirectionality(codePoint: Int): Int
+
 internal fun String.isPureCjk(): Boolean {
     val cleanedStr = this.filter { it != ' ' && it != ',' && it != '\n' && it != '\r' }
     if (cleanedStr.isEmpty()) {
@@ -34,10 +37,9 @@ internal fun String.isRtl(fallback: Boolean = false): Boolean {
             if (value.isHighSurrogate() && index < length && this[index].isLowSurrogate())
                 0x10000 + ((value.code - 0xD800) shl 10) + this[index++].code - 0xDC00
             else value.code
-        when (Character.getDirectionality(codePoint)) {
-            Character.DIRECTIONALITY_LEFT_TO_RIGHT -> return false
-            Character.DIRECTIONALITY_RIGHT_TO_LEFT,
-            Character.DIRECTIONALITY_RIGHT_TO_LEFT_ARABIC -> return true
+        when (platformCodePointDirectionality(codePoint)) {
+            0 -> return false
+            1, 13 -> return true
         }
     }
     return fallback

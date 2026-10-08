@@ -25,7 +25,7 @@ dependencyResolutionManagement {
             }
         }
         maven {
-            url = uri("file:///E:/maven")
+            url = uri(providers.gradleProperty("accompanistMavenRepository").getOrElse("file:///E:/maven"))
             mavenContent {
                 includeGroupAndSubgroups("com.mocharealm")
             }

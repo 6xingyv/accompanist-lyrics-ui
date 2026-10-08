@@ -58,6 +58,16 @@ kotlin {
     }
     jvm()
 
+    // Local cross compilation is opt-in; ordinary Windows/Linux builds keep their existing targets.
+    if (System.getProperty("os.name") == "Mac OS X" ||
+        providers.gradleProperty("enableIos").map(String::toBoolean).getOrElse(false)) {
+        iosArm64 {
+            compilations.getByName("main").cinterops.create("icu") {
+                definitionFile.set(project.file("src/nativeInterop/cinterop/icu.def"))
+            }
+        }
+    }
+
     sourceSets {
         commonMain {
             dependencies {

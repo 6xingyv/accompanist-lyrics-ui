@@ -13,6 +13,10 @@
 /benchmark/build/
 /dist/
 /sample/*/build/
+/sample/ios-app/.build/
+/sample/ios-app/Frameworks/
+/sample/ios-app/Resources/compose-resources/
+/sample/ios-app/xtool/
 /src/src/androidMain/jniLibs/
 /src/src/jvmMain/resources/natives/
 /text_engine/target/

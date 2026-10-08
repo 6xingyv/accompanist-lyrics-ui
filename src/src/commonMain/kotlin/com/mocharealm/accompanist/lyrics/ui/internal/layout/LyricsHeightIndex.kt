@@ -8,7 +8,7 @@ internal class LyricsHeightIndex(heights: IntArray, private val spacing: Int) {
         get() = values.size
 
     private var totalExtent = 0.0
-    private val highestBit = Integer.highestOneBit(values.size)
+    private val highestBit = if (values.isEmpty()) 0 else 1 shl (31 - values.size.countLeadingZeroBits())
 
     init {
         for (i in values.indices) {

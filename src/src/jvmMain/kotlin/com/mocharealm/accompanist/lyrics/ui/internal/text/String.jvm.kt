@@ -1,5 +1,13 @@
 package com.mocharealm.accompanist.lyrics.ui.internal.text
 
+internal actual fun platformCodePointDirectionality(codePoint: Int): Int =
+    when (Character.getDirectionality(codePoint)) {
+        Character.DIRECTIONALITY_LEFT_TO_RIGHT -> 0
+        Character.DIRECTIONALITY_RIGHT_TO_LEFT -> 1
+        Character.DIRECTIONALITY_RIGHT_TO_LEFT_ARABIC -> 13
+        else -> -1
+    }
+
 private val cjkBlocks: Set<Character.UnicodeBlock> by lazy {
     setOf(
         Character.UnicodeBlock.CJK_UNIFIED_IDEOGRAPHS,

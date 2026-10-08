@@ -1,0 +1,1330 @@
+diff --git a/README.md b/README.md
+index ab64e24..c1bf1ad 100644
+--- a/README.md
++++ b/README.md
+@@ -32,6 +32,11 @@ if let bundle = result.appIconBundle {
+ 
+ ## What it supports
+ 
++- Experimental Icon Composer `.icon` compilation through `IconCompiler`:
++  preserved SVG layers, groups/materials, fills, light/dark/tinted variants,
++  and flat legacy PNG fallbacks. See [supported fields and compatibility
++  limits](docs/icon-composer.md).
++
+ - `.imageset`
+   - PNG sources (1x/2x/3x scales, sRGB and display-P3, dark/light appearances)
+   - SVG sources, each emitted as one preserved vector rendition (XML kept verbatim, LZFSE-compressed inside a DWAR envelope) plus three rasterised bitmap fallbacks at 1x/2x/3x (because `UIImage(named:)` reads the rasterised fallbacks; the vector rendition is what other CoreUI consumers and future iOS versions may prefer). Rasterisation is delegated to an injectable `SVGRasterizer`; the default shells out to `rsvg-convert`.
+diff --git a/Sources/AssetKit/CAR/CSIHeader.swift b/Sources/AssetKit/CAR/CSIHeader.swift
+index ad38c74..f80b2f5 100644
+--- a/Sources/AssetKit/CAR/CSIHeader.swift
++++ b/Sources/AssetKit/CAR/CSIHeader.swift
+@@ -40,6 +40,9 @@ enum CSIHeader {
+         /// category; SVG promotes to its own layout because vector
+         /// renditions surface a different AssetType to `assetutil`.
+         case vector = 9
++        case iconStack = 1019
++        case iconGroup = 1020
++        case namedGradient = 1021
+     }
+ 
+     // swiftlint:disable:next function_parameter_count
+diff --git a/Sources/AssetKit/IconCompiler.swift b/Sources/AssetKit/IconCompiler.swift
+new file mode 100644
+index 0000000..a672bee
+--- /dev/null
++++ b/Sources/AssetKit/IconCompiler.swift
+@@ -0,0 +1,85 @@
++import Foundation
++
++/// Compiles an Icon Composer `.icon` directory into an iOS asset catalog.
++///
++/// This is an experimental CoreUI 975 writer. It preserves image sources,
++/// layer order, fills, and group material parameters instead of flattening
++/// the iOS 26 icon into a PNG. Unsupported document fields are errors.
++/// Legacy PNGs are flat artwork fallbacks; they do not reproduce CoreUI's
++/// dynamic glass lighting. See docs/icon-composer.md for the supported schema.
++public struct IconCompiler: Sendable {
++    public var deploymentTarget: String
++    public var svgRasterizer: any SVGRasterizer
++    public var includeLegacyFallbacks: Bool
++
++    public init(
++        deploymentTarget: String,
++        svgRasterizer: any SVGRasterizer = RsvgConvertRasterizer(),
++        includeLegacyFallbacks: Bool = true
++    ) {
++        self.deploymentTarget = deploymentTarget
++        self.svgRasterizer = svgRasterizer
++        self.includeLegacyFallbacks = includeLegacyFallbacks
++    }
++
++    public func compile(icon directory: URL) async throws -> CompileResult {
++        try Task.checkCancellation()
++        guard directory.pathExtension.lowercased() == "icon" else {
++            throw IconCompilerError.invalidDocument("Expected a .icon directory")
++        }
++        let name = directory.deletingPathExtension().lastPathComponent
++        guard !name.isEmpty, name.utf8.count <= 64, !name.contains("\0") else {
++            throw IconCompilerError.invalidDocument("Icon name must contain 1...64 UTF-8 bytes and no NUL")
++        }
++        let document: IconDocument
++        do {
++            let bytes = try Data(contentsOf: directory.appendingPathComponent("icon.json"))
++            document = try JSONDecoder().decode(IconDocument.self, from: bytes)
++        } catch let error as DecodingError {
++            throw IconCompilerError.invalidDocument(String(describing: error))
++        }
++        let source = try IconSource.load(document: document, directory: directory)
++        var builder = IconCatalogBuilder(name: name)
++        try builder.build(document: document, source: source)
++        try Task.checkCancellation()
++        let car = try IconCARWriter(
++            deploymentTarget: deploymentTarget, assets: builder.assets, records: builder.records
++        ).write()
++        let looseFiles = includeLegacyFallbacks
++            ? try IconFallbackRenderer.render(document: document, source: source, name: name, rasterizer: svgRasterizer)
++            : []
++        return CompileResult(carData: car, appIconBundle: Self.bundle(name: name, looseFiles: looseFiles))
++    }
++
++    private static func bundle(name: String, looseFiles: [LooseFile]) -> AppIconBundle {
++        let iphoneFiles = looseFiles.isEmpty ? [] : ["\(name)60x60"]
++        let ipadFiles = looseFiles.isEmpty ? [] : ["\(name)76x76", "\(name)83.5x83.5"]
++        let primary: @Sendable ([String]) -> [String: any Sendable] = { files in
++            var info: [String: any Sendable] = ["CFBundleIconName": name]
++            if !files.isEmpty { info["CFBundleIconFiles"] = files }
++            return ["CFBundlePrimaryIcon": info]
++        }
++        return AppIconBundle(primaryIconName: name, infoPlistAdditions: [
++            "CFBundleIconName": name,
++            "CFBundleIcons": primary(iphoneFiles),
++            "CFBundleIcons~ipad": primary(ipadFiles),
++            "CFBundleIconFiles": iphoneFiles + ipadFiles
++        ], looseFiles: looseFiles)
++    }
++}
++
++public enum IconCompilerError: Error, Sendable, CustomStringConvertible {
++    case invalidDocument(String)
++    case unsupported(String)
++    case invalidAsset(String)
++    case rasterizationFailed(String)
++
++    public var description: String {
++        switch self {
++        case .invalidDocument(let detail): "Invalid Icon Composer document: \(detail)"
++        case .unsupported(let detail): "Unsupported Icon Composer feature: \(detail)"
++        case .invalidAsset(let detail): "Invalid Icon Composer asset: \(detail)"
++        case .rasterizationFailed(let detail): "Icon fallback rasterization failed: \(detail)"
++        }
++    }
++}
+diff --git a/Sources/AssetKit/IconComposer/IconCARWriter.swift b/Sources/AssetKit/IconComposer/IconCARWriter.swift
+new file mode 100644
+index 0000000..6764694
+--- /dev/null
++++ b/Sources/AssetKit/IconComposer/IconCARWriter.swift
+@@ -0,0 +1,282 @@
++import Foundation
++
++/// Icon Composer uses the same BOM/CSI container as asset catalogs, but its
++/// lookup parts and variable-length layer records differ. Keep those details
++/// here rather than changing the existing imageset writer's wire format.
++enum IconPart: UInt16 {
++    case image = 181
++    case color = 217
++    case stack = 245
++    case group = 246
++    case gradient = 247
++}
++
++struct IconAsset: Sendable {
++    let name: String
++    let identifier: UInt16
++    let part: IconPart
++}
++
++/// KEYFORMAT and BITMAPKEYS describe the same ordered attributes. Keep their
++/// schema together so changing the key format cannot leave a stale descriptor.
++enum IconKeyFormat {
++    struct Attribute: Sendable {
++        let id: UInt32
++        let descriptorToken: UInt32
++    }
++
++    static let attributes: [Attribute] = [
++        .init(id: 7, descriptorToken: .max),
++        .init(id: 13, descriptorToken: 1),
++        .init(id: 12, descriptorToken: 2),
++        .init(id: 15, descriptorToken: 1),
++        .init(id: 16, descriptorToken: 1),
++        .init(id: 8, descriptorToken: 1),
++        .init(id: 24, descriptorToken: 1),
++        .init(id: 17, descriptorToken: .max),
++        .init(id: 1, descriptorToken: .max),
++        .init(id: 2, descriptorToken: .max)
++    ]
++
++    static func bitmapDescriptor() -> Data {
++        var writer = ByteWriter()
++        writer.writeLE(UInt32(1))
++        writer.writeLE(UInt32(0))
++        writer.writeLE(UInt32((attributes.count + 1) * 4))
++        writer.writeLE(UInt32(attributes.count))
++        for attribute in attributes { writer.writeLE(attribute.descriptorToken) }
++        return writer.data
++    }
++}
++
++struct IconRecord: Sendable {
++    let asset: IconAsset
++    var appearance: UInt16 = 0
++    var scale: UInt16 = 1
++    let data: Data
++
++    var key: Data {
++        var writer = ByteWriter()
++        let tokens: [UInt32: UInt16] = [
++            7: appearance, 12: scale, 17: asset.identifier, 1: 85, 2: asset.part.rawValue
++        ]
++        for attribute in IconKeyFormat.attributes {
++            writer.writeLE(tokens[attribute.id, default: 0])
++        }
++        return writer.data
++    }
++}
++
++struct IconLayerReference: Sendable {
++    let asset: IconAsset
++    var frame: IconFrame = .zero
++    var blendMode: UInt32 = 0
++    var opacity: Double = 1
++    var lighting: UInt32 = 0
++    var glass = false
++    var blur: Double = 0
++    var fillName = ""
++    var specular = false
++    var translucency: Double = 0
++    var shadowKind: UInt32 = 0
++    var shadowOpacity: Double = 0
++}
++
++struct IconFrame: Sendable {
++    let x: Int32
++    let y: Int32
++    let width: UInt32
++    let height: UInt32
++    static let zero = IconFrame(x: 0, y: 0, width: 0, height: 0)
++}
++
++enum IconCSIWriter {
++    static func layers(name: String, references: [IconLayerReference], isStack: Bool) -> Data {
++        var geometry = ByteWriter()
++        geometry.writeLE(UInt32(references.count))
++        geometry.writeLE(UInt32(0))
++        var lighting = ByteWriter()
++        lighting.writeLE(UInt32(references.count))
++        lighting.writeLE(UInt32(0)) // table-level reserved word
++        var material = ByteWriter()
++        material.writeLE(UInt32(references.count))
++        material.writeLE(UInt32(0)) // table-level reserved word
++
++        for reference in references {
++            geometry.writeLE(UInt32(0))
++            geometry.writeLE(UInt32(bitPattern: reference.frame.x))
++            geometry.writeLE(UInt32(bitPattern: reference.frame.y))
++            geometry.writeLE(reference.frame.width)
++            geometry.writeLE(reference.frame.height)
++            geometry.writeLE(reference.blendMode)
++            geometry.writeLE(Float(reference.opacity).bitPattern)
++            geometry.writeLE(UInt32(16))
++            writeAssetKey(reference.asset, into: &geometry)
++            geometry.writeLE(UInt32(0)) // sparse-key terminator
++
++            // The first word selects group lighting or image glass. The
++            // reserved word belongs to the table, not to each image entry.
++            lighting.writeLE(reference.asset.part == .group
++                ? reference.lighting : UInt32(reference.glass ? 1 : 0))
++            lighting.writeLE(Float(reference.blur).bitPattern)
++            writeString(reference.fillName, into: &lighting)
++
++            material.writeLE(UInt32(reference.specular ? 1 : 0))
++            material.writeLE(Float(reference.translucency).bitPattern)
++            material.writeLE(reference.shadowKind)
++            material.writeLE(Float(reference.shadowOpacity).bitPattern)
++            material.writeLE(UInt32(0))
++        }
++
++        var tvl = ByteWriter()
++        writeTLV(1012, geometry.data, into: &tvl)
++        writeTLV(1020, lighting.data, into: &tvl)
++        writeTLV(1021, material.data, into: &tvl)
++        tvl.write(CSITVL.encode([.sliceScale]))
++        if isStack {
++            var uti = ByteWriter()
++            uti.writeLE(UInt32(20))
++            uti.writeLE(UInt32(0))
++            uti.write(Data("public.layeredimage\0".utf8))
++            writeTLV(1005, uti.data, into: &tvl)
++        }
++        tvl.write(CSITVL.encode([.bitmapFlag]))
++        return record(
++            name: name, layout: isStack ? .iconStack : .iconGroup,
++            pixelFormat: 0x44415441,
++            width: isStack ? 1024 : 0, height: isStack ? 1024 : 0,
++            scaleFactor: 100, tvl: tvl.data,
++            body: DWAREnvelope.encode(flags: 0, payload: [])
++        )
++    }
++
++    static func color(name: String, color: IconColor) -> Data {
++        var payload = ByteWriter()
++        payload.writeLE(UInt32(0x434F4C52)) // COLR, stored as RLOC
++        payload.writeLE(UInt32(1))
++        payload.writeLE(color.colorSpace)
++        payload.writeLE(UInt32(color.components.count))
++        for component in color.components { payload.writeLE(component.bitPattern) }
++        return record(name: name, layout: .namedColor, body: payload.data)
++    }
++
++    static func gradient(name: String, colors: [String], orientation: IconOrientation, automatic: Bool) -> Data {
++        var payload = ByteWriter()
++        payload.writeLE(UInt32(0x47475241)) // GGRA, stored as ARGG
++        payload.writeLE(UInt32(colors.count))
++        payload.writeLE(UInt32(automatic ? 0 : 1))
++        payload.writeLE(UInt32(0))
++        for coordinate in [orientation.start.x, orientation.start.y, orientation.stop.x, orientation.stop.y] {
++            payload.writeLE(Float(coordinate).bitPattern)
++        }
++        for (index, colorName) in colors.enumerated() {
++            let location = colors.count == 1 ? 0 : Float(index) / Float(colors.count - 1)
++            payload.writeLE(location.bitPattern)
++            writeString(colorName, into: &payload)
++        }
++        return record(name: name, layout: .namedGradient, body: payload.data)
++    }
++
++    private static func record(
++        name: String, layout: CSIHeader.Layout, pixelFormat: UInt32 = 0,
++        width: UInt32 = 0, height: UInt32 = 0, scaleFactor: UInt32 = 0,
++        tvl: Data? = nil, body: Data
++    ) -> Data {
++        // Named colors/gradients have sliceScale=(0, 0), unlike image/group
++        // renditions whose scale is 1. Do not reuse TVLEntry.sliceScale here.
++        let metadata: Data
++        if let tvl {
++            metadata = tvl
++        } else {
++            var writer = ByteWriter()
++            writeTLV(1004, Data(repeating: 0, count: 8), into: &writer)
++            writer.write(CSITVL.encode([.bitmapFlag]))
++            metadata = writer.data
++        }
++        return CSIHeader.encode(
++            renditionFlags: 0, width: width, height: height, scaleFactor: scaleFactor,
++            pixelFormat: pixelFormat, colorSpace: 0, layout: layout, name: name,
++            tvlLength: UInt32(metadata.count), bitmapCount: 1, renditionLength: UInt32(body.count)
++        ) + metadata + body
++    }
++
++    private static func writeAssetKey(_ asset: IconAsset, into writer: inout ByteWriter) {
++        for (attribute, value): (UInt16, UInt16) in [(1, 85), (2, asset.part.rawValue), (17, asset.identifier)] {
++            writer.writeLE(attribute)
++            writer.writeLE(value)
++        }
++    }
++
++    private static func writeString(_ string: String, into writer: inout ByteWriter) {
++        let bytes = Data((string + "\0").utf8)
++        writer.writeLE(UInt32(bytes.count))
++        writer.write(bytes)
++    }
++
++    private static func writeTLV(_ type: UInt32, _ payload: Data, into writer: inout ByteWriter) {
++        writer.writeLE(type)
++        writer.writeLE(UInt32(payload.count))
++        writer.write(payload)
++    }
++}
++
++struct IconCARWriter {
++    let deploymentTarget: String
++    let assets: [IconAsset]
++    let records: [IconRecord]
++
++    func write() throws -> Data {
++        // The shared BOM writer currently supports a single leaf. Reject
++        // overflow explicitly instead of writing a leaf larger than its block.
++        guard assets.count <= 126, records.count <= 510 else {
++            throw IconCompilerError.unsupported("Icon exceeds the current single-leaf BOM limit")
++        }
++        let keys = records.map(\.key)
++        guard Set(keys).count == keys.count else {
++            throw IconCompilerError.invalidDocument("Duplicate CoreUI rendition keys")
++        }
++        var bom = BOMWriter()
++        let header = CARHeaderBlock.data(
++            coreuiVersion: 975, renditionCount: UInt32(records.count),
++            mainVersionString: "@(#)PROGRAM:CoreUI  PROJECT:CoreUI-975",
++            versionString: "AssetKit Icon Composer compiler"
++        )
++        bom.setVariable("CARHEADER", blockID: bom.addBlock(header))
++        let renditionTree = BOMTree.insert(into: &bom, entries: records.map { .init(key: $0.key, value: $0.data) })
++        bom.setVariable("RENDITIONS", blockID: renditionTree)
++        let facetTree = BOMTree.insert(into: &bom, entries: assets.map { asset in
++            var value = ByteWriter()
++            value.writeLE(UInt32(0)) // cursor hotspot
++            value.writeLE(UInt16(3))
++            for (attribute, token): (UInt16, UInt16) in [(1, 85), (2, asset.part.rawValue), (17, asset.identifier)] {
++                value.writeLE(attribute)
++                value.writeLE(token)
++            }
++            return .init(key: Data(asset.name.utf8), value: value.data)
++        })
++        bom.setVariable("FACETKEYS", blockID: facetTree)
++        let appearanceTree = BOMTree.insert(into: &bom, entries: [
++            appearance("UIAppearanceAny", id: 0), appearance("UIAppearanceDark", id: 1),
++            appearance("UIAppearanceLight", id: 4), appearance("ISAppearanceTintable", id: 10)
++        ])
++        bom.setVariable("APPEARANCEKEYS", blockID: appearanceTree)
++        var format = ByteWriter()
++        format.writeLE(KeyFormatBlock.magic)
++        format.writeLE(UInt32(0))
++        format.writeLE(UInt32(IconKeyFormat.attributes.count))
++        for attribute in IconKeyFormat.attributes { format.writeLE(attribute.id) }
++        bom.setVariable("KEYFORMAT", blockID: bom.addBlock(format.data))
++        bom.setVariable("EXTENDED_METADATA", blockID: bom.addBlock(ExtendedMetadata.data(deploymentTarget: deploymentTarget)))
++        let bitmapTree = BOMTree.insertInlineKey(into: &bom, entries: assets.map { asset in
++            .init(key: UInt32(asset.identifier), value: IconKeyFormat.bitmapDescriptor())
++        }, blockSize: 1024)
++        bom.setVariable("BITMAPKEYS", blockID: bitmapTree)
++        return bom.finalize()
++    }
++
++    private func appearance(_ name: String, id: UInt16) -> BOMTree.Entry {
++        var writer = ByteWriter()
++        writer.writeLE(id)
++        return .init(key: Data(name.utf8), value: writer.data)
++    }
++}
+diff --git a/Sources/AssetKit/IconComposer/IconCatalogBuilder.swift b/Sources/AssetKit/IconComposer/IconCatalogBuilder.swift
+new file mode 100644
+index 0000000..25a7222
+--- /dev/null
++++ b/Sources/AssetKit/IconComposer/IconCatalogBuilder.swift
+@@ -0,0 +1,151 @@
++import Foundation
++
++/// Lowers the document into explicit named CoreUI assets. Asset IDs are local
++/// to the catalog; all facet keys and layer references use the same allocator.
++struct IconCatalogBuilder {
++    let name: String
++    private(set) var assets: [IconAsset] = []
++    private(set) var records: [IconRecord] = []
++    private var identifiers: Set<UInt16> = []
++    private var colorCount = 0
++    private var gradientCount = 0
++    private var colors: [IconColor: IconAsset] = [:]
++    private var gradients: [GradientKey: IconAsset] = [:]
++
++    private struct GradientKey: Hashable {
++        let colors: [IconColor]
++        let orientation: IconOrientation
++        let automatic: Bool
++    }
++
++    init(name: String) { self.name = name }
++
++    mutating func build(document: IconDocument, source: IconSource) throws {
++        let root = try asset(name: name, part: .stack)
++        var groups: [(IconGroup, IconAsset, [(IconLayer, IconAsset)])] = []
++        var imageAssets: [String: IconAsset] = [:]
++        for (index, group) in document.groups.enumerated() {
++            let groupAsset = try asset(name: "\(name)/Group-\(index + 1)", part: .group)
++            var layers: [(IconLayer, IconAsset)] = []
++            for layer in group.layers {
++                let imageAsset: IconAsset
++                if let existing = imageAssets[layer.imageName] {
++                    imageAsset = existing
++                } else {
++                    imageAsset = try asset(name: "\(name)_Assets/Image-\(imageAssets.count + 1)", part: .image)
++                    imageAssets[layer.imageName] = imageAsset
++                    let image = try source.image(named: layer.imageName)
++                    let body = PreservedSourceBody(format: .svg, sourceData: image.data, renditionName: "image.svg")
++                    records.append(IconRecord(asset: imageAsset, data: CSIWriter.preservedSource(body: body, scaleFactor: 0)))
++                }
++                layers.append((layer, imageAsset))
++            }
++            groups.append((group, groupAsset, layers))
++        }
++
++        for appearance in IconAppearance.allCases {
++            try Task.checkCancellation()
++            let background = try backgroundFill(document: document, appearance: appearance)
++            let backgroundAsset = try fill(background, requiresGradient: true)
++            var rootLayers = [IconLayerReference(asset: backgroundAsset)]
++            // Composer stores front-to-back; CoreUI stores back-to-front.
++            for (group, groupAsset, layers) in groups.reversed() {
++                var groupLayers: [IconLayerReference] = []
++                for (layer, imageAsset) in layers.reversed() {
++                    let fillValue = resolve(layer.fill, specializations: layer.fillSpecializations, appearance: appearance)
++                    let fillName = try fillValue.map { try fill($0).name } ?? ""
++                    let frame = try source.image(named: layer.imageName).frame(position: layer.style.position)
++                    groupLayers.append(IconLayerReference(
++                        asset: imageAsset, frame: frame, blendMode: layer.style.blendMode,
++                        opacity: layer.style.opacity, glass: layer.glass, fillName: fillName
++                    ))
++                }
++                records.append(IconRecord(
++                    asset: groupAsset, appearance: appearance.coreUIID,
++                    data: IconCSIWriter.layers(name: "IconGroup", references: groupLayers, isStack: false)
++                ))
++                rootLayers.append(IconLayerReference(
++                    asset: groupAsset, blendMode: group.style.blendMode, opacity: group.style.opacity,
++                    lighting: group.lighting, blur: group.blur, specular: group.specular,
++                    translucency: group.translucency?.enabled == true ? group.translucency?.value ?? 0 : 0,
++                    shadowKind: group.shadow?.kind ?? 0, shadowOpacity: group.shadow?.opacity ?? 0
++                ))
++            }
++            records.append(IconRecord(
++                asset: root, appearance: appearance.coreUIID,
++                data: IconCSIWriter.layers(name: "\(name).iconstack", references: rootLayers, isStack: true)
++            ))
++        }
++    }
++
++    private mutating func asset(name: String, part: IconPart) throws -> IconAsset {
++        guard name.utf8.count < 128, !assets.contains(where: { $0.name == name }), assets.count < 126 else {
++            throw IconCompilerError.invalidDocument("Too many assets, duplicate asset, or name exceeds CSI limit: \(name)")
++        }
++        // Collision resolution is necessary: the on-disk identifier is only
++        // 16 bits. Never emit colliding lookup keys for two different assets.
++        var identifier = UInt16(truncatingIfNeeded: FacetKeys.nameHash(name))
++        while identifier == 0 || identifiers.contains(identifier) { identifier &+= 1 }
++        identifiers.insert(identifier)
++        let asset = IconAsset(name: name, identifier: identifier, part: part)
++        assets.append(asset)
++        return asset
++    }
++
++    private mutating func color(_ color: IconColor) throws -> IconAsset {
++        if let existing = colors[color] { return existing }
++        colorCount += 1
++        let asset = try asset(name: "\(name)_Assets/Color-\(colorCount)", part: .color)
++        records.append(IconRecord(asset: asset, data: IconCSIWriter.color(name: asset.name, color: color)))
++        colors[color] = asset
++        return asset
++    }
++
++    private mutating func fill(_ fill: IconFill, requiresGradient: Bool = false) throws -> IconAsset {
++        let colors: [IconColor]
++        let orientation: IconOrientation
++        let automatic: Bool
++        switch fill {
++        case .color(let value):
++            if !requiresGradient { return try color(value) }
++            colors = [value]; orientation = .vertical; automatic = true
++        case .linearGradient(let values, let direction):
++            colors = values; orientation = direction; automatic = false
++        case .automaticGradient(let value):
++            colors = [value]; orientation = .vertical; automatic = true
++        case .systemDark:
++            // These two grayscale stops are emitted by CoreUI 975 for
++            // Icon Composer's system-dark fill.
++            colors = [.init(gray: 0.19200000166893005), .init(gray: 0.07800000160932541)]
++            orientation = .vertical; automatic = false
++        case .automatic:
++            throw IconCompilerError.unsupported("Automatic layer fill requires an explicit color or gradient")
++        }
++        let key = GradientKey(colors: colors, orientation: orientation, automatic: automatic)
++        if let existing = gradients[key] { return existing }
++        var names: [String] = []
++        for value in colors { names.append(try color(value).name) }
++        gradientCount += 1
++        let asset = try asset(name: "\(name)_Assets/Gradient-\(gradientCount)", part: .gradient)
++        records.append(IconRecord(asset: asset, data: IconCSIWriter.gradient(
++            name: asset.name, colors: names, orientation: orientation, automatic: automatic
++        )))
++        gradients[key] = asset
++        return asset
++    }
++}
++
++func backgroundFill(document: IconDocument, appearance: IconAppearance) throws -> IconFill {
++    let fill = resolve(document.fill, specializations: document.fillSpecializations, appearance: appearance)
++    if case .automatic? = fill {
++        if appearance == .dark { return .systemDark }
++        // The automatic light background depends on Composer's inferred
++        // artwork color. We cannot reproduce it from an unverified formula.
++        if appearance == .tinted {
++            return try backgroundFill(document: document, appearance: .light)
++        }
++        throw IconCompilerError.unsupported("Automatic light background: provide a light fill specialization")
++    }
++    guard let fill else { throw IconCompilerError.invalidDocument("Missing icon background fill") }
++    return fill
++}
+diff --git a/Sources/AssetKit/IconComposer/IconDocument.swift b/Sources/AssetKit/IconComposer/IconDocument.swift
+new file mode 100644
+index 0000000..f00bbe0
+--- /dev/null
++++ b/Sources/AssetKit/IconComposer/IconDocument.swift
+@@ -0,0 +1,368 @@
++import Foundation
++
++/// The on-disk Icon Composer document. Kept internal so the compiler's public
++/// API does not freeze Apple's unversioned JSON schema.
++struct IconDocument: Decodable, Sendable {
++    let fill: IconFill?
++    let fillSpecializations: [IconSpecialization<IconFill>]
++    let groups: [IconGroup]
++
++    enum CodingKeys: String, CodingKey {
++        case fill, groups
++        case fillSpecializations = "fill-specializations"
++        case platforms = "supported-platforms"
++    }
++
++    init(from decoder: any Decoder) throws {
++        try decoder.checkKeys(CodingKeys.self)
++        let container = try decoder.container(keyedBy: CodingKeys.self)
++        fill = try container.decodeIfPresent(IconFill.self, forKey: .fill)
++        fillSpecializations = try container.decodeIfPresent(
++            [IconSpecialization<IconFill>].self, forKey: .fillSpecializations
++        ) ?? []
++        groups = try container.decode([IconGroup].self, forKey: .groups)
++        try validateSpecializations(fillSpecializations, decoder: decoder)
++        guard !groups.isEmpty else { throw decoder.invalid("An icon must contain at least one group") }
++    }
++}
++
++struct IconSpecialization<Value: Decodable & Sendable>: Decodable, Sendable {
++    let appearance: IconAppearance?
++    let value: Value
++
++    enum CodingKeys: String, CodingKey { case appearance, value }
++
++    init(from decoder: any Decoder) throws {
++        try decoder.checkKeys(CodingKeys.self)
++        let container = try decoder.container(keyedBy: CodingKeys.self)
++        appearance = try container.decodeIfPresent(IconAppearance.self, forKey: .appearance)
++        value = try container.decode(Value.self, forKey: .value)
++    }
++}
++
++enum IconAppearance: String, Decodable, CaseIterable, Sendable {
++    case light, dark, tinted
++
++    var coreUIID: UInt16 {
++        switch self {
++        case .light: 4
++        case .dark: 1
++        case .tinted: 10
++        }
++    }
++}
++
++struct IconGroup: Decodable, Sendable {
++    let name: String
++    let layers: [IconLayer]
++    let style: IconStyle
++    let lighting: UInt32
++    let specular: Bool
++    let shadow: IconShadow?
++    let translucency: IconTranslucency?
++    let blur: Double
++
++    enum CodingKeys: String, CodingKey {
++        case name, layers, lighting, specular, shadow, translucency, position, opacity
++        case blendMode = "blend-mode"
++        case blur = "blur-material"
++    }
++
++    init(from decoder: any Decoder) throws {
++        try decoder.checkKeys(CodingKeys.self)
++        let container = try decoder.container(keyedBy: CodingKeys.self)
++        name = try container.decodeIfPresent(String.self, forKey: .name) ?? "Group"
++        layers = try container.decode([IconLayer].self, forKey: .layers)
++        style = try IconStyle(from: decoder)
++        // A group transform has a different CoreUI frame convention from an
++        // image transform. Do not silently compile it using the image rule.
++        guard style.position.isIdentity else {
++            throw decoder.invalid("Group transforms are not supported yet")
++        }
++        let lightingName = try container.decodeIfPresent(String.self, forKey: .lighting) ?? "combined"
++        switch lightingName {
++        case "combined": lighting = 2
++        case "none": lighting = 0
++        default: throw decoder.invalid("Unsupported lighting: \(lightingName)")
++        }
++        specular = try container.decodeIfPresent(Bool.self, forKey: .specular) ?? true
++        shadow = try container.decodeIfPresent(IconShadow.self, forKey: .shadow)
++        translucency = try container.decodeIfPresent(IconTranslucency.self, forKey: .translucency)
++        blur = try container.decodeIfPresent(Double.self, forKey: .blur) ?? 0
++        try decoder.validate(blur, in: 0...1, property: "blur-material")
++        guard !layers.isEmpty else { throw decoder.invalid("A group must contain at least one layer") }
++    }
++}
++
++struct IconLayer: Decodable, Sendable {
++    let imageName: String
++    let style: IconStyle
++    let glass: Bool
++    let fill: IconFill?
++    let fillSpecializations: [IconSpecialization<IconFill>]
++
++    enum CodingKeys: String, CodingKey {
++        case name, glass, fill, opacity, position
++        case imageName = "image-name"
++        case isGlass = "is-glass"
++        case blendMode = "blend-mode"
++        case fillSpecializations = "fill-specializations"
++    }
++
++    init(from decoder: any Decoder) throws {
++        try decoder.checkKeys(CodingKeys.self)
++        let container = try decoder.container(keyedBy: CodingKeys.self)
++        imageName = try container.decode(String.self, forKey: .imageName)
++        style = try IconStyle(from: decoder)
++        let glassValue = try container.decodeIfPresent(Bool.self, forKey: .glass)
++        let legacyGlassValue = try container.decodeIfPresent(Bool.self, forKey: .isGlass)
++        if let glassValue, let legacyGlassValue, glassValue != legacyGlassValue {
++            throw decoder.invalid("glass and is-glass disagree")
++        }
++        glass = glassValue ?? legacyGlassValue ?? true
++        fill = try container.decodeIfPresent(IconFill.self, forKey: .fill)
++        fillSpecializations = try container.decodeIfPresent(
++            [IconSpecialization<IconFill>].self, forKey: .fillSpecializations
++        ) ?? []
++        try validateSpecializations(fillSpecializations, decoder: decoder)
++    }
++}
++
++struct IconStyle: Decodable, Sendable {
++    let opacity: Double
++    let blendMode: UInt32
++    let position: IconPosition
++
++    enum CodingKeys: String, CodingKey {
++        case opacity, position
++        case blendMode = "blend-mode"
++    }
++
++    init(from decoder: any Decoder) throws {
++        let container = try decoder.container(keyedBy: CodingKeys.self)
++        opacity = try container.decodeIfPresent(Double.self, forKey: .opacity) ?? 1
++        try decoder.validate(opacity, in: 0...1, property: "opacity")
++        let blend = try container.decodeIfPresent(String.self, forKey: .blendMode) ?? "normal"
++        switch blend {
++        case "normal": blendMode = 0
++        case "multiply": blendMode = 1
++        case "screen": blendMode = 2
++        case "overlay": blendMode = 3
++        case "plus-lighter": blendMode = 27
++        default: throw decoder.invalid("Unsupported blend-mode: \(blend)")
++        }
++        position = try container.decodeIfPresent(IconPosition.self, forKey: .position) ?? .identity
++    }
++}
++
++struct IconPosition: Decodable, Sendable {
++    let scale: Double
++    let translation: [Double]
++
++    static let identity = IconPosition(scale: 1, translation: [0, 0])
++    var isIdentity: Bool { scale == 1 && translation == [0, 0] }
++
++    enum CodingKeys: String, CodingKey {
++        case scale
++        case translation = "translation-in-points"
++    }
++
++    private init(scale: Double, translation: [Double]) {
++        self.scale = scale
++        self.translation = translation
++    }
++
++    init(from decoder: any Decoder) throws {
++        try decoder.checkKeys(CodingKeys.self)
++        let container = try decoder.container(keyedBy: CodingKeys.self)
++        scale = try container.decodeIfPresent(Double.self, forKey: .scale) ?? 1
++        translation = try container.decodeIfPresent([Double].self, forKey: .translation) ?? [0, 0]
++        try decoder.validate(scale, in: 0.0001...1024, property: "scale")
++        guard translation.count == 2 else { throw decoder.invalid("translation-in-points must contain x and y") }
++        for value in translation {
++            try decoder.validate(value, in: -65536...65536, property: "translation-in-points")
++        }
++    }
++}
++
++struct IconShadow: Decodable, Sendable {
++    let opacity: Double
++    let kind: UInt32
++    enum CodingKeys: String, CodingKey { case kind, opacity }
++
++    init(from decoder: any Decoder) throws {
++        try decoder.checkKeys(CodingKeys.self)
++        let container = try decoder.container(keyedBy: CodingKeys.self)
++        let name = try container.decode(String.self, forKey: .kind)
++        switch name {
++        case "none": kind = 0
++        case "neutral": kind = 3
++        default: throw decoder.invalid("Unsupported shadow kind: \(name)")
++        }
++        opacity = try container.decodeIfPresent(Double.self, forKey: .opacity) ?? 1
++        // Icon Composer allows shadow intensity above 1; it is not alpha.
++        try decoder.validate(opacity, in: 0...16, property: "shadow.opacity")
++    }
++}
++
++struct IconTranslucency: Decodable, Sendable {
++    let enabled: Bool
++    let value: Double
++    enum CodingKeys: String, CodingKey { case enabled, value }
++
++    init(from decoder: any Decoder) throws {
++        try decoder.checkKeys(CodingKeys.self)
++        let container = try decoder.container(keyedBy: CodingKeys.self)
++        enabled = try container.decode(Bool.self, forKey: .enabled)
++        value = try container.decode(Double.self, forKey: .value)
++        try decoder.validate(value, in: 0...1, property: "translucency.value")
++    }
++}
++
++enum IconFill: Decodable, Sendable {
++    case color(IconColor)
++    case linearGradient([IconColor], IconOrientation)
++    case automaticGradient(IconColor)
++    case automatic
++    case systemDark
++
++    enum CodingKeys: String, CodingKey {
++        case solid
++        case linearGradient = "linear-gradient"
++        case automaticGradient = "automatic-gradient"
++        case orientation
++    }
++
++    init(from decoder: any Decoder) throws {
++        if let string = try? decoder.singleValueContainer().decode(String.self) {
++            switch string {
++            case "automatic": self = .automatic
++            case "system-dark": self = .systemDark
++            default: self = .color(try IconColor(string, decoder: decoder))
++            }
++            return
++        }
++        try decoder.checkKeys(CodingKeys.self)
++        let container = try decoder.container(keyedBy: CodingKeys.self)
++        let kinds: [CodingKeys] = [.solid, .linearGradient, .automaticGradient]
++        guard kinds.filter({ container.contains($0) }).count == 1 else {
++            throw decoder.invalid("A fill requires exactly one solid, linear-gradient, or automatic-gradient")
++        }
++        if container.contains(.linearGradient) {
++            let colors = try container.decode([String].self, forKey: .linearGradient)
++            guard colors.count >= 2, colors.count <= 16 else {
++                throw decoder.invalid("A linear-gradient requires 2...16 colors")
++            }
++            let orientation = try container.decodeIfPresent(IconOrientation.self, forKey: .orientation) ?? .vertical
++            self = .linearGradient(try colors.map { try IconColor($0, decoder: decoder) }, orientation)
++        } else {
++            guard !container.contains(.orientation) else {
++                throw decoder.invalid("orientation requires a linear-gradient")
++            }
++            if container.contains(.solid) {
++                self = .color(try IconColor(container.decode(String.self, forKey: .solid), decoder: decoder))
++            } else {
++                let color = try container.decode(String.self, forKey: .automaticGradient)
++                self = .automaticGradient(try IconColor(color, decoder: decoder))
++            }
++        }
++    }
++}
++
++struct IconOrientation: Decodable, Hashable, Sendable {
++    struct Point: Decodable, Hashable, Sendable {
++        let x: Double
++        let y: Double
++        enum CodingKeys: String, CodingKey { case x, y }
++        init(from decoder: any Decoder) throws {
++            try decoder.checkKeys(CodingKeys.self)
++            let container = try decoder.container(keyedBy: CodingKeys.self)
++            x = try container.decode(Double.self, forKey: .x)
++            y = try container.decode(Double.self, forKey: .y)
++            try decoder.validate(x, in: -16...16, property: "x")
++            try decoder.validate(y, in: -16...16, property: "y")
++        }
++        init(x: Double, y: Double) { self.x = x; self.y = y }
++    }
++    let start: Point
++    let stop: Point
++    static let vertical = IconOrientation(start: .init(x: 0.5, y: 0), stop: .init(x: 0.5, y: 1))
++    enum CodingKeys: String, CodingKey { case start, stop }
++    init(start: Point, stop: Point) { self.start = start; self.stop = stop }
++    init(from decoder: any Decoder) throws {
++        try decoder.checkKeys(CodingKeys.self)
++        let container = try decoder.container(keyedBy: CodingKeys.self)
++        start = try container.decode(Point.self, forKey: .start)
++        stop = try container.decode(Point.self, forKey: .stop)
++        guard start.x != stop.x || start.y != stop.y else {
++            throw decoder.invalid("Gradient start and stop must differ")
++        }
++    }
++}
++
++struct IconColor: Hashable, Sendable {
++    let colorSpace: UInt32
++    let components: [Double]
++
++    init(_ value: String, decoder: any Decoder) throws {
++        let parts = value.split(separator: ":", omittingEmptySubsequences: false)
++        guard parts.count == 2 else { throw decoder.invalid("Invalid color: \(value)") }
++        let expectedCount: Int
++        switch parts[0] {
++        case "srgb": colorSpace = 1; expectedCount = 4
++        case "gray": colorSpace = 2; expectedCount = 2
++        case "display-p3": colorSpace = 3; expectedCount = 4
++        case "extended-srgb": colorSpace = 4; expectedCount = 4
++        case "extended-gray": colorSpace = 6; expectedCount = 2
++        default: throw decoder.invalid("Unsupported color space: \(parts[0])")
++        }
++        let tokens = parts[1].split(separator: ",", omittingEmptySubsequences: false)
++        let values = tokens.compactMap { Double($0) }
++        guard tokens.count == expectedCount, values.count == expectedCount else {
++            throw decoder.invalid("Invalid color components: \(value)")
++        }
++        for component in values.dropLast() {
++            try decoder.validate(component, in: colorSpace == 4 || colorSpace == 6 ? -16...16 : 0...1, property: "color")
++        }
++        try decoder.validate(values[expectedCount - 1], in: 0...1, property: "color alpha")
++        components = values
++    }
++
++    init(gray: Double) { colorSpace = 2; components = [gray, 1] }
++}
++
++func resolve<Value>(_ base: Value?, specializations: [IconSpecialization<Value>], appearance: IconAppearance) -> Value? {
++    specializations.first { $0.appearance == appearance }?.value
++        ?? specializations.first { $0.appearance == nil }?.value ?? base
++}
++
++private func validateSpecializations<Value>(_ values: [IconSpecialization<Value>], decoder: any Decoder) throws {
++    var seen: Set<IconAppearance?> = []
++    for value in values where !seen.insert(value.appearance).inserted {
++        throw decoder.invalid("Duplicate appearance specialization")
++    }
++}
++
++private struct IconJSONKey: CodingKey {
++    let stringValue: String
++    let intValue: Int? = nil
++    init?(stringValue: String) { self.stringValue = stringValue }
++    init?(intValue: Int) { return nil }
++}
++
++extension Decoder {
++    func checkKeys<Key: CodingKey>(_ type: Key.Type) throws {
++        let container = try container(keyedBy: IconJSONKey.self)
++        for key in container.allKeys where Key(stringValue: key.stringValue) == nil {
++            throw invalid("Unsupported Icon Composer field: \(key.stringValue)")
++        }
++    }
++
++    func invalid(_ message: String) -> DecodingError {
++        .dataCorrupted(.init(codingPath: codingPath, debugDescription: message))
++    }
++
++    func validate(_ value: Double, in range: ClosedRange<Double>, property: String) throws {
++        guard value.isFinite, range.contains(value) else { throw invalid("Invalid \(property): \(value)") }
++    }
++}
+diff --git a/Sources/AssetKit/IconComposer/IconFallbackRenderer.swift b/Sources/AssetKit/IconComposer/IconFallbackRenderer.swift
+new file mode 100644
+index 0000000..6aae710
+--- /dev/null
++++ b/Sources/AssetKit/IconComposer/IconFallbackRenderer.swift
+@@ -0,0 +1,131 @@
++import Foundation
++
++/// Flat artwork for systems that do not understand Icon Composer. Glass
++/// materials remain in the CAR; this renderer deliberately does not pretend
++/// to implement CoreUI's dynamic lighting or group material compositor.
++enum IconFallbackRenderer {
++    static func render(
++        document: IconDocument, source: IconSource, name: String, rasterizer: any SVGRasterizer
++    ) throws -> [LooseFile] {
++        let svg = try composition(document: document, source: source)
++        let sizes: [(String, UInt32)] = [
++            ("\(name)60x60@2x.png", 120), ("\(name)60x60@3x.png", 180),
++            ("\(name)76x76@2x.png", 152), ("\(name)83.5x83.5@2x.png", 167)
++        ]
++        return try sizes.map { filename, size in
++            try Task.checkCancellation()
++            do {
++                let bytes = try rasterizer.rasterize(svgData: svg, pixelWidth: size, pixelHeight: size)
++                let (width, height, _) = try PNGSource.decodeBGRA(bytes)
++                guard width == size, height == size else {
++                    throw IconCompilerError.rasterizationFailed("Incorrect PNG size for \(filename)")
++                }
++                return LooseFile(name: filename, data: bytes)
++            } catch {
++                throw IconCompilerError.rasterizationFailed(String(describing: error))
++            }
++        }
++    }
++
++    private static func composition(document: IconDocument, source: IconSource) throws -> Data {
++        var definitions = ""
++        let background = try paint(
++            backgroundFill(document: document, appearance: .light), id: "background", definitions: &definitions
++        )
++        var body = "<rect width=\"1024\" height=\"1024\" \(background)/>"
++        var index = 0
++        for group in document.groups.reversed() {
++            body += "<g opacity=\"\(group.style.opacity)\"\(try blend(group.style.blendMode))>"
++            for layer in group.layers.reversed() {
++                index += 1
++                let id = "layer\(index)"
++                let image = try source.image(named: layer.imageName)
++                let frame = try image.frame(position: layer.style.position)
++                let imageTag = """
++                <image x="\(frame.x)" y="\(frame.y)" width="\(frame.width)" height="\(frame.height)" \
++                xlink:href="data:image/svg+xml;base64,\(image.data.base64EncodedString())"/>
++                """
++                let fill = resolve(layer.fill, specializations: layer.fillSpecializations, appearance: .light)
++                body += "<g opacity=\"\(layer.style.opacity)\"\(try blend(layer.style.blendMode))>"
++                if let fill {
++                    // alpha, not luminance: black artwork must still receive
++                    // its fill. A color matrix turns the mask RGB white while
++                    // retaining the original source alpha.
++                    definitions += """
++                    <filter id="\(id)Alpha"><feColorMatrix type="matrix" \
++                    values="0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 1 0"/></filter>
++                    <mask id="\(id)Mask" maskUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024">
++                    <g filter="url(#\(id)Alpha)">\(imageTag)</g></mask>
++                    """
++                    let fillPaint = try paint(fill, id: id, definitions: &definitions)
++                    body += "<rect width=\"1024\" height=\"1024\" \(fillPaint) mask=\"url(#\(id)Mask)\"/>"
++                } else {
++                    body += imageTag
++                }
++                body += "</g>"
++            }
++            body += "</g>"
++        }
++        return Data("""
++        <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" \
++        width="1024" height="1024" viewBox="0 0 1024 1024">
++        <defs>\(definitions)</defs>\(body)</svg>
++        """.utf8)
++    }
++
++    private static func paint(_ fill: IconFill, id: String, definitions: inout String) throws -> String {
++        let colors: [IconColor]
++        let direction: IconOrientation
++        switch fill {
++        case .color(let color), .automaticGradient(let color): return colorAttributes(color)
++        case .linearGradient(let values, let orientation): colors = values; direction = orientation
++        case .systemDark:
++            colors = [.init(gray: 0.19200000166893005), .init(gray: 0.07800000160932541)]
++            direction = .vertical
++        case .automatic: throw IconCompilerError.unsupported("Automatic layer fill in legacy fallback")
++        }
++        definitions += """
++        <linearGradient id="\(id)Fill" x1="\(direction.start.x)" y1="\(direction.start.y)" \
++        x2="\(direction.stop.x)" y2="\(direction.stop.y)">
++        """
++        for (index, color) in colors.enumerated() {
++            let rgb = sRGB(color)
++            let location = Double(index) / Double(colors.count - 1)
++            definitions += "<stop offset=\"\(location)\" stop-color=\"\(rgb.css)\" stop-opacity=\"\(rgb.alpha)\"/>"
++        }
++        definitions += "</linearGradient>"
++        return "fill=\"url(#\(id)Fill)\""
++    }
++
++    private static func blend(_ mode: UInt32) throws -> String {
++        guard mode == 0 else {
++            throw IconCompilerError.unsupported("Non-normal blending in legacy PNGs; disable legacy fallbacks")
++        }
++        return ""
++    }
++
++    private static func colorAttributes(_ color: IconColor) -> String {
++        let rgb = sRGB(color)
++        return "fill=\"\(rgb.css)\" fill-opacity=\"\(rgb.alpha)\""
++    }
++
++    private static func sRGB(_ color: IconColor) -> (css: String, alpha: Double) {
++        var rgb = color.components.count == 2 ? Array(repeating: color.components[0], count: 3) : Array(color.components.prefix(3))
++        if color.colorSpace == 3 {
++            func linear(_ value: Double) -> Double {
++                value <= 0.04045 ? value / 12.92 : pow((value + 0.055) / 1.055, 2.4)
++            }
++            func encoded(_ value: Double) -> Double {
++                value <= 0.0031308 ? value * 12.92 : 1.055 * pow(value, 1 / 2.4) - 0.055
++            }
++            let p3 = rgb.map(linear)
++            rgb = [
++                1.224940176 * p3[0] - 0.224940176 * p3[1],
++                -0.042056955 * p3[0] + 1.042056955 * p3[1],
++                -0.019637555 * p3[0] - 0.078636046 * p3[1] + 1.098273601 * p3[2]
++            ].map(encoded)
++        }
++        let bytes = rgb.map { Int((min(1, max(0, $0)) * 255).rounded()) }
++        return ("rgb(\(bytes[0]),\(bytes[1]),\(bytes[2]))", color.components[color.components.count - 1])
++    }
++}
+diff --git a/Sources/AssetKit/IconComposer/IconSource.swift b/Sources/AssetKit/IconComposer/IconSource.swift
+new file mode 100644
+index 0000000..49f4b4a
+--- /dev/null
++++ b/Sources/AssetKit/IconComposer/IconSource.swift
+@@ -0,0 +1,95 @@
++import Foundation
++import FoundationXML
++
++struct IconImage: Sendable {
++    let data: Data
++    let width: Double
++    let height: Double
++
++    func frame(position: IconPosition) throws -> IconFrame {
++        let width = self.width * position.scale
++        let height = self.height * position.scale
++        guard width <= 65536, height <= 65536 else {
++            throw IconCompilerError.invalidAsset("Transformed image exceeds 65536 points")
++        }
++        return IconFrame(
++            x: Int32(((1024 - width) / 2 + position.translation[0]).rounded()),
++            y: Int32(((1024 - height) / 2 + position.translation[1]).rounded()),
++            width: UInt32(max(1, width.rounded())), height: UInt32(max(1, height.rounded()))
++        )
++    }
++}
++
++struct IconSource: Sendable {
++    let images: [String: IconImage]
++
++    static func load(document: IconDocument, directory: URL) throws -> IconSource {
++        let assets = directory.appendingPathComponent("Assets", isDirectory: true).resolvingSymlinksInPath()
++        let directoryPath = directory.resolvingSymlinksInPath().path + "/"
++        guard assets.path.hasPrefix(directoryPath) else {
++            throw IconCompilerError.invalidAsset("Assets directory must be inside the .icon directory")
++        }
++        var images: [String: IconImage] = [:]
++        for layer in document.groups.flatMap(\.layers) where images[layer.imageName] == nil {
++            try Task.checkCancellation()
++            let name = layer.imageName
++            guard !name.isEmpty, !name.contains("\0"), !name.hasPrefix("/"), !name.contains("\\") else {
++                throw IconCompilerError.invalidAsset("Invalid image-name: \(name)")
++            }
++            let file = assets.appendingPathComponent(name).resolvingSymlinksInPath()
++            guard file.path.hasPrefix(assets.path + "/") else {
++                throw IconCompilerError.invalidAsset("Image escapes the Assets directory: \(name)")
++            }
++            guard file.pathExtension.lowercased() == "svg" else {
++                throw IconCompilerError.unsupported("Only SVG image sources are currently supported: \(name)")
++            }
++            let bytes = try Data(contentsOf: file)
++            guard bytes.count <= 16 * 1024 * 1024 else {
++                throw IconCompilerError.invalidAsset("SVG exceeds 16 MiB: \(name)")
++            }
++            let reader = IconSVGDimensions()
++            let parser = XMLParser(data: bytes)
++            parser.shouldResolveExternalEntities = false
++            parser.delegate = reader
++            guard parser.parse(), let size = reader.size else {
++                throw IconCompilerError.invalidAsset("SVG requires a valid root and intrinsic dimensions: \(name)")
++            }
++            images[name] = IconImage(data: bytes, width: size.width, height: size.height)
++        }
++        return IconSource(images: images)
++    }
++
++    func image(named name: String) throws -> IconImage {
++        guard let image = images[name] else { throw IconCompilerError.invalidAsset("Missing image: \(name)") }
++        return image
++    }
++}
++
++private final class IconSVGDimensions: NSObject, XMLParserDelegate {
++    var size: (width: Double, height: Double)?
++    private var sawRoot = false
++
++    func parser(
++        _ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?,
++        qualifiedName qName: String?, attributes attributeDict: [String: String]
++    ) {
++        guard !sawRoot else { return }
++        sawRoot = true
++        guard elementName == "svg" else { return }
++        func length(_ value: String?) -> Double? {
++            guard let value else { return nil }
++            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
++            let text = trimmed.hasSuffix("px") ? String(trimmed.dropLast(2)) : trimmed
++            guard let number = Double(text), number.isFinite, number > 0, number <= 4096 else { return nil }
++            return number
++        }
++        if let width = length(attributeDict["width"]), let height = length(attributeDict["height"]) {
++            size = (width, height)
++        } else if let viewBox = attributeDict["viewBox"] {
++            let values = viewBox.split { $0.isWhitespace || $0 == "," }.map(String.init)
++            if values.count == 4, let width = length(values[2]), let height = length(values[3]) {
++                size = (width, height)
++            }
++        }
++    }
++}
+diff --git a/Sources/AssetKit/XCAssetCompiler.swift b/Sources/AssetKit/XCAssetCompiler.swift
+index 56beff6..d98dcbf 100644
+--- a/Sources/AssetKit/XCAssetCompiler.swift
++++ b/Sources/AssetKit/XCAssetCompiler.swift
+@@ -5,7 +5,7 @@ public struct CompileResult: Sendable {
+     /// contained no assets (callers receive a structurally valid empty CAR).
+     public var carData: Data
+ 
+-    /// Glue needed to ship an `.appiconset` as part of an iOS app bundle.
++    /// Glue needed to ship an `.appiconset` or Icon Composer icon in an iOS app bundle.
+     /// `nil` if the catalog contained no `.appiconset`. Present iff the
+     /// catalog contained exactly one `.appiconset`.
+     public var appIconBundle: AppIconBundle?
+@@ -16,7 +16,7 @@ public struct CompileResult: Sendable {
+     }
+ }
+ 
+-/// iOS-app-bundle glue derived from the catalog's `.appiconset`. The .car
++/// iOS-app-bundle glue derived from an `.appiconset` or Icon Composer icon. The .car
+ /// alone is not enough to ship an iOS app icon: SpringBoard's icon-render
+ /// pipeline falls back to a set of loose PNGs in the bundle root, and the
+ /// `Info.plist` must declare them.
+diff --git a/docs/icon-composer.md b/docs/icon-composer.md
+new file mode 100644
+index 0000000..9973d56
+--- /dev/null
++++ b/docs/icon-composer.md
+@@ -0,0 +1,124 @@
++# Icon Composer (experimental)
++
++`IconCompiler` compiles an Icon Composer `.icon` directory on Linux and macOS.
++It writes an iOS CoreUI 975 catalog with preserved SVGs, icon groups, an icon
++stack, named colors, and named gradients. It does not invoke Apple's `actool`
++or redistribute Apple executables. It reuses AssetKit's BOM and LZFSE writers.
++
++```swift
++let result = try await IconCompiler(deploymentTarget: "15.0")
++    .compile(icon: URL(fileURLWithPath: "AppIcon.icon"))
++// Write result.carData as Assets.car. Merge appIconBundle.infoPlistAdditions
++// into Info.plist and write appIconBundle.looseFiles into the bundle root.
++```
++
++The default legacy fallback renderer requires `rsvg-convert` (Linux:
++`librsvg2-tools`; macOS: Homebrew `librsvg`). Supply an `SVGRasterizer` or set
++`includeLegacyFallbacks: false` to emit just the layered catalog and icon name.
++The fallback PNGs contain flat artwork. They do not reproduce dynamic glass,
++group shadows, blur, translucency, or automatic-gradient lighting. This is a
++compatibility path, not the iOS 26 icon representation.
++
++## Supported document subset
++
++- SVG image sources in `Assets/`, including Unicode filenames. Sources remain
++  SVG renditions; they are not eagerly rasterized into all icon variants.
++- Image scale and translation about the 1024-point canvas center.
++- Groups/layers in Composer's front-to-back order; the compiler reverses both
++  levels for CoreUI's back-to-front records.
++- Group/layer opacity and normal, multiply, screen, overlay, plus-lighter blend
++  modes in the CAR. Legacy PNG generation currently requires normal blending.
++- `glass` and the `is-glass` alias. Conflicting declarations are rejected.
++- Group combined/none lighting, specular, neutral/none shadow, translucency,
++  and `blur-material`. Nonidentity group transforms are rejected.
++- Solid colors, linear gradients with 2...16 equally spaced stops, automatic
++  gradients with a supplied base color, and `system-dark` backgrounds.
++  Solid fills accept Composer's `{"solid": "srgb:..."}` object and the legacy
++  bare color string. Conflicting fill kinds are rejected.
++- sRGB, gray, Display P3, extended sRGB, extended gray colors. The CAR retains
++  the source color space. Legacy PNGs convert P3 to sRGB and clip out-of-gamut
++  components.
++- Base, light, dark, tinted fill specializations. Automatic dark background
++  uses the observed system-dark grayscale stops. Automatic light color
++  inference is not implemented: provide an explicit light specialization.
++  Automatic tinted background inherits the light fill, as in the reference
++  catalogs; tinting is performed by CoreUI.
++- `supported-platforms` is document metadata. This compiler emits **iOS**
++  assets only, regardless of the editor's other selected platforms.
++
++Unknown fields, duplicate specializations, invalid/nonfinite values, asset
++path traversal (including symlinks), missing source files, and oversized
++assets fail with contextual errors. Unsupported effects such as refraction,
++appearance-specific image transforms, and PNG/JPEG layers fail instead of
++being discarded. Sources are limited to 16 MiB, intrinsic dimensions to 4096
++points, and transformed dimensions to 65536 points. The shared BOM writer
++currently supports single-leaf trees: at most 126 assets and 510 renditions.
++
++## Wire format notes
++
++These are observations from existing Xcode-produced catalogs, **not a public
++Apple format contract**. The new writer is experimental until Apple's parser
++and an iOS 26 device confirm compatibility. Source JSON has no schema version;
++future Composer versions may introduce fields that are intentionally rejected.
++
++| Rendition | Layout | Lookup part |
++| --- | --- | --- |
++| SVG source | 9 | 181 |
++| Named color | 1009 | 217 |
++| Icon stack | 1019 | 245 |
++| Icon group | 1020 | 246 |
++| Named gradient | 1021 | 247 |
++
++iOS KEYFORMAT attributes: `[7, 13, 12, 15, 16, 8, 24, 17, 1, 2]`.
++BITMAPKEYS descriptors use a four-word header followed by one UInt32 per
++KEYFORMAT attribute. This profile has ten attributes and 56-byte descriptors;
++the nine-attribute macOS template is incompatible. Rendition keys, KEYFORMAT,
++and descriptor generation share the same ordered attribute definition.
++Appearances: Any=0, Dark=1, Light=4, Tintable=10. Layers reference assets using
++sparse `(attribute, token)` keys with a zero terminator. Identifier allocation
++is deterministic with collision resolution; it does not claim to reproduce
++actool's private name hash.
++
++The icon stack declares a 1024-by-1024 canvas. Both stack and group CSI headers
++use scale factor 100 (1x); source SVGs retain a zero scale factor. These header
++values differ from the scale=1 token in the rendition lookup key.
++
++Layer nodes have TLVs 1012 (geometry and sparse asset references), 1020
++(lighting/glass/fill), and 1021 (material). All three tables begin with a count
++and a reserved UInt32. The lighting entry begins with group lighting or image
++glass, then blur and a fill string. Material entries are 20 bytes each. Do not
++repeat the table's reserved word in individual image entries: a one-image
++table can conceal that error, but subsequent entries become misaligned.
++Fill strings are UTF-8, prefixed with their byte length **including NUL**.
++Named colors use `RLOC` version 1; named gradients use `ARGG`. Stack/group
++bodies are empty DWAR envelopes.
++
++Named fills and sources are deduplicated. Existing `.xcassets` compilation
++retains its CoreUI 970 layout; the new path does not change those rendition
++keys or color encodings. Catalog merging and macOS/watchOS/tvOS icon output
++are not implemented.
++
++## Contribution status
++
++This implementation is a starting point for review, not a claim of complete
++Icon Composer compatibility. Before an upstream release, verify with Apple's
++`assetutil`, inspect the icon on a real device in light/dark/tinted appearances,
++and confirm CoreUI loads the stack rather than selecting a loose PNG fallback.
++Keep any third-party reference artwork out of distributed fixtures.
++
++The supplied Accompanist SVG icon has been verified on an iPhone 16,1 running
++iOS 26.7, with all loose PNGs and their plist declarations removed. The user
++confirmed the home screen icon in light, dark, and tinted appearances. This
++is evidence for that document and runtime; broader compatibility and Apple's
++`assetutil` validation remain pending. The USB SpringBoard PNG API returned a
++placeholder even for an unchanged Xcode-produced catalog whose home screen
++icon displayed correctly, so it cannot substitute for this visual check.
++
++References used for independent format inspection:
++
++- [Apple Icon Composer](https://developer.apple.com/icon-composer/)
++- [OpenUsage icon source and prebuilt catalog](https://github.com/robinebers/openusage/tree/main/assets)
++- [Apollo Reborn icon source and prebuilt catalog](https://github.com/Apollo-Reborn/Apollo-Reborn/tree/main/liquid-glass)
++- [StikDebug 3.1.13 release IPA](https://github.com/StikDebug/StikDebug/releases/tag/3.1.13)
++- [Feather 2.9.0 release IPA](https://github.com/claration/feather/releases/tag/v2.9.0)
++- [CAR container research](https://dbg.re/posts/car-file-format/)
