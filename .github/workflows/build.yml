@@ -285,11 +285,21 @@ jobs:
         shell: bash
         run: |
           python - <<'PY'
-          import os, shutil
+          import os, shutil, xml.etree.ElementTree as ET
           from pathlib import Path
           repository = Path('build/ci-maven')
+          version = os.environ['VERSION']
           for module, suffix in [('lyrics-ui', 'pom'), ('lyrics-ui-jvm', 'jar'), ('lyrics-ui-android', 'aar'), ('lyrics-ui-iosarm64', 'klib')]:
-              path = repository / 'com/mocharealm/accompanist' / module / os.environ['VERSION'] / f'{module}-{os.environ["VERSION"]}.{suffix}'
+              directory = repository / 'com/mocharealm/accompanist' / module / version
+              artifact_version = version
+              if version.endswith('-SNAPSHOT'):
+                  metadata = ET.parse(directory / 'maven-metadata.xml')
+                  matches = [item.findtext('value') for item in metadata.findall('./versioning/snapshotVersions/snapshotVersion')
+                             if item.findtext('extension') == suffix and not item.findtext('classifier')]
+                  if len(matches) != 1:
+                      raise SystemExit(f'Missing snapshot publication: {module}.{suffix}')
+                  artifact_version = matches[0]
+              path = directory / f'{module}-{artifact_version}.{suffix}'
               if not path.is_file():
                   raise SystemExit(f'Missing publication: {path}')
           shutil.make_archive(f'dist/lyrics-ui-{os.environ["VERSION"]}-maven', 'zip', repository)
