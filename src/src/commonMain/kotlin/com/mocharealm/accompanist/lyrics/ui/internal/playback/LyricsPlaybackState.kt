@@ -20,6 +20,7 @@ internal class LyricsPlaybackState(prepared: PreparedLyrics) {
 
 internal class RowPlaybackState {
     val time = mutableIntStateOf(Int.MIN_VALUE)
+    val isAnimating = mutableStateOf(false)
 }
 
 internal class LinePlaybackState(visible: Boolean) {

@@ -24,6 +24,8 @@ import com.mocharealm.accompanist.lyrics.ui.internal.scene.LyricsLayoutRequest
 
 /**
  * Standalone entry point. In a lyrics list, pass a complete prepared line from the parent cache.
+ *
+ * @param currentTimeProvider Playback position in milliseconds, backed by observable Compose state.
  */
 @Composable
 fun KaraokeLineText(
@@ -72,6 +74,7 @@ fun KaraokeLineText(
             scene.lyrics.lines.single()!!,
             scene.timeline.state,
             scene.resources,
+            currentTimeProvider = currentTimeProvider,
             showTranslation = showTranslation,
             showPhonetic = showPhonetic,
             showDebugRectangles = showDebugRectangles,

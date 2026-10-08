@@ -89,7 +89,7 @@ internal class LyricsPlaybackTimeline(lyrics: SyncedLyrics, prepared: PreparedLy
         interludeEnds = starts
         introEnd = starts.firstOrNull() ?: 0
         interludeStarts = IntArray(lines.size) { if (it > 0) ends[it - 1] else 0 }
-        val events = sortedMapOf<Int, TimelineBoundary>()
+        val events = mutableMapOf<Int, TimelineBoundary>()
         fun at(time: Int) = events.getOrPut(time) { TimelineBoundary() }
         at(Int.MIN_VALUE)
         at(0)
@@ -145,7 +145,7 @@ internal class LyricsPlaybackTimeline(lyrics: SyncedLyrics, prepared: PreparedLy
         }
         val future = lines.indices.filter { !embedded[it] }.sortedBy { starts[it] }
         var next = 0
-        val focused = sortedSetOf<Int>()
+        val focused = mutableSetOf<Int>()
         val counts = IntArray(lines.size)
         fun changeFocus(index: Int, delta: Int) {
             counts[index] += delta
@@ -153,14 +153,15 @@ internal class LyricsPlaybackTimeline(lyrics: SyncedLyrics, prepared: PreparedLy
         }
         val rows = linkedSetOf<PreparedRow>()
         val visible = linkedSetOf<PreparedLine>()
-        val interludes = sortedSetOf<Int>()
+        val interludes = mutableSetOf<Int>()
         val focusIntervals = mutableListOf<FocusState>()
         val rowIntervals = mutableListOf<List<PreparedRow>>()
         val visibleIntervals = mutableListOf<List<PreparedLine>>()
         var focusedIndices: List<Int> = emptyList()
         var rowSnapshot: List<PreparedRow> = emptyList()
         var visibleSnapshot: List<PreparedLine> = emptyList()
-        for ((time, event) in events) {
+        val orderedEvents = events.entries.sortedBy { it.key }
+        for ((time, event) in orderedEvents) {
             for (index in event.endingLines) {
                 changeFocus(index, -1)
                 if (anchors[index] != index) changeFocus(anchors[index], -1)
@@ -170,17 +171,17 @@ internal class LyricsPlaybackTimeline(lyrics: SyncedLyrics, prepared: PreparedLy
                 if (anchors[index] != index) changeFocus(anchors[index], 1)
             }
             if (event.endingLines.isNotEmpty() || event.startingLines.isNotEmpty())
-                focusedIndices = focused.toList()
+                focusedIndices = focused.sorted()
             while (next < future.size && starts[future[next]] <= time) next++
             interludes.removeAll(event.endingInterludes.toSet())
             interludes.addAll(event.startingInterludes)
             val first =
-                focused.firstOrNull() ?: future.getOrNull(next) ?: lines.lastIndex.coerceAtLeast(0)
+                focusedIndices.firstOrNull() ?: future.getOrNull(next) ?: lines.lastIndex.coerceAtLeast(0)
             focusIntervals.add(
                 FocusState(
                     first,
                     focusedIndices,
-                    interludes.firstOrNull(),
+                    interludes.minOrNull(),
                     introEnd > 5000 && time >= 0 && time < introEnd,
                 )
             )
@@ -197,13 +198,13 @@ internal class LyricsPlaybackTimeline(lyrics: SyncedLyrics, prepared: PreparedLy
             }
             visibleIntervals.add(visibleSnapshot)
         }
-        boundaries = events.keys.toIntArray()
+        boundaries = orderedEvents.map { it.key }.toIntArray()
         focusStates = focusIntervals
         activeRows = rowIntervals
         visibleLines = visibleIntervals
-        endingRows = events.values.map { it.endingRows }
-        hidingLines = events.values.map { it.hidingLines }
-        showingLines = events.values.map { it.showingLines }
+        endingRows = orderedEvents.map { it.value.endingRows }
+        hidingLines = orderedEvents.map { it.value.hidingLines }
+        showingLines = orderedEvents.map { it.value.showingLines }
         cursor = BoundaryCursor(boundaries)
     }
 
@@ -214,17 +215,24 @@ internal class LyricsPlaybackTimeline(lyrics: SyncedLyrics, prepared: PreparedLy
             val index = cursor.index.coerceAtLeast(0)
             if (seek) {
                 // Seeking changes static rows too, including rows skipped entirely.
-                for (row in allRows) state.row(row).time.intValue = staticTime(row, time)
+                for (row in allRows) {
+                    state.row(row).time.intValue = staticTime(row, time)
+                    state.row(row).isAnimating.value = false
+                }
                 for (line in accompaniment) state.line(line).visible.value = false
                 for (line in visibleLines[index]) state.line(line).visible.value = true
             } else {
                 for (boundary in previousIndex + 1..index) {
-                    for (row in endingRows[boundary]) state.row(row).time.intValue = staticTime(row, time)
+                    for (row in endingRows[boundary]) {
+                        state.row(row).time.intValue = staticTime(row, time)
+                        state.row(row).isAnimating.value = false
+                    }
                     for (line in hidingLines[boundary]) state.line(line).visible.value = false
                     for (line in showingLines[boundary]) state.line(line).visible.value = true
                 }
             }
             previousRows = activeRows[index]
+            for (row in previousRows) state.row(row).isAnimating.value = true
             focus.value = focusStates[index]
         }
         for (index in previousRows.indices) state.row(previousRows[index]).time.intValue = time

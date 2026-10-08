@@ -1,0 +1,37 @@
+duration_ms: 45000
+buffers { size_kb: 65536 fill_policy: RING_BUFFER }
+buffers { size_kb: 8192 fill_policy: RING_BUFFER }
+data_sources {
+  config {
+    name: "linux.ftrace"
+    target_buffer: 0
+    ftrace_config {
+      ftrace_events: "sched/sched_switch"
+      ftrace_events: "sched/sched_waking"
+      ftrace_events: "power/cpu_frequency"
+      ftrace_events: "power/cpu_idle"
+      atrace_categories: "gfx"
+      atrace_categories: "view"
+      atrace_categories: "audio"
+      atrace_categories: "dalvik"
+      atrace_categories: "am"
+      atrace_apps: "com.mocharealm.accompanist.demo"
+    }
+  }
+}
+data_sources { config { name: "android.surfaceflinger.frametimeline" target_buffer: 0 } }
+data_sources { config { name: "linux.process_stats" target_buffer: 1
+  process_stats_config { scan_all_processes_on_start: true proc_stats_poll_ms: 1000 } } }
+data_sources { config { name: "linux.sys_stats" target_buffer: 1
+  sys_stats_config { stat_period_ms: 1000 stat_counters: STAT_CPU_TIMES } } }
+data_sources { config { name: "android.packages_list" target_buffer: 1 } }
+data_sources {
+  config {
+    name: "linux.perf"
+    target_buffer: 1
+    perf_event_config {
+      timebase { counter: SW_CPU_CLOCK frequency: 100 timestamp_clock: PERF_CLOCK_MONOTONIC }
+      callstack_sampling { scope { target_cmdline: "com.mocharealm.accompanist.demo" } }
+    }
+  }
+}

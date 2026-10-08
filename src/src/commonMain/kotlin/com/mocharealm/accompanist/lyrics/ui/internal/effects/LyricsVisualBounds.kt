@@ -13,8 +13,11 @@ import androidx.compose.ui.unit.dp
 internal val LyricsVisualTop = HorizontalAlignmentLine(::minOf)
 internal val LyricsVisualBottom = HorizontalAlignmentLine(::maxOf)
 
-internal fun Modifier.lyricsVisualLayer(block: GraphicsLayerScope.() -> Unit): Modifier =
-    layout { measurable, constraints ->
+internal fun Modifier.lyricsVisualLayer(
+    observePaint: () -> Unit,
+    block: GraphicsLayerScope.() -> Unit,
+): Modifier =
+    lyricsLayerPaintObserver(observePaint).layout { measurable, constraints ->
         val child = measurable.measure(constraints)
         layout(child.width, child.height) {
             // Querying descendants during measure can place them before their parent enters
@@ -40,3 +43,9 @@ internal fun Modifier.lyricsVisualLayer(block: GraphicsLayerScope.() -> Unit): M
             }
         }
     }
+
+// Skia records the paint for a layer with outsets in its parent's display list. Observing only
+// the child layer's properties leaves that recorded alpha/filter unchanged. Observe those values
+// in the parent draw scope too; text rasters and layout remain cached. Android's RenderNode
+// applies these properties directly and needs no additional draw observation.
+internal expect fun Modifier.lyricsLayerPaintObserver(observePaint: () -> Unit): Modifier

@@ -45,6 +45,9 @@ import com.mocharealm.accompanist.lyrics.ui.internal.text.isRtl
  * Prepares a complete scene when content, profiles, typography or available width changes. Playback
  * writes only to the timeline and active row clocks; lazy items never measure karaoke text. Custom
  * profiles precede the defaults (first match wins).
+ *
+ * @param currentPosition Playback position in milliseconds. The provider must read Compose state
+ * that changes with playback; plain player getters do not notify the timeline or request redraws.
  */
 @Composable
 fun KaraokeLyricsView(
@@ -301,6 +304,7 @@ fun KaraokeLyricsView(
                                     prepared,
                                     timeline.state,
                                     scene.resources,
+                                    currentTimeProvider = timeProvider,
                                     verticalPadding = 0.dp,
                                     modifier =
                                         if (line is KaraokeLine.AccompanimentKaraokeLine)

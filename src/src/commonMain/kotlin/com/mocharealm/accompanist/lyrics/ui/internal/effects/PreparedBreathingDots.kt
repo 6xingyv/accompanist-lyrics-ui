@@ -65,7 +65,7 @@ internal class PreparedBreathingDots(
         }
 
     fun dotAlpha(index: Int, time: Float) =
-        0.4f + 0.6f * ((time - enterEnd - dotSpan * index) / dotSpan).coerceIn(0f, 1f)
+        0.2f + 0.8f * ((time - enterEnd - dotSpan * index) / dotSpan).coerceIn(0f, 1f)
 
     fun visibility(time: Float): Float =
         if (!valid || time < 0f || time >= duration) 0f

@@ -19,6 +19,8 @@ import com.mocharealm.accompanist.lyrics.core.model.karaoke.KaraokeLine
 import com.mocharealm.accompanist.lyrics.ui.internal.effects.LyricsReveal
 import com.mocharealm.accompanist.lyrics.ui.internal.effects.LyricsRevealSpring
 import com.mocharealm.accompanist.lyrics.ui.internal.diagnostics.traceLyrics
+import com.mocharealm.accompanist.lyrics.ui.internal.diagnostics.lyricsTraceEnabled
+import com.mocharealm.accompanist.lyrics.ui.internal.diagnostics.setLyricsTraceCounter
 import com.mocharealm.accompanist.lyrics.ui.internal.playback.LyricsPlaybackState
 import com.mocharealm.accompanist.lyrics.ui.preparation.PreparedLine
 
@@ -27,12 +29,14 @@ internal fun PreparedLineText(
     prepared: PreparedLine,
     playback: LyricsPlaybackState,
     resources: LyricsRenderResources,
+    currentTimeProvider: () -> Int,
     modifier: Modifier = Modifier,
     verticalPadding: Dp = 8.dp,
     showTranslation: Boolean = true,
     showPhonetic: Boolean = true,
     showDebugRectangles: Boolean = false,
 ) {
+    val currentTime by rememberUpdatedState(currentTimeProvider)
     val density = LocalDensity.current
     val activeColor = resources.color
     val rasterState = resources.rasterState(prepared)
@@ -73,6 +77,7 @@ internal fun PreparedLineText(
                 line,
                 playback = playback,
                 resources = resources,
+                currentTimeProvider = currentTimeProvider,
                 showTranslation = showTranslation,
                 showPhonetic = showPhonetic,
                 showDebugRectangles = showDebugRectangles,
@@ -83,7 +88,24 @@ internal fun PreparedLineText(
                 horizontalAlignment = alignment,
             ) {
                 for ((index, row) in prepared.rows.withIndex()) {
-                    val clock = playback.row(row).time
+                    val rowPlayback = playback.row(row)
+                    // Timeline state selects the rows that need animation. Read the actual
+                    // position in draw so snapshotFlow scheduling cannot delay their sweep.
+                    // Inactive rows, including gaps within a row, keep their frozen position
+                    // and do not observe the ticking provider.
+                    val drawTime = remember(rowPlayback) {
+                        {
+                            if (rowPlayback.isAnimating.value) {
+                                val now = currentTime()
+                                if (lyricsTraceEnabled()) {
+                                    setLyricsTraceCounter("Lyrics.drawPositionMs", now.toLong())
+                                    setLyricsTraceCounter("Lyrics.timelineLagMs",
+                                        now.toLong() - rowPlayback.time.intValue)
+                                }
+                                now
+                            } else rowPlayback.time.intValue
+                        }
+                    }
                     val renderState = resources.row(row)
                     val layers = raster?.rows?.getOrNull(index)
                     val textHeight = row.height - row.phoneticHeight
@@ -102,7 +124,7 @@ internal fun PreparedLineText(
                                     translate(top = -row.top) {
                                         drawPreparedRow(
                                             row,
-                                            clock.intValue,
+                                            drawTime(),
                                             renderState,
                                             activeColor,
                                             paints,
@@ -138,7 +160,7 @@ internal fun PreparedLineText(
                                             translate(left = -rowLeft, top = -row.top - textHeight) {
                                                 drawPreparedRow(
                                                     row,
-                                                    clock.intValue,
+                                                    drawTime(),
                                                     renderState,
                                                     activeColor,
                                                     paints,
@@ -209,6 +231,7 @@ internal fun PreparedLineText(
                 line,
                 playback = playback,
                 resources = resources,
+                currentTimeProvider = currentTimeProvider,
                 showTranslation = showTranslation,
                 showPhonetic = showPhonetic,
                 showDebugRectangles = showDebugRectangles,

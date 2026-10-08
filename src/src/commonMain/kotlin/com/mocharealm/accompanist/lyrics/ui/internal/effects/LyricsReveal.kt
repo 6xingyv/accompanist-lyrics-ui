@@ -91,7 +91,7 @@ internal fun LyricsReveal(
                         placeable.place(0, offset)
                     }
                 }
-                .lyricsVisualLayer {
+                .lyricsVisualLayer(observePaint = { progress.value }) {
                     val value = progress.value
                     transformOrigin = origin
                     scaleX = revealScale(value)

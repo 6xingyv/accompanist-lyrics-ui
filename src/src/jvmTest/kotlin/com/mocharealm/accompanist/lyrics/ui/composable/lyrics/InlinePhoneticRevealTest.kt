@@ -107,7 +107,8 @@ class InlinePhoneticRevealTest {
             try {
                 scene.setContent {
                     CompositionLocalProvider(LocalLayoutDirection provides direction) {
-                        PreparedLineText(line, playback, resources, verticalPadding = 0.dp)
+                        PreparedLineText(line, playback, resources,
+                            currentTimeProvider = { playback.row(row).time.intValue }, verticalPadding = 0.dp)
                     }
                 }
                 for (time in listOf(0, 1500, Int.MAX_VALUE)) {
@@ -184,6 +185,7 @@ class InlinePhoneticRevealTest {
                     scene.setContent {
                         Row {
                             PreparedLineText(line, playback, resources,
+                                currentTimeProvider = { Int.MAX_VALUE },
                                 modifier = Modifier.width(142.dp).onGloballyPositioned { actualHeight = it.size.height },
                                 verticalPadding = 0.dp, showTranslation = false, showPhonetic = shown)
                             Column(Modifier.onGloballyPositioned { referenceHeight = it.size.height }) {

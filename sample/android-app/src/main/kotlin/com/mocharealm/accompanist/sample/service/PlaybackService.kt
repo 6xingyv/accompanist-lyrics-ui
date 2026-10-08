@@ -11,6 +11,10 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import com.mocharealm.accompanist.sample.MainActivity
+import com.mocharealm.accompanist.sample.PlaybackTimingTrace
+import com.mocharealm.accompanist.sample.AudioOutputTimingTrace
+import androidx.media3.exoplayer.audio.AudioSink
+import android.content.Context
 
 class PlaybackService : MediaSessionService() {
 
@@ -25,12 +29,29 @@ class PlaybackService : MediaSessionService() {
     @OptIn(UnstableApi::class)
     private fun initializePlayerAndSession() {
         val renderersFactory =
-            DefaultRenderersFactory(this).apply {
+            object : DefaultRenderersFactory(this) {
+                override fun buildAudioSink(
+                    context: Context,
+                    enableFloatOutput: Boolean,
+                    enableAudioOutputPlaybackParams: Boolean,
+                ): AudioSink = AudioOutputTimingTrace.createSink(
+                    context, enableFloatOutput, enableAudioOutputPlaybackParams,
+                )
+            }.apply {
                 setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
             }
 
         player =
             ExoPlayer.Builder(this, renderersFactory)
+                // Media3 1.11's dynamic audio loop can sleep for half the output buffer.
+                // Its non-offload currentPosition stays cached during that sleep, so
+                // MediaSession publishes an old position with a new timestamp. Use the
+                // 10 ms playback loop as a temporary workaround for:
+                // https://github.com/androidx/media/issues/3286
+                // TODO: After upgrading to a version containing the upstream fix,
+                // verify release lyric/output clock alignment and re-enable dynamic
+                // scheduling to restore its power savings.
+                .experimentalSetDynamicSchedulingEnabled(false)
                 .setAudioAttributes(
                     AudioAttributes.Builder()
                         .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
@@ -42,6 +63,8 @@ class PlaybackService : MediaSessionService() {
 
         val sessionActivityIntent =
             Intent(this, MainActivity::class.java).apply { flags = Intent.FLAG_ACTIVITY_SINGLE_TOP }
+
+        PlaybackTimingTrace.player = player
 
         val sessionActivityPendingIntent =
             PendingIntent.getActivity(this, 0, sessionActivityIntent, PendingIntent.FLAG_IMMUTABLE)
@@ -57,6 +80,8 @@ class PlaybackService : MediaSessionService() {
     }
 
     override fun onDestroy() {
+        PlaybackTimingTrace.player = null
+        AudioOutputTimingTrace.clear()
         mediaSession?.run {
             player.release()
             release()

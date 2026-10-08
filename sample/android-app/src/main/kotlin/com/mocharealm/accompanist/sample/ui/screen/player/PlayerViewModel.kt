@@ -25,6 +25,7 @@ import com.mocharealm.accompanist.sample.domain.repository.MusicRepository
 import com.mocharealm.accompanist.sample.service.PlaybackService
 import com.mocharealm.accompanist.sample.ui.composable.background.BackgroundVisualState
 import com.mocharealm.accompanist.sample.ui.playback.PlaybackSnapshot
+import com.mocharealm.accompanist.sample.PlaybackTimingTrace
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -333,6 +334,10 @@ class PlayerViewModel(
         } else {
             controller.play()
         }
+    }
+
+    internal fun recordPlaybackTiming(position: Int) {
+        PlaybackTimingTrace.read(mediaController, position, _playbackState.value)
     }
 
     fun seekTo(position: Int) {

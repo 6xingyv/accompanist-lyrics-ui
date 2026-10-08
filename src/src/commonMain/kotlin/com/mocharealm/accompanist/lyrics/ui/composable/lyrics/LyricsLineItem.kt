@@ -62,7 +62,10 @@ fun LyricsLineItem(
 
     Box(
         modifier =
-            modifier.fillMaxWidth().lyricsVisualLayer {
+            modifier.fillMaxWidth().lyricsVisualLayer(observePaint = {
+                alphaState
+                blurRadius()
+            }) {
                 scaleX = scaleState
                 scaleY = scaleState
                 alpha = alphaState
