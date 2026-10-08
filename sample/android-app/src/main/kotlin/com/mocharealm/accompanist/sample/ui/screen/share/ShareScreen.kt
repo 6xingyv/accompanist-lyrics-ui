@@ -69,7 +69,7 @@ import com.mocharealm.accompanist.sample.Res
 import com.mocharealm.accompanist.sample.ic_accompanist
 import com.mocharealm.accompanist.sample.ui.composable.background.BackgroundVisualState
 import com.mocharealm.accompanist.sample.ui.composable.background.FlowingLightBackground
-import com.mocharealm.accompanist.sample.ui.screen.player.PlayerMetadata
+import com.mocharealm.accompanist.sample.ui.composable.player.PlayerMetadata
 import com.mocharealm.accompanist.sample.ui.utils.composable.Capturable
 import com.mocharealm.accompanist.sample.ui.utils.composable.CapturableController
 import com.mocharealm.accompanist.sample.ui.utils.composable.rememberCapturableController

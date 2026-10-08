@@ -24,15 +24,19 @@ private fun sfProFont(weight: FontWeight) =
     )
 
 @Composable
-fun SFPro(): FontFamily {
+expect fun SFPro(): FontFamily
+
+@Composable
+internal fun bundledSFPro(): FontFamily {
     val extraLight = sfProFont(FontWeight.ExtraLight)
     val light = sfProFont(FontWeight.Light)
+    val normal = sfProFont(FontWeight.Normal)
     val medium = sfProFont(FontWeight.Medium)
     val semiBold = sfProFont(FontWeight.SemiBold)
     val bold = sfProFont(FontWeight.Bold)
     val extraBold = sfProFont(FontWeight.ExtraBold)
-    return remember(extraLight, light, medium, semiBold, bold, extraBold) {
-        FontFamily(extraLight, light, medium, semiBold, bold, extraBold)
+    return remember(extraLight, light, normal, medium, semiBold, bold, extraBold) {
+        FontFamily(extraLight, light, normal, medium, semiBold, bold, extraBold)
     }
 }
 

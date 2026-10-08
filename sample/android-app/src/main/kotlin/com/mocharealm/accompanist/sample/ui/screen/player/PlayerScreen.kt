@@ -10,35 +10,10 @@ import android.os.SystemClock
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.animateContentSize
-import androidx.compose.foundation.MarqueeSpacing
-import androidx.compose.foundation.background
-import androidx.compose.foundation.basicMarquee
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.captionBarPadding
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.Icon
-import androidx.compose.material3.LocalTextStyle
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -47,22 +22,10 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.BlendMode
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.asAndroidBitmap
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextMotion
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.em
-import androidx.compose.ui.unit.sp
 import com.mocharealm.accompanist.lyrics.core.model.SyncedLyrics
 import com.mocharealm.accompanist.lyrics.core.model.karaoke.KaraokeLine
 import com.mocharealm.accompanist.lyrics.core.model.synced.SyncedLine
@@ -70,28 +33,24 @@ import com.mocharealm.accompanist.lyrics.ui.composable.list.LyricsLazyListState
 import com.mocharealm.accompanist.lyrics.ui.composable.list.rememberLyricsLazyListState
 import com.mocharealm.accompanist.lyrics.ui.composable.lyrics.LyricsFade
 import com.mocharealm.accompanist.lyrics.ui.composable.lyrics.LyricsAnchor
-import com.mocharealm.accompanist.lyrics.ui.composable.lyrics.KaraokeLyricsView
 import com.mocharealm.accompanist.sample.Res
 import com.mocharealm.accompanist.sample.data.repository.MusicRepositoryImpl
 import com.mocharealm.accompanist.sample.domain.model.MusicItem
 import com.mocharealm.accompanist.sample.empty
-import com.mocharealm.accompanist.sample.ic_ellipsis
-import com.mocharealm.accompanist.sample.ic_phonetic
-import com.mocharealm.accompanist.sample.ic_translation
 import com.mocharealm.accompanist.sample.ui.adaptive.LocalWindowLayoutType
 import com.mocharealm.accompanist.sample.ui.adaptive.WindowLayoutType
 import com.mocharealm.accompanist.sample.ui.composable.ModalScaffold
 import com.mocharealm.accompanist.sample.ui.composable.background.BackgroundVisualState
-import com.mocharealm.accompanist.sample.ui.composable.background.FlowingLightBackground
+import com.mocharealm.accompanist.sample.ui.composable.player.PlayerLayout
+import com.mocharealm.accompanist.sample.ui.composable.player.PlayerSurface
 import com.mocharealm.accompanist.sample.ui.playback.rememberPlaybackPosition
 import com.mocharealm.accompanist.sample.ui.screen.share.ShareContext
 import com.mocharealm.accompanist.sample.ui.screen.share.ShareScreen
 import com.mocharealm.accompanist.sample.ui.screen.share.ShareViewModel
-import com.mocharealm.accompanist.sample.ui.theme.SFPro
-import com.mocharealm.gaze.capsule.ContinuousRoundedRectangle
-import kotlinx.coroutines.launch
+import com.mocharealm.accompanist.sample.ui.composable.player.PlayerControls
+import com.mocharealm.accompanist.sample.ui.composable.player.SongSelectionDialogContent
+import com.mocharealm.accompanist.sample.ui.composable.player.PlayerLyricsPanel
 import org.jetbrains.compose.resources.imageResource
-import org.jetbrains.compose.resources.painterResource
 import org.koin.compose.viewmodel.koinViewModel
 
 @Composable
@@ -103,7 +62,13 @@ fun PlayerScreen(
     val animatedPositionState =
         rememberPlaybackPosition(playerViewModel.playbackState, SystemClock::uptimeMillis)
     val currentPositionProvider =
-        remember(animatedPositionState) { { animatedPositionState.intValue } }
+        remember(animatedPositionState, playerViewModel) {
+            {
+                val position = animatedPositionState.intValue
+                playerViewModel.recordPlaybackTiming(position)
+                position
+            }
+        }
     val uiStateState = playerViewModel.uiState.collectAsState()
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -120,98 +85,58 @@ fun PlayerScreen(
         ) {
             val backgroundState by
             remember(uiStateState) { derivedStateOf { uiStateState.value.backgroundState } }
-            FlowingLightBackground(state = backgroundState, modifier = Modifier.fillMaxSize())
-            val artworkData by
-            remember(uiStateState) { derivedStateOf { uiStateState.value.artworkData } }
+            PlayerSurface(backgroundState) {
+                val artworkData by
+                remember(uiStateState) { derivedStateOf { uiStateState.value.artworkData } }
 
-            val layoutType = LocalWindowLayoutType.current
-            when (layoutType) {
-                WindowLayoutType.Phone -> {
-                    val currentMusicItem by
-                    remember(uiStateState) {
-                        derivedStateOf { uiStateState.value.currentMusicItem }
-                    }
-                    val showTranslation by
-                    remember(uiStateState) {
-                        derivedStateOf { uiStateState.value.showTranslation }
-                    }
-                    val showPhonetic by
-                    remember(uiStateState) {
-                        derivedStateOf { uiStateState.value.showPhonetic }
-                    }
-                    val lyrics by
-                    remember(uiStateState) { derivedStateOf { uiStateState.value.lyrics } }
+                val currentMusicItem by
+                remember(uiStateState) { derivedStateOf { uiStateState.value.currentMusicItem } }
+                val showTranslation by
+                remember(uiStateState) { derivedStateOf { uiStateState.value.showTranslation } }
+                val showPhonetic by
+                remember(uiStateState) { derivedStateOf { uiStateState.value.showPhonetic } }
+                val lyrics by
+                remember(uiStateState) { derivedStateOf { uiStateState.value.lyrics } }
 
-                    MobilePlayerScreen(
-                        listState = listState,
-                        animatedPosition = currentPositionProvider,
-                        playerViewModel = playerViewModel,
-                        shareViewModel = shareViewModel,
-                        backgroundState = backgroundState,
-                        artworkData = artworkData,
-                        currentMusicItem = currentMusicItem,
-                        showTranslation = showTranslation,
-                        showPhonetic = showPhonetic,
-                        lyrics = lyrics,
-                    )
-                }
-
-                else -> {
-                    val currentMusicItem by
-                    remember(uiStateState) {
-                        derivedStateOf { uiStateState.value.currentMusicItem }
-                    }
-                    val showTranslation by
-                    remember(uiStateState) {
-                        derivedStateOf { uiStateState.value.showTranslation }
-                    }
-                    val showPhonetic by
-                    remember(uiStateState) {
-                        derivedStateOf { uiStateState.value.showPhonetic }
-                    }
-                    val lyrics by
-                    remember(uiStateState) { derivedStateOf { uiStateState.value.lyrics } }
-
-                    PadPlayerScreen(
-                        listState = listState,
-                        animatedPosition = currentPositionProvider,
-                        playerViewModel = playerViewModel,
-                        shareViewModel = shareViewModel,
-                        backgroundState = backgroundState,
-                        artworkData = artworkData,
-                        currentMusicItem = currentMusicItem,
-                        showTranslation = showTranslation,
-                        showPhonetic = showPhonetic,
-                        lyrics = lyrics,
-                    )
-                }
-            }
-
-            val showSelectionDialog by
-            remember(uiStateState) { derivedStateOf { uiStateState.value.showSelectionDialog } }
-            if (showSelectionDialog) {
-                val importing by
-                remember(uiStateState) { derivedStateOf { uiStateState.value.isImporting } }
-                val ready by
-                remember(uiStateState) { derivedStateOf { uiStateState.value.isReady } }
-                val selectionError by
-                remember(uiStateState) { derivedStateOf { uiStateState.value.selectionError } }
-                SongSelectionDialog(
-                    onSongSelected = { audio, lyrics, translation ->
-                        playerViewModel.onFilesSelected(audio, lyrics, translation)
-                    },
-                    onDismissRequest = playerViewModel::onDismissSongSelection,
-                    isImporting = importing,
-                    isReady = ready,
-                    error = selectionError,
+                AndroidPlayerContent(
+                    listState = listState,
+                    animatedPosition = currentPositionProvider,
+                    playerViewModel = playerViewModel,
+                    shareViewModel = shareViewModel,
+                    backgroundState = backgroundState,
+                    artworkData = artworkData,
+                    currentMusicItem = currentMusicItem,
+                    showTranslation = showTranslation,
+                    showPhonetic = showPhonetic,
+                    lyrics = lyrics,
                 )
+
+                val showSelectionDialog by
+                remember(uiStateState) { derivedStateOf { uiStateState.value.showSelectionDialog } }
+                if (showSelectionDialog) {
+                    val importing by
+                    remember(uiStateState) { derivedStateOf { uiStateState.value.isImporting } }
+                    val ready by
+                    remember(uiStateState) { derivedStateOf { uiStateState.value.isReady } }
+                    val selectionError by
+                    remember(uiStateState) { derivedStateOf { uiStateState.value.selectionError } }
+                    SongSelectionDialog(
+                        onSongSelected = { audio, lyrics, translation ->
+                            playerViewModel.onFilesSelected(audio, lyrics, translation)
+                        },
+                        onDismissRequest = playerViewModel::onDismissSongSelection,
+                        isImporting = importing,
+                        isReady = ready,
+                        error = selectionError,
+                    )
+                }
             }
         }
     }
 }
 
 @Composable
-fun MobilePlayerScreen(
+private fun AndroidPlayerContent(
     listState: LyricsLazyListState,
     animatedPosition: () -> Int,
     playerViewModel: PlayerViewModel,
@@ -223,61 +148,40 @@ fun MobilePlayerScreen(
     showPhonetic: Boolean,
     lyrics: SyncedLyrics?,
 ) {
-    Column {
-        Row(
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-            modifier =
-                Modifier
-                    .captionBarPadding()
-                    .statusBarsPadding()
-                    .padding(horizontal = 28.dp)
-                    .padding(top = 28.dp)
-                    .fillMaxWidth(),
-        ) {
-            Row(
-                Modifier.weight(1f),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                if (artworkData != null) {
-                    PlayerArtwork(
-                        artworkData,
-                        imageResource(Res.drawable.empty),
-                        Modifier
-                            .clip(ContinuousRoundedRectangle(12.dp))
-                            .size(72.dp),
-                    )
-                }
-                PlayerMetadata(
-                    currentMusicItem?.label ?: "Unknown Title",
-                    currentMusicItem?.artist ?: "Unknown",
-                )
-            }
-            Spacer(Modifier.width(8.dp))
+    PlayerLayout(
+        title = currentMusicItem?.label ?: "Unknown Title",
+        artist = currentMusicItem?.artist ?: "Unknown",
+        metadataTimeMillis = animatedPosition,
+        hasArtwork = artworkData != null,
+        artwork = { modifier ->
+            PlayerArtwork(artworkData, imageResource(Res.drawable.empty), modifier)
+        },
+        modifier = Modifier.captionBarPadding().statusBarsPadding(),
+        compact = LocalWindowLayoutType.current == WindowLayoutType.Phone,
+        showLyricsInWideLayout = lyrics != null,
+        controls = {
             PlayerControls(
-                onOpenSongSelection = { playerViewModel.onOpenSongSelection() },
+                onOpenSongSelection = playerViewModel::onOpenSongSelection,
                 showTranslation = showTranslation,
                 showPhonetic = showPhonetic,
-                onToggleTranslation = { playerViewModel.toggleTranslation() },
-                onTogglePhonetic = { playerViewModel.togglePhonetic() },
+                onToggleTranslation = playerViewModel::toggleTranslation,
+                onTogglePhonetic = playerViewModel::togglePhonetic,
             )
-        }
-
-        val cover = (backgroundState.bitmap ?: imageResource(Res.drawable.empty)).asAndroidBitmap()
-        PlayerLyrics(
-            listState = listState,
-            lyrics = lyrics,
-            currentPosition = animatedPosition,
-            showTranslation = showTranslation,
-            showPhonetic = showPhonetic,
-            onSeekTo = { playerViewModel.seekTo(it) },
-            onShare = { line ->
-                lyrics?.let { lyrics ->
-                    playerViewModel.onShareRequested()
-                    val context =
-                        ShareContext(
-                            lyrics = lyrics,
+        },
+        lyrics = { modifier, anchor, bottomFade ->
+            val cover = (backgroundState.bitmap ?: imageResource(Res.drawable.empty)).asAndroidBitmap()
+            PlayerLyrics(
+                listState = listState,
+                lyrics = lyrics,
+                currentPosition = animatedPosition,
+                showTranslation = showTranslation,
+                showPhonetic = showPhonetic,
+                onSeekTo = playerViewModel::seekTo,
+                onShare = { line ->
+                    lyrics?.let {
+                        playerViewModel.onShareRequested()
+                        val context = ShareContext(
+                            lyrics = it,
                             initialLine = line,
                             backgroundState = backgroundState,
                             title = currentMusicItem?.label ?: "Unknown Title",
@@ -285,120 +189,16 @@ fun MobilePlayerScreen(
                             cover = cover,
                             artworkData = artworkData,
                         )
-                    shareViewModel.prepareForSharing(context)
-                    playerViewModel.onShareRequested()
-                }
-            },
-            modifier = Modifier.padding(horizontal = 12.dp),
-        )
-    }
-}
-
-@Composable
-fun PadPlayerScreen(
-    listState: LyricsLazyListState,
-    animatedPosition: () -> Int,
-    playerViewModel: PlayerViewModel,
-    shareViewModel: ShareViewModel,
-    backgroundState: BackgroundVisualState,
-    artworkData: ByteArray?,
-    currentMusicItem: MusicItem?,
-    showTranslation: Boolean,
-    showPhonetic: Boolean,
-    lyrics: SyncedLyrics?,
-) {
-    Row(
-        Modifier
-            .captionBarPadding()
-            .statusBarsPadding()
-            .fillMaxWidth()
-            .animateContentSize(),
-        horizontalArrangement = Arrangement.Center,
-    ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center,
-            modifier =
-                Modifier
-                    .fillMaxWidth(0.4f)
-                    .fillMaxHeight()
-                    .padding(start = 100.dp)
-                    .padding(top = 28.dp),
-        ) {
-            PlayerArtwork(
-                artworkData,
-                imageResource(Res.drawable.empty),
-                Modifier
-                    //                        .dropShadow(ContinuousRoundedRectangle(12.dp)) {
-                    //                            radius = 10f
-                    //                            color = Color.Black.copy(0.2f)
-                    //                            offset = Offset(0f, 16f)
-                    //                            spread = -10f
-                    //                        }
-                    .clip(ContinuousRoundedRectangle(12.dp))
-                    .fillMaxWidth()
-                    .aspectRatio(1f),
-            )
-            Spacer(
-                Modifier
-                    .fillMaxWidth()
-                    .height(28.dp)
-            )
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                PlayerMetadata(
-                    currentMusicItem?.label ?: "Unknown Title",
-                    currentMusicItem?.artist ?: "Unknown",
-                )
-                PlayerControls(
-                    onOpenSongSelection = { playerViewModel.onOpenSongSelection() },
-                    showTranslation = showTranslation,
-                    showPhonetic = showPhonetic,
-                    onToggleTranslation = { playerViewModel.toggleTranslation() },
-                    onTogglePhonetic = { playerViewModel.togglePhonetic() },
-                )
-            }
-        }
-        AnimatedVisibility(lyrics != null) {
-            val cover =
-                (backgroundState.bitmap ?: imageResource(Res.drawable.empty)).asAndroidBitmap()
-            PlayerLyrics(
-                anchor = LyricsAnchor.Fraction(0.4f),
-                bottomFade = LyricsFade.Fraction(0.2f),
-                listState = listState,
-                lyrics = lyrics,
-                currentPosition = animatedPosition,
-                showTranslation = showTranslation,
-                showPhonetic = showPhonetic,
-                onSeekTo = { playerViewModel.seekTo(it) },
-                onShare = { line ->
-                    lyrics?.let { lyrics ->
-                        playerViewModel.onShareRequested()
-                        val context =
-                            ShareContext(
-                                lyrics = lyrics,
-                                initialLine = line,
-                                backgroundState = backgroundState,
-                                title = currentMusicItem?.label ?: "Unknown Title",
-                                artist = currentMusicItem?.artist ?: "Unknown",
-                                cover = cover,
-                                artworkData = artworkData,
-                            )
                         shareViewModel.prepareForSharing(context)
                         playerViewModel.onShareRequested()
                     }
                 },
-                modifier =
-                    Modifier
-                        .padding(horizontal = 12.dp)
-                        .padding(start = 60.dp, end = 60.dp)
-                        .weight(1f),
+                modifier = modifier,
+                anchor = anchor,
+                bottomFade = bottomFade,
             )
-        }
-    }
+        },
+    )
 }
 
 @Composable
@@ -513,48 +313,17 @@ fun SongSelectionDialog(
                 translationName = displayNameForUri(context, uri)
             }
         }
-    AlertDialog(
+    SongSelectionDialogContent(
+        audioName = audioName, lyricsName = lyricsName, translationName = translationName,
+        audioSelected = audioUri != null, isImporting = isImporting, isReady = isReady,
+        error = error,
+        onSelectAudio = ::selectAudio,
+        onSelectLyrics = { lyricsLauncher.launch(arrayOf("*/*")) },
+        onSelectTranslation = { translationLauncher.launch(arrayOf("*/*")) },
+        onPlay = { audioUri?.let { onSongSelected(it, lyricsUri, translationUri) } },
         onDismissRequest = onDismissRequest,
-        title = { Text("Open local files") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(
-                    onClick = { selectAudio() },
-                    enabled = !isImporting,
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Text(audioName)
-                }
-                OutlinedButton(
-                    onClick = { lyricsLauncher.launch(arrayOf("*/*")) },
-                    enabled = !isImporting,
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Text(lyricsName)
-                }
-                OutlinedButton(
-                    onClick = { translationLauncher.launch(arrayOf("*/*")) },
-                    enabled = !isImporting,
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Text(translationName)
-                }
-                if (!storageAccess)
-                    Text("Allow file access to automatically match lyrics beside the audio file.")
-                error?.let {
-                    Text(it, color = androidx.compose.material3.MaterialTheme.colorScheme.error)
-                }
-            }
-        },
-        confirmButton = {
-            Button(
-                onClick = { audioUri?.let { onSongSelected(it, lyricsUri, translationUri) } },
-                enabled = audioUri != null && isReady && !isImporting,
-            ) {
-                Text(if (isImporting) "Opening…" else "Play")
-            }
-        },
-        dismissButton = { Button(onClick = onDismissRequest) { Text("Cancel") } },
+        fileAccessMessage = if (!storageAccess)
+            "Allow file access to automatically match lyrics beside the audio file." else null,
     )
 }
 
@@ -573,118 +342,6 @@ private fun displayNameForUri(context: android.content.Context, uri: Uri): Strin
         .getOrNull() ?: uri.path?.substringAfterLast('/') ?: "Selected file"
 
 @Composable
-fun PlayerMetadata(title: String, artist: String, modifier: Modifier = Modifier) {
-    Column(
-        modifier = Modifier
-            .graphicsLayer {
-                blendMode = BlendMode.Plus
-                compositingStrategy = CompositingStrategy.Offscreen
-            }
-    ) {
-        Text(
-            text = title,
-            style = TextStyle(
-                fontSize = 16.sp,
-                lineHeight = 16.sp,
-                fontWeight = FontWeight.SemiBold
-            ),
-            color = Color.White,
-            modifier = Modifier
-                .basicMarquee(spacing = MarqueeSpacing(20.dp), repeatDelayMillis = 2000),
-        )
-        Text(
-            text = artist,
-            style = TextStyle(
-                fontSize = 15.sp,
-                lineHeight = 15.sp,
-                fontWeight = FontWeight.Medium
-            ),
-            modifier = Modifier
-                .alpha(0.4f)
-                .basicMarquee(spacing = MarqueeSpacing(20.dp), repeatDelayMillis = 2000),
-            color = Color.White,
-        )
-    }
-}
-
-@Composable
-fun PlayerControls(
-    onOpenSongSelection: () -> Unit,
-    showTranslation: Boolean,
-    showPhonetic: Boolean,
-    onToggleTranslation: () -> Unit,
-    onTogglePhonetic: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    Row(
-        modifier = modifier.graphicsLayer { blendMode = BlendMode.Plus },
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Box(
-            Modifier
-                .clip(CircleShape)
-                .background(Color.White.copy(if (showTranslation) 0.6f else 0.2f))
-                .clickable(onClick = onToggleTranslation)
-                .padding(4.dp)
-        ) {
-            Icon(
-                painterResource(Res.drawable.ic_translation),
-                null,
-                Modifier
-                    .size(20.dp)
-                    .align(Alignment.Center)
-                    .graphicsLayer {
-                        if (showTranslation) {
-                            blendMode = BlendMode.DstOut
-                        }
-                    },
-                tint = Color.White,
-            )
-        }
-
-        Box(
-            Modifier
-                .clip(CircleShape)
-                .background(Color.White.copy(if (showPhonetic) 0.6f else 0.2f))
-                .clickable(onClick = onTogglePhonetic)
-                .padding(4.dp)
-        ) {
-            Icon(
-                painterResource(Res.drawable.ic_phonetic),
-                null,
-                Modifier
-                    .size(20.dp)
-                    .align(Alignment.Center)
-                    .graphicsLayer {
-                        if (showPhonetic) {
-                            blendMode = BlendMode.DstOut
-                        }
-                    },
-                tint = Color.White,
-            )
-        }
-
-        Box(
-            Modifier
-                .clip(CircleShape)
-                .background(Color.White.copy(0.2f))
-                .clickable(onClick = onOpenSongSelection)
-                .padding(4.dp)
-        ) {
-            Icon(
-                painterResource(Res.drawable.ic_ellipsis),
-                null,
-                Modifier
-                    .size(20.dp)
-                    .align(Alignment.Center),
-                tint = Color.White,
-            )
-        }
-    }
-}
-
-@Composable
 fun PlayerLyrics(
     listState: LyricsLazyListState,
     lyrics: SyncedLyrics?,
@@ -697,42 +354,7 @@ fun PlayerLyrics(
     anchor: LyricsAnchor = LyricsAnchor.Fixed(64.dp),
     bottomFade: LyricsFade = LyricsFade.Fraction(0.5f),
 ) {
-    if (lyrics == null) {
-        Box(modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Text(
-                "No timed lyrics loaded. Open local audio and lyrics to begin.",
-                color = Color.White.copy(alpha = 0.6f),
-                modifier = Modifier.padding(24.dp),
-            )
-        }
-        return
-    }
-
-    val currentTextStyle = LocalTextStyle.current
-    val sf = SFPro()
-    val normalStyle =
-        remember(currentTextStyle, sf) {
-            currentTextStyle.copy(
-                fontSize = 34.sp,
-                lineHeight = androidx.compose.ui.unit.TextUnit.Unspecified,
-                fontFamily = sf,
-                fontWeight = FontWeight.Bold,
-                textMotion = TextMotion.Animated,
-            )
-        }
-
-    val accompanimentStyle =
-        remember(currentTextStyle, sf) {
-            currentTextStyle.copy(
-                fontSize = 20.sp,
-                lineHeight = androidx.compose.ui.unit.TextUnit.Unspecified,
-                fontFamily = sf,
-                fontWeight = FontWeight.Bold,
-                textMotion = TextMotion.Animated,
-            )
-        }
-
-    KaraokeLyricsView(
+    PlayerLyricsPanel(
         anchor = anchor,
         bottomFade = bottomFade,
         listState = listState,
@@ -760,9 +382,6 @@ fun PlayerLyrics(
         },
         showTranslation = showTranslation,
         showPhonetic = showPhonetic,
-        normalLineTextStyle = normalStyle,
-        accompanimentLineTextStyle = accompanimentStyle,
         modifier = modifier,
-        useBlurEffect = true,
     )
 }
