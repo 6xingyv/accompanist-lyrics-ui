@@ -8,6 +8,17 @@ plugins {
     alias(libs.plugins.compose.compiler)
     alias(libs.plugins.maven.publish)
     alias(libs.plugins.dokka)
+    id("androidx.baselineprofile.consumer")
+}
+
+baselineProfile {
+    saveInSrc = true
+    automaticGenerationDuringBuild = false
+    filter { include("com.mocharealm.accompanist.lyrics.ui.**") }
+    variants {
+        // Android KMP profile dependencies use the extension, not an Android dependency block.
+        create("androidMain") { from(project(":benchmark")) }
+    }
 }
 
 kotlin {

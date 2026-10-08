@@ -5,6 +5,7 @@ plugins {
     alias(libs.plugins.jetbrains.compose)
     alias(libs.plugins.compose.compiler)
     alias(libs.plugins.stability.analyzer)
+    alias(libs.plugins.baselineprofile)
 }
 
 val phoneticTestPacks by configurations.creating {
@@ -117,6 +118,29 @@ android {
     }
 }
 
+// Run after the Baseline Profile plugin has cloned release into its test target variants.
+androidComponents.finalizeDsl {
+    listOf("benchmarkRelease", "nonMinifiedRelease").forEach { variant ->
+        it.buildTypes.getByName(variant).apply {
+            applicationIdSuffix = ".benchmark"
+            signingConfig = it.signingConfigs.getByName("debug")
+        }
+        // Source sets are also copied by the plugin during finalization.
+        it.sourceSets.getByName(variant).apply {
+            kotlin.srcDir("src/performance/kotlin")
+            manifest.srcFile("src/performance/AndroidManifest.xml")
+        }
+    }
+}
+
+androidComponents.onVariants { variant ->
+    if (variant.buildType == "benchmarkRelease" || variant.buildType == "nonMinifiedRelease") {
+        check(variant.applicationId.get() == "com.mocharealm.accompanist.demo.benchmark") {
+            "Performance variants must use the isolated benchmark package"
+        }
+    }
+}
+
 kotlin {
     compilerOptions {
         jvmTarget = JvmTarget.JVM_21
@@ -131,6 +155,8 @@ dependencies {
     )) {
         phoneticTestPacks(variantOf(pack) { classifier("resources"); artifactType("zip") })
     }
+    baselineProfile(project(":benchmark"))
+    implementation(libs.androidx.profileinstaller)
     implementation(project(":sample:shared"))
     implementation(project(":src"))
 
@@ -164,6 +190,13 @@ dependencies {
     implementation(libs.accompanist.lyrics.phonetics.data.cantonese)
     implementation(libs.accompanist.lyrics.phonetics.data.japanese)
     implementation(libs.kotlinx.coroutines.guava)
+}
+
+baselineProfile {
+    mergeIntoMain = true
+    saveInSrc = true
+    automaticGenerationDuringBuild = false
+    filter { exclude("com.mocharealm.accompanist.sample.performance.**") }
 }
 
 composeCompiler {

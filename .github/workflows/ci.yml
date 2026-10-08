@@ -69,6 +69,7 @@ jobs:
             '-Dorg.gradle.jvmargs=-Xmx3g -XX:MaxMetaspaceSize=768m' \
             "-PreleaseVersion=$VERSION" -PciPackaging=true \
             :src:jvmTest :sample:shared:jvmTest :sample:desktop-app:classes \
+            :benchmark:assembleNonMinifiedRelease :sample:android-app:assembleNonMinifiedRelease \
             :sample:android-app:assembleRelease :src:publishAllPublicationsToCiRepository
 
       - name: Collect packages

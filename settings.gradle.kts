@@ -33,6 +33,7 @@ dependencyResolutionManagement {
 
 rootProject.name = "lyrics-ui"
 include(":src")
+include(":benchmark")
 include(":sample:shared")
 include(":sample:android-app")
 include(":sample:desktop-app")
