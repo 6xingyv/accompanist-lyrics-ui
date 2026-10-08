@@ -227,11 +227,11 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup
-      - name: Install Flatpak and display tools
+      - name: Install Flatpak, display tools and multilingual fonts
         shell: bash
         run: |
           sudo apt-get update
-          sudo apt-get install -y flatpak xvfb desktop-file-utils
+          sudo apt-get install -y flatpak xvfb desktop-file-utils fonts-noto-core fonts-noto-cjk
       - name: Test JVM and build bundled desktop app
         shell: bash
         run: |
