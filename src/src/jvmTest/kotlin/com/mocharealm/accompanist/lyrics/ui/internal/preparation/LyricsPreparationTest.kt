@@ -401,10 +401,13 @@ class LyricsPreparationTest {
                 val group = groups[index]
                 return group.staticPosition.x - if (words[index].second) group.width - group.textWidth else 0f
             }
-            if (row.rtl)
-                assertEquals(reservedLeft(0), reservedLeft(1) + groups[1].width, 0.001f)
-            else
-                assertEquals(reservedLeft(0) + groups[0].width, reservedLeft(1), 0.001f)
+            val captionGap = measurer.measure(" ", TextStyle(fontSize = 12.sp), softWrap = false).size.width
+            val gap = if (row.rtl)
+                reservedLeft(0) - reservedLeft(1) - groups[1].width
+            else reservedLeft(1) - reservedLeft(0) - groups[0].width
+            assertTrue(gap >= -0.001f && gap <= captionGap + 0.001f)
+            if (words.all { it.second == row.rtl }) assertEquals(captionGap.toFloat(), gap, 0.001f)
+            assertEquals(groups.sumOf { it.width.toDouble() }.toFloat() + gap, row.width, 0.001f)
         }
     }
 
@@ -412,7 +415,7 @@ class LyricsPreparationTest {
     fun cjkCharacterSlicesPreserveShapedPixelsAndGraphemes() {
         for ((text, characterCount) in
             listOf("生活" to 2, "哈哈" to 2, "か\u3099く" to 2, "きょう" to 3, "한글" to 2)) {
-            val group = CjkProfile.groups(listOf(KaraokeSyllable(text, 1000, 7000))).single()
+            val group = CjkProfile.groups(listOf(KaraokeSyllable(text, 1000, 7000))).flatten()
             val units = CjkProfile.prepare(group, measurer, style)
             assertEquals(characterCount, units.size, text)
             val whole = measurer.measure(text, style, softWrap = false)

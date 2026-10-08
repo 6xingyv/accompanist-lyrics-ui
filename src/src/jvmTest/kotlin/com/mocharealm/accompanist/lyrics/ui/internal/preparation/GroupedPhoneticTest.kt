@@ -1,5 +1,7 @@
 package com.mocharealm.accompanist.lyrics.ui.internal.preparation
 
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.unit.sp
 import com.ibm.icu.text.Transliterator
 import com.mocharealm.accompanist.lyrics.core.model.karaoke.*
 import com.mocharealm.accompanist.lyrics.core.parser.TTMLParser
@@ -147,7 +149,9 @@ class GroupedPhoneticTest {
                 return unit.position.x + unit.phoneticPosition.x +
                     if (line.rows.single().rtl) unit.phonetic!!.size.width else 0
             }
-            assertEquals(start(first) + (if (line.rows.single().rtl) -first.width else first.width),
+            val captionGap = measurer.measure(" ", TextStyle(fontSize = 12.sp), softWrap = false).size.width
+            val direction = if (line.rows.single().rtl) -1 else 1
+            assertEquals(start(first) + direction * (first.width + captionGap),
                 start(groups.last()), 0.01f)
         }
     }

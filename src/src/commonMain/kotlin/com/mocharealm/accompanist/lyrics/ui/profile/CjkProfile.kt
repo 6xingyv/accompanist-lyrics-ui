@@ -128,9 +128,14 @@ object CjkProfile : DefaultLyricsProfile() {
                 ) index++
                 ranges.add(start until index)
             }
-            val word = mutableListOf<KaraokeSyllable>()
             ranges.forEachIndexed { i, range ->
-                word.add(
+                val offset = sourceOffset + range.first
+                // Word boundaries are independent of timing boundaries. Preserve a supplied
+                // caption as one group when its source syllable spans several dictionary words.
+                val startsWord = boundaries[offset] && words[offset] &&
+                    (i == 0 || syllable.phonetic.isNullOrBlank())
+                if (result.isEmpty() || startsWord) result.add(mutableListOf())
+                result.last().add(
                     syllable.copy(
                         content = syllable.content.substring(range),
                         start =
@@ -144,17 +149,6 @@ object CjkProfile : DefaultLyricsProfile() {
                         phonetic = if (i == 0) syllable.phonetic else null,
                     )
                 )
-            }
-            if (word.isNotEmpty()) {
-                // A timing boundary inside a dictionary word must not reserve another caption
-                // width. Keep that word together while retaining every grapheme's own timing.
-                // Never split an existing source caption without a character-reading alignment.
-                if (
-                    result.isNotEmpty() &&
-                        (!boundaries[sourceOffset] || !words[sourceOffset])
-                )
-                    result.last().addAll(word)
-                else result.add(word)
             }
             sourceOffset += syllable.content.length
         }
