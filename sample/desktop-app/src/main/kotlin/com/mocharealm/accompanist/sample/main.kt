@@ -1,177 +1,150 @@
 package com.mocharealm.accompanist.sample
 
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.key.*
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.window.Window
-import androidx.compose.ui.window.application
-import com.mocharealm.accompanist.lyrics.core.model.SyncedLyrics
-import com.mocharealm.accompanist.lyrics.core.parser.AutoParser
+import androidx.compose.ui.window.*
 import com.mocharealm.accompanist.lyrics.ui.composable.list.rememberLyricsLazyListState
-import com.mocharealm.accompanist.lyrics.ui.composable.lyrics.KaraokeLyricsView
+import com.mocharealm.accompanist.sample.desktop.*
+import com.mocharealm.accompanist.sample.ui.composable.player.*
+import com.mocharealm.accompanist.sample.ui.theme.AccompanistTheme
+import java.awt.Dimension
 import java.awt.FileDialog
-import java.io.File
-import java.util.prefs.Preferences
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
-fun main() = application {
-    Window(onCloseRequest = ::exitApplication, title = "Accompanist · Local lyrics preview") {
-        MaterialTheme(colorScheme = darkColorScheme()) {
-            val scope = rememberCoroutineScope()
-            var lyrics by remember { mutableStateOf<SyncedLyrics?>(null) }
-            var fileName by remember { mutableStateOf<String?>(null) }
-            var error by remember { mutableStateOf<String?>(null) }
-            var loading by remember { mutableStateOf(false) }
-            var playing by remember { mutableStateOf(false) }
-            val position = remember { mutableIntStateOf(0) }
-            val preferences = remember {
-                Preferences.userRoot().node("com/mocharealm/accompanist/sample")
+fun main(args: Array<String>) {
+    val config = try { DesktopConfig.load(args) } catch (failure: Exception) {
+        System.err.println(failure.message)
+        return
+    }
+    // Skiko reads GPU properties when its first surface is created.
+    configureDesktopGraphics(config)
+    application {
+        val controller = remember { DesktopController(config, configLoader = { DesktopConfig.load(args) }) }
+        val currentConfig by controller.configuration.collectAsState()
+        val windowState = rememberWindowState(width = config.width.dp, height = config.height.dp)
+        var pinned by remember { mutableStateOf(config.alwaysOnTop) }
+        DisposableEffect(controller) { onDispose { controller.close() } }
+        Window(onCloseRequest = ::exitApplication, state = windowState,
+            title = "Accompanist Desktop Lyrics", undecorated = false,
+            resizable = true, alwaysOnTop = pinned) {
+            LaunchedEffect(window, currentConfig) {
+                window.minimumSize = Dimension(currentConfig.minWidth, currentConfig.minHeight)
+                windowState.size = androidx.compose.ui.unit.DpSize(currentConfig.width.dp, currentConfig.height.dp)
+                pinned = currentConfig.alwaysOnTop
             }
-            suspend fun openLyrics(selected: File) {
-                loading = true
-                playing = false
-                error = null
-                try {
-                    val parsed =
-                        withContext(Dispatchers.IO) {
-                            AutoParser().parse(selected.readText().removePrefix("\uFEFF")).also {
-                                require(it.lines.isNotEmpty()) {
-                                    "No supported timed lyrics found in this file."
-                                }
-                                preferences.put("lastLyrics", selected.absolutePath)
-                                preferences.flush()
-                            }
-                        }
-                    lyrics = parsed
-                    fileName = selected.name
-                    position.intValue = 0
-                } catch (failure: Exception) {
-                    if (failure is kotlinx.coroutines.CancellationException) throw failure
-                    error = failure.message ?: "Unable to open lyrics"
-                } finally {
-                    loading = false
-                }
-            }
-            LaunchedEffect(Unit) {
-                val saved = withContext(Dispatchers.IO) { preferences.get("lastLyrics", null) }
-                if (saved != null) openLyrics(File(saved))
-            }
-
-            val duration =
-                remember(lyrics) { lyrics?.lines?.maxOfOrNull { it.end }?.coerceAtLeast(1) ?: 1 }
-            LaunchedEffect(playing, lyrics) {
-                if (playing) {
-                    var previous = withFrameNanos { it }
-                    var remainderNanos = 0L
-                    while (playing) {
-                        val now = withFrameNanos { it }
-                        val elapsed = now - previous + remainderNanos
-                        remainderNanos = elapsed % 1_000_000L
-                        position.intValue =
-                            (position.intValue.toLong() + elapsed / 1_000_000L)
-                                .coerceAtMost(duration.toLong())
-                                .toInt()
-                        previous = now
-                        if (position.intValue >= duration) playing = false
-                    }
-                }
-            }
-            Surface(Modifier.fillMaxSize()) {
-                Column(Modifier.fillMaxSize()) {
-                    Row(
-                        Modifier.fillMaxWidth().padding(16.dp),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Button(
-                            enabled = !loading,
-                            onClick = {
-                                val dialog =
-                                    FileDialog(
-                                        window,
-                                        "Open lyrics (TTML, LRC, ELRC, LYS, KRC)",
-                                        FileDialog.LOAD,
-                                    )
-                                dialog.isVisible = true
-                                val selected = dialog.file?.let { File(dialog.directory, it) }
-                                dialog.dispose()
-                                if (selected != null) scope.launch { openLyrics(selected) }
-                            },
-                        ) {
-                            Text(if (loading) "Opening…" else "Open lyrics")
-                        }
-                        Button(
-                            enabled = lyrics != null,
-                            onClick = {
-                                if (!playing && position.intValue >= duration) position.intValue = 0
-                                playing = !playing
-                            },
-                        ) {
-                            Text(if (playing) "Pause" else "Play preview")
-                        }
-                        Text(fileName ?: "No file selected")
-                    }
-                    error?.let {
-                        Text(
-                            it,
-                            color = MaterialTheme.colorScheme.error,
-                            modifier = Modifier.padding(horizontal = 16.dp),
-                        )
-                    }
-                    val currentLyrics = lyrics
-                    if (currentLyrics == null) {
-                        Box(
-                            Modifier.weight(1f).fillMaxWidth(),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Text("Open a local lyrics file to preview timing and rendering.")
-                        }
-                    } else {
-                        KaraokeLyricsView(
-                            listState = rememberLyricsLazyListState(),
-                            lyrics = currentLyrics,
-                            currentPosition = { position.intValue },
-                            onLineClicked = { position.intValue = it.start.coerceIn(0, duration) },
-                            onLinePressed = {},
-                            modifier = Modifier.weight(1f).fillMaxWidth(),
-                            translationTextStyle = LocalTextStyle.current,
-                        )
-                        PreviewProgress(position, duration)
-                    }
-                }
+            AccompanistTheme(darkTheme = true) {
+                DesktopPlayer(controller, pinned, { pinned = !pinned },
+                    ::exitApplication)
             }
         }
     }
 }
 
+@OptIn(ExperimentalComposeUiApi::class)
 @Composable
-private fun PreviewProgress(position: MutableIntState, duration: Int) {
-    Row(
-        Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        PreviewTime(position, duration)
-        PreviewSlider(position, duration, Modifier.weight(1f).padding(start = 12.dp))
+private fun FrameWindowScope.DesktopPlayer(
+    controller: DesktopController,
+    pinned: Boolean,
+    togglePinned: () -> Unit,
+    close: () -> Unit,
+) {
+    val ui by controller.state.collectAsState()
+    DesktopActionErrors(controller)
+    val position = rememberDesktopPosition(controller.playback)
+    val listState = rememberLyricsLazyListState()
+    var captionHovered by remember { mutableStateOf(false) }
+    var decoration by remember { mutableStateOf<JbrWindowDecoration?>(null) }
+    DisposableEffect(window) {
+        val installed = JbrWindowDecoration.install(window, onHover = { captionHovered = it })
+        decoration = installed
+        onDispose { installed?.close() }
     }
-}
-
-@Composable
-private fun PreviewTime(position: IntState, duration: Int) {
-    val seconds by remember(position) { derivedStateOf { position.intValue / 1000 } }
-    Text("${seconds}s / ${duration / 1000}s")
-}
-
-@Composable
-private fun PreviewSlider(position: MutableIntState, duration: Int, modifier: Modifier) {
-    Slider(
-        value = position.intValue.toFloat(),
-        onValueChange = { position.intValue = it.toInt() },
-        valueRange = 0f..duration.toFloat(),
-        modifier = modifier,
-    )
+    var menuOpen by remember { mutableStateOf(false) }
+    val focus = remember { FocusRequester() }
+    val openPreview = {
+        val picker = FileDialog(window, "Open timed lyrics", FileDialog.LOAD)
+        try {
+            picker.isVisible = true
+            picker.file?.let { controller.openPreview(java.nio.file.Path.of(picker.directory, it)) }
+        } finally { picker.dispose() }
+    }
+    LaunchedEffect(Unit) { focus.requestFocus() }
+    PlayerSurface(ui.background, Modifier.fillMaxSize().onPreviewKeyEvent { event ->
+        if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+        val primary = if (desktopPlatform() == DesktopPlatform.Mac) event.isMetaPressed else event.isCtrlPressed
+        when {
+            primary && event.key == Key.O -> { openPreview(); true }
+            primary && event.key == Key.W -> { close(); true }
+            primary && event.key == Key.R -> { controller.reloadLyrics(); true }
+            primary && event.key == Key.P -> { togglePinned(); true }
+            primary && event.key == Key.DirectionLeft && ui.canSeek -> {
+                controller.seek(position.intValue.toLong() - 5000); true
+            }
+            primary && event.key == Key.DirectionRight && ui.canSeek -> {
+                controller.seek(position.intValue.toLong() + 5000); true
+            }
+            event.key == Key.Spacebar && (if (ui.following) ui.source.isNotBlank() else ui.canSeek) -> {
+                controller.togglePlayback(); true
+            }
+            else -> false
+        }
+    }.focusRequester(focus).focusable()) {
+        Column(Modifier.fillMaxSize()) {
+            DesktopTitleBar(
+                platform = desktopPlatform(),
+                leftInset = decoration?.leftInset ?: if (desktopPlatform() == DesktopPlatform.Mac) 80f else 0f,
+                rightInset = decoration?.rightInset ?: if (desktopPlatform() == DesktopPlatform.Windows) 138f else 0f,
+                hovered = captionHovered,
+                pinned = pinned,
+                togglePinned = togglePinned,
+                modifier = Modifier
+                    .onPointerEvent(PointerEventType.Enter) { captionHovered = true }
+                    .onPointerEvent(PointerEventType.Exit) { captionHovered = false },
+            )
+            BoxWithConstraints(Modifier.weight(1f)) {
+                val fontScale = desktopLyricsScale(maxWidth.value, maxHeight.value)
+                PlayerLayout(
+                    title = ui.title.ifBlank { "Unknown Title" },
+                    artist = ui.artist,
+                    metadataTimeMillis = { position.intValue },
+                    hasArtwork = ui.background.bitmap != null,
+                    artwork = { modifier ->
+                        PlayerCover(ui.background.bitmap, modifier)
+                    },
+                    controls = {
+                        Box {
+                            PlayerControls({ menuOpen = true }, ui.showTranslation, ui.showPhonetic,
+                                controller::toggleTranslation, controller::togglePhonetic)
+                            DesktopMoreMenu(menuOpen, { menuOpen = false },
+                                controller::rescanMediaSessions, controller::reloadLyrics,
+                                controller::reloadConfiguration, controller::showConfigurationLocation)
+                        }
+                    },
+                    lyrics = { modifier, anchor, bottomFade ->
+                        val lyrics = ui.lyrics
+                        key(lyrics) {
+                            PlayerLyricsPanel(listState = listState, lyrics = lyrics,
+                                currentPosition = { position.intValue },
+                                showTranslation = ui.showTranslation, showPhonetic = ui.showPhonetic,
+                                onLineClicked = { controller.seek(it.start.toLong()) },
+                                modifier = modifier, anchor = anchor, bottomFade = bottomFade,
+                                loading = ui.loading, fontScale = fontScale,
+                                emptyMessage = ui.message ?: if (ui.following)
+                                    "Play music to display matching local lyrics."
+                                    else "Open a lyrics file to preview.")
+                        }
+                    },
+                )
+            }
+        }
+    }
 }
