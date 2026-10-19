@@ -203,7 +203,7 @@ struct MediaClient {
 
 bool read_scripted_player(JNIEnv* env, MediaClient* client,
                           SBApplication<AccompanistPlayer>* app, bool spotify,
-                          const char* source_id, Snapshot& sample,
+                          const std::u16string& source_id, Snapshot& sample,
                           NSString* __strong& failure) {
     if (!app || ![app isRunning]) return false;  // Never launch a stopped player.
     client->errors.lastError = nil;
@@ -421,10 +421,10 @@ Java_com_mocharealm_accompanist_sample_desktop_NativeMediaBridge_read(
                 NSString* sb_failure = nil;
                 const bool has_system = read_system_now_playing(env, system);
                 const bool has_music = read_scripted_player(
-                    env, client, client->music, false, "com.apple.Music", music,
+                    env, client, client->music, false, u"com.apple.Music", music,
                     sb_failure);
                 const bool has_spotify = read_scripted_player(
-                    env, client, client->spotify, true, "com.spotify.client", spotify,
+                    env, client, client->spotify, true, u"com.spotify.client", spotify,
                     sb_failure);
 
                 // Prefer the system Now Playing source when it is playing; it
