@@ -26,6 +26,17 @@ with (bundle / "Info.plist").open("wb") as out:
             "SupportedPlatform": "ios"}],
     }, out)
 
+# Keep the published packs and their notices in one resource bundle for both Xcode and xtool.
+packs = root / "sample/shared/build/generated/phonetic-resources"
+for name in ("zh-CN.lpd", "zh-TW.lpd", "yue-HK.lpd", "ja-JP.lpd"):
+    if not (packs / name).is_file():
+        raise ValueError(f"Missing pronunciation dictionary: {packs / name}")
+phonetics = app / "Resources/phonetics.bundle"
+shutil.copytree(packs, phonetics, dirs_exist_ok=True)
+with (phonetics / "Info.plist").open("wb") as out:
+    plistlib.dump({"CFBundleIdentifier": "com.mocharealm.accompanist.sample.phonetics",
+                  "CFBundlePackageType": "BNDL"}, out)
+
 # iOS ResourceReader resolves bundle/compose-resources/<generated ResourceItem.path>.
 for module in [root / "sample/shared", root / "src"]:
     generated = module / "build/generated/compose/resourceGenerator"

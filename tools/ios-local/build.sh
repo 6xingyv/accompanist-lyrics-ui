@@ -144,4 +144,5 @@ mkdir -p "$resources"
 # Reconcile only this generated output; old excluded fonts must not survive a rebuild.
 [[ "$(realpath "$resources")" == "$(realpath "$root")/sample/ios-app/Resources/compose-resources" ]] || exit 1
 rsync -a --delete Resources/compose-resources/ "$resources/"
+cp -a Resources/phonetics.bundle "$root/sample/ios-app/Resources/"
 echo "Local iOS build complete: $root/build/ios-local/Accompanist.ipa"

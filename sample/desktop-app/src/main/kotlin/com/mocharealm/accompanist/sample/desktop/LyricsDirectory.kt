@@ -94,7 +94,8 @@ internal fun parseDesktopLyrics(path: Path): SyncedLyrics {
             bytes.toString(Charsets.UTF_8)
         }
     } else encoded.toString(Charsets.UTF_8)
-    return AutoParser().parse(content.removePrefix("\uFEFF")).also {
+    return AutoParser(fallbackPhoneticProvider = DesktopPhoneticProvider)
+        .parse(content.removePrefix("\uFEFF")).also {
         require(it.lines.isNotEmpty()) { "No supported timed lyrics in ${path.fileName}" }
     }
 }

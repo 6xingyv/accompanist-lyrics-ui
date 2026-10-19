@@ -115,6 +115,11 @@ internal fun desktopPlatform(): DesktopPlatform {
 }
 
 internal fun configureDesktopGraphics(config: DesktopConfig) {
+    // Text atlases and glow surfaces need far less than Skia's default GPU cache budget.
+    // Allow an explicit JVM override for unusually large displays or profiling.
+    if (System.getProperty("skiko.gpu.resourceCacheLimit") == null) {
+        System.setProperty("skiko.gpu.resourceCacheLimit", "64M")
+    }
     System.setProperty("skiko.gpu.priority", when (config.gpu) {
         "high_performance" -> "discrete"
         "minimum_power" -> "integrated"

@@ -33,7 +33,7 @@ launcher.chmod(0o755)
 for source, destination in [
     (assets / f'{app_id}.desktop', f'share/applications/{app_id}.desktop'),
     (assets / f'{app_id}.metainfo.xml', f'share/metainfo/{app_id}.metainfo.xml'),
-    (root / 'sample/android-app/src/main/ic_launcher-playstore.png', f'share/icons/hicolor/512x512/apps/{app_id}.png'),
+    (root / 'sample/desktop-app/packaging/icons/linux.png', f'share/icons/hicolor/512x512/apps/{app_id}.png'),
 ]:
     target = files / destination
     target.parent.mkdir(parents=True, exist_ok=True)

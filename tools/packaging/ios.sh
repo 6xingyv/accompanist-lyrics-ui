@@ -17,6 +17,9 @@ xcodebuild -project sample/ios-app/AccompanistIos.xcodeproj -scheme AccompanistI
     "CURRENT_PROJECT_VERSION=$build_number" archive
 app="$work/Accompanist.xcarchive/Products/Applications/Accompanist.app"
 [[ -d "$app" ]] || { echo 'Xcode archive contains no demo app.' >&2; exit 1; }
+for pack in zh-CN.lpd zh-TW.lpd yue-HK.lpd ja-JP.lpd; do
+    [[ -s "$app/phonetics.bundle/$pack" ]] || { echo "iOS archive is missing dictionary: $pack" >&2; exit 1; }
+done
 # Use Apple's compiler for the existing Icon Composer source, then merge its icon keys.
 xcrun actool sample/ios-app/Accompanist.icon --compile "$app" \
     --platform iphoneos --minimum-deployment-target 15.0 \

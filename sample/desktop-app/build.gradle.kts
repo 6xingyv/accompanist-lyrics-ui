@@ -1,5 +1,6 @@
 import org.jetbrains.compose.desktop.application.dsl.TargetFormat
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import org.gradle.api.tasks.Exec
 
 plugins {
     alias(libs.plugins.jetbrains.kotlin.jvm)
@@ -30,6 +31,8 @@ dependencies {
     implementation("org.jetbrains.runtime:jbr-api:1.9.0")
 
     implementation(libs.accompanist.lyrics.core)
+    implementation(libs.accompanist.lyrics.phonetics.runtime)
+    implementation(libs.icu4j)
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
     implementation("com.github.hypfvieh:dbus-java-core:5.2.2")
     runtimeOnly("com.github.hypfvieh:dbus-java-transport-native-unixsocket:5.2.2")
@@ -59,6 +62,7 @@ val nativeArch = when (System.getProperty("os.arch").lowercase()) {
     "aarch64", "arm64" -> "arm64"
     else -> error("Unsupported desktop architecture: ${System.getProperty("os.arch")}")
 }
+val windowsUpgradeUuid = "f1c0fda8-a867-4ead-bf77-c2b56f1a3112"
 val nativeResources = layout.buildDirectory.dir("generated/native-resources")
 val nativeLibrary = nativeResources.map {
     it.file("native/$nativeOs-$nativeArch/${System.mapLibraryName("accompanist_media")}")
@@ -120,6 +124,67 @@ val buildNativeMedia by tasks.registering {
 sourceSets.main { resources.srcDir(nativeResources) }
 tasks.processResources { dependsOn(buildNativeMedia) }
 
+if (nativeOs == "macos") {
+    val iconComposerSource = project.file("packaging/icons/Accompanist.icon")
+    val macOSIconScript = rootProject.file("tools/packaging/macos-icon.sh")
+    val applyMacOSIconComposer by tasks.registering(Exec::class) {
+        inputs.dir(iconComposerSource)
+        inputs.file(macOSIconScript)
+        commandLine(
+            "bash",
+            macOSIconScript.absolutePath,
+            rootProject.projectDir.absolutePath,
+            layout.buildDirectory.get().asFile.absolutePath,
+        )
+        mustRunAfter("createDistributable")
+    }
+
+    tasks.named("createDistributable") {
+        finalizedBy(applyMacOSIconComposer)
+    }
+    tasks.matching { it.name == "packageDmg" || it.name == "runDistributable" }.configureEach {
+        dependsOn(applyMacOSIconComposer)
+    }
+}
+
+if (nativeOs == "windows") {
+    val repackageWindowsInstaller = tasks.register("repackageWindowsInstaller", Exec::class) {
+        dependsOn("createDistributable")
+        val appImage = layout.buildDirectory.dir("compose/binaries/main/app/Accompanist")
+        val installerDirectory = layout.buildDirectory.dir("compose/binaries/main/exe")
+        val scratchDirectory = layout.buildDirectory.dir("compose/tmp/windows-upgrade")
+        val wixDirectory = rootProject.layout.buildDirectory.dir("wix311")
+        val windowsInstallerScript = rootProject.file("tools/packaging/windows-package-exe.ps1")
+        val windowsIcon = project.file("packaging/icons/windows.ico")
+
+        inputs.file(windowsInstallerScript)
+        inputs.file(windowsIcon)
+        commandLine(
+            "powershell.exe",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            windowsInstallerScript.absolutePath,
+            rootProject.projectDir.absolutePath,
+            desktopJbr.get().metadata.installationPath.asFile.absolutePath,
+            appImage.get().asFile.absolutePath,
+            installerDirectory.get().asFile.absolutePath,
+            scratchDirectory.get().asFile.absolutePath,
+            wixDirectory.get().asFile.absolutePath,
+            rootProject.version.toString().substringBefore('-'),
+            windowsIcon.absolutePath,
+            windowsUpgradeUuid,
+        )
+    }
+
+    tasks.matching { it.name == "packageExe" }.configureEach {
+        // jpackage's stock WiX template rejects an equal ProductVersion; rebuild it below with that range included.
+        onlyIf("The Windows installer is built from the app image with same-version upgrade support") { false }
+        finalizedBy(repackageWindowsInstaller)
+    }
+}
+
 compose {
     resources {
         packageOfResClass = "com.mocharealm.accompanist.sample.desktop.resources"
@@ -137,10 +202,14 @@ compose {
                 description = "Lyrics following your music player"
                 vendor = "MochaRealm"
                 windows {
+                    iconFile.set(project.file("packaging/icons/windows.ico"))
                     perUserInstall = true
                     menuGroup = "Accompanist"
                     shortcut = true
-                    upgradeUuid = "f1c0fda8-a867-4ead-bf77-c2b56f1a3112"
+                    upgradeUuid = windowsUpgradeUuid
+                }
+                linux {
+                    iconFile.set(project.file("packaging/icons/linux.png"))
                 }
                 macOS {
                     bundleID = "com.mocharealm.accompanist.desktop"
