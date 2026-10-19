@@ -16,6 +16,7 @@
 /sample/ios-app/.build/
 /sample/ios-app/Frameworks/
 /sample/ios-app/Resources/compose-resources/
+/sample/ios-app/Resources/phonetics.bundle/
 /sample/ios-app/xtool/
 /sample/ios-app/*.xcodeproj/
 /src/src/androidMain/jniLibs/
@@ -24,3 +25,5 @@
 /captures
 .externalNativeBuild
 .cxx
+/ref/
+/.flatpak-builder/

@@ -196,7 +196,8 @@ jobs:
           python - <<'PY'
           import os, shutil
           from pathlib import Path
-          packages = list(Path('sample/desktop-app/build/compose/binaries/main').rglob(f'*.{os.environ["EXTENSION"]}'))
+          package_dir = Path('sample/desktop-app/build/compose/binaries/main') / ('exe' if os.environ['EXTENSION'] == 'exe' else 'dmg')
+          packages = list(package_dir.glob(f'*.{os.environ["EXTENSION"]}'))
           if len(packages) != 1:
               raise SystemExit(f'Expected one installer, found {packages}')
           Path('dist').mkdir(exist_ok=True)

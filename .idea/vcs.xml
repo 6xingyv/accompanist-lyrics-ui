@@ -2,5 +2,23 @@
 <project version="4">
   <component name="VcsDirectoryMappings">
     <mapping directory="$PROJECT_DIR$" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/ref/AssetKit" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/ref/apfs-fuse" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/ref/apollo-icon-reference" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/ref/decant" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/ref/ios26-headers" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/ref/ipsw" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/ref/kotlin" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/ref/libimobiledevice" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/ref/libimobiledevice-glue" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/ref/libplist" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/ref/libtatsu" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/ref/libusbmuxd" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/ref/libzbitmap" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/ref/openusage" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/ref/sparkle-ig" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/ref/usbmuxd" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/ref/xtool" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/ref/xtool-runtime" vcs="Git" />
   </component>
 </project>
