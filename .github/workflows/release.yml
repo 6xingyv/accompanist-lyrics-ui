@@ -38,6 +38,13 @@ jobs:
           ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_IN_MEMORY_KEY_PASSWORD }}
         shell: bash
         run: |
+          # Republishing the same Maven version is impossible; allow re-releases
+          # that only refresh GitHub sample assets under an existing tag.
+          pom="https://repo.maven.apache.org/maven2/com/mocharealm/accompanist/lyrics-ui/$VERSION/lyrics-ui-$VERSION.pom"
+          if curl -fsI "$pom" >/dev/null 2>&1; then
+            echo "lyrics-ui:$VERSION is already on Maven Central; skipping publish."
+            exit 0
+          fi
           if [[ -z "$ORG_GRADLE_PROJECT_mavenCentralUsername" || -z "$ORG_GRADLE_PROJECT_mavenCentralPassword" || -z "$ORG_GRADLE_PROJECT_signingInMemoryKey" ]]; then
             echo '::error::Maven Central credentials and a signing key are required.'
             exit 1
@@ -87,11 +94,11 @@ jobs:
           PRERELEASE: ${{ needs.packages.outputs.prerelease }}
         shell: bash
         run: |
-          # Attach every platform package before publishing the immutable release.
+          # Attach every platform package before publishing. Existing assets are
+          # replaced so re-cutting a tag refreshes sample installers in place.
           if gh release view "$TAG" --json isDraft > release.json; then
             if [[ "$(jq -r .isDraft release.json)" != true ]]; then
-              echo '::error::This tag already has a published release; refusing to replace its assets.'
-              exit 1
+              echo "Release $TAG already exists; replacing its assets."
             fi
           else
             gh release create "$TAG" --verify-tag --draft --title "$TAG" --generate-notes
