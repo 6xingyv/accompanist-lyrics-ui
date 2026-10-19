@@ -57,14 +57,20 @@ Space toggles playback.
 | --- | --- | --- |
 | Windows | Current SMTC session through C++/WinRT + JNI | Windows 10 1809+; a player publishing media metadata/timeline. |
 | Linux | MPRIS2 over the session D-Bus | An MPRIS player and a desktop session bus. The app includes its Java Unix socket transport; `playerctl` is not required. |
-| macOS | Music and Spotify through native ScriptingBridge + JNI | macOS 12+; allow Accompanist to control the player in System Settings → Privacy & Security → Automation. Other macOS players are not yet connected. |
+| macOS | System-wide Now Playing via MediaRemote, plus Music/Spotify ScriptingBridge control | macOS 12+; detection works without Automation. Seeking/controlling Music or Spotify needs Privacy & Security → Automation. Any app that publishes to the system transport is detected. |
 
 Media calls run in-process on a dedicated native worker. Windows COM initialization
 and release stay on that worker. There are no PowerShell/osascript child processes
 or JSON media messages. Native position reads record `System.nanoTime()` immediately,
 before artwork work, so a slow cover read does not become a clock offset.
 
-Playback chooses a playing MPRIS/macOS source first. Metadata, playback state and
+On macOS the adapter loads `MediaRemote.framework` dynamically and reads the system
+Now Playing session (browsers and other players included). Music and Spotify are also
+queried through ScriptingBridge for track IDs, artwork and precise seek/play-pause.
+ScriptingBridge `playerState` is read through KVC as a boxed scripting-dictionary enum,
+not a raw `OSType`.
+
+Playback chooses a playing system/MPRIS/macOS source first. Metadata, playback state and
 position are polled approximately every 500 ms, with interpolation between samples.
 Windows Apple Music uses distinct timeline publications and an eight-sample clock
 average. Rapid lyric clicks supersede queued older seeks; late pre-seek samples are
@@ -153,3 +159,13 @@ bash tools/packaging/flatpak.sh 2.0.0-rc.2
 The Flatpak follows MPRIS players and reads lyrics from the home directory.
 CI uploads Windows x64 EXE, macOS ARM64/x64 DMG and Linux x64 Flatpak artifacts.
 Version tags attach the same packages to the GitHub Release.
+
+Desktop icons are platform-specific: Windows uses `packaging/icons/windows.ico`,
+Linux uses `packaging/icons/linux.png`, and macOS compiles its own
+`packaging/icons/Accompanist.icon` source into the app bundle's asset catalog.
+The macOS design adds an outer rim while iOS keeps its existing icon; the build
+also keeps Icon Composer's `.icns` fallback when `actool` emits it.
+
+The Windows EXE installer keeps a stable upgrade UUID and can replace an
+installed Accompanist package, including a package with the same version. It
+still blocks downgrades to an older package version.
