@@ -4,11 +4,15 @@ import com.mocharealm.accompanist.lyrics.core.model.SyncedLyrics
 import com.mocharealm.accompanist.lyrics.core.model.karaoke.KaraokeLine
 import com.mocharealm.accompanist.lyrics.core.model.synced.SyncedLine
 import com.mocharealm.accompanist.lyrics.core.parser.AutoParser
+import com.mocharealm.accompanist.lyrics.core.utils.PhoneticProvider
 
 /** Manual timed translations override embedded ones at matching timestamps, as on Android. */
-internal fun parseSelectedLyrics(content: String?, translation: String?): SyncedLyrics? {
+internal fun parseSelectedLyrics(content: String?, translation: String?,
+    phonetics: PhoneticProvider? = null): SyncedLyrics? {
     val parser = AutoParser()
-    val lyrics = content?.let { parser.parse(it.removePrefix("\uFEFF")) } ?: return null
+    val lyrics = content?.let {
+        AutoParser(fallbackPhoneticProvider = phonetics).parse(it.removePrefix("\uFEFF"))
+    } ?: return null
     require(lyrics.lines.isNotEmpty()) { "No supported timed lyrics in the selected file." }
     if (translation == null) return lyrics
     val translations = parser.parse(translation.removePrefix("\uFEFF")).lines.mapNotNull { line ->

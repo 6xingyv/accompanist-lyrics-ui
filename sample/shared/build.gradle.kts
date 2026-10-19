@@ -58,6 +58,10 @@ kotlin {
             implementation(compose.components.uiToolingPreview)
 
             implementation(libs.accompanist.lyrics.core)
+            implementation(libs.accompanist.lyrics.phonetics.runtime)
+            implementation(libs.accompanist.lyrics.phonetics.data.mandarin)
+            implementation(libs.accompanist.lyrics.phonetics.data.cantonese)
+            implementation(libs.accompanist.lyrics.phonetics.data.japanese)
 
             implementation(libs.gaze.capsule)
 
@@ -79,6 +83,28 @@ kotlin {
         }
     }
 }
+
+val phoneticPacks by configurations.creating {
+    isCanBeConsumed = false
+    isCanBeResolved = true
+    isTransitive = false
+}
+dependencies {
+    for (pack in listOf(
+        libs.accompanist.lyrics.phonetics.data.mandarin,
+        libs.accompanist.lyrics.phonetics.data.cantonese,
+        libs.accompanist.lyrics.phonetics.data.japanese,
+    )) {
+        phoneticPacks(variantOf(pack) { classifier("resources"); artifactType("zip") })
+    }
+}
+val preparePhoneticResources by tasks.registering(Sync::class) {
+    from(phoneticPacks.elements.map { files -> files.map { zipTree(it.asFile) } })
+    into(layout.buildDirectory.dir("generated/phonetic-resources"))
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+}
+tasks.matching { it.name in setOf("linkDebugFrameworkIosArm64", "linkReleaseFrameworkIosArm64") }
+    .configureEach { dependsOn(preparePhoneticResources) }
 
 compose {
     resources {
