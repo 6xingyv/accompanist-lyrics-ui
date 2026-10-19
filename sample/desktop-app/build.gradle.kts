@@ -139,7 +139,9 @@ if (nativeOs == "macos") {
         mustRunAfter("createDistributable")
     }
 
-    tasks.named("createDistributable") {
+    // Compose registers packaging tasks after this script is evaluated; look
+    // them up lazily so configuration does not depend on task creation order.
+    tasks.matching { it.name == "createDistributable" }.configureEach {
         finalizedBy(applyMacOSIconComposer)
     }
     tasks.matching { it.name == "packageDmg" || it.name == "runDistributable" }.configureEach {
