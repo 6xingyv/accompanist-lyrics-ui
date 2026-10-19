@@ -18,6 +18,9 @@ targets:
       - path: Resources/compose-resources
         type: folder
         buildPhase: resources
+      - path: Resources/phonetics.bundle
+        type: folder
+        buildPhase: resources
     settings:
       base:
         INFOPLIST_FILE: Info.plist

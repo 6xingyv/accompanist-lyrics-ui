@@ -5,3 +5,4 @@ infoPath: Info.plist
 iconPath: Accompanist.icon
 resources:
   - Resources/compose-resources
+  - Resources/phonetics.bundle

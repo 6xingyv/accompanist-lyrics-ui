@@ -10,6 +10,7 @@ import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.window.ComposeUIViewController
 import com.mocharealm.accompanist.lyrics.core.model.SyncedLyrics
 import com.mocharealm.accompanist.lyrics.core.parser.AutoParser
+import com.mocharealm.accompanist.sample.data.utils.IosPhoneticProvider
 import com.mocharealm.accompanist.lyrics.ui.composable.list.rememberLyricsLazyListState
 import com.mocharealm.accompanist.sample.ui.composable.background.BackgroundVisualState
 import com.mocharealm.accompanist.sample.ui.composable.player.*
@@ -69,7 +70,9 @@ class IosLyricsController {
         seekRequestMillis = -1
         load = scope.launch {
             try {
-                val parsed = withContext(Dispatchers.Default) { AutoParser().parse(content) }
+                val parsed = withContext(Dispatchers.Default) {
+                    AutoParser(fallbackPhoneticProvider = IosPhoneticProvider).parse(content)
+                }
                 ensureActive()
                 if (revision == version) {
                     lyrics = parsed
@@ -139,7 +142,9 @@ class IosLyricsController {
         selectionJob?.cancel()
         selectionJob = scope.launch {
             try {
-                val parsed = withContext(Dispatchers.Default) { parseSelectedLyrics(content, translation) }
+                val parsed = withContext(Dispatchers.Default) {
+                    parseSelectedLyrics(content, translation, IosPhoneticProvider)
+                }
                 ensureActive()
                 preparedLyrics = parsed
                 preparedLyricsName = name
