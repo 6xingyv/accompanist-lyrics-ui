@@ -24,4 +24,6 @@ internal constructor(
     val phoneticSpacingBefore: Float = 0f,
     /** Actual row advance, including spacing reserved between pronunciation captions. */
     val width: Float = runs.sumOf { run -> run.groups.sumOf { it.width.toDouble() } }.toFloat(),
+    /** Index of this row's first unit in the line-wide order shared by both variants. */
+    val unitStart: Int = 0,
 )

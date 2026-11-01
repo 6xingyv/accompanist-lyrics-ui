@@ -17,12 +17,31 @@ import androidx.compose.ui.unit.constrainHeight
 import androidx.compose.ui.unit.dp
 import com.mocharealm.accompanist.lyrics.core.model.karaoke.KaraokeLine
 import com.mocharealm.accompanist.lyrics.ui.internal.effects.LyricsReveal
+import com.mocharealm.accompanist.lyrics.ui.internal.effects.LyricsRevealProgress
 import com.mocharealm.accompanist.lyrics.ui.internal.effects.LyricsRevealSpring
+import com.mocharealm.accompanist.lyrics.ui.internal.effects.rememberLineVariantTransition
 import com.mocharealm.accompanist.lyrics.ui.internal.diagnostics.traceLyrics
 import com.mocharealm.accompanist.lyrics.ui.internal.diagnostics.lyricsTraceEnabled
 import com.mocharealm.accompanist.lyrics.ui.internal.diagnostics.setLyricsTraceCounter
 import com.mocharealm.accompanist.lyrics.ui.internal.playback.LyricsPlaybackState
+import com.mocharealm.accompanist.lyrics.ui.preparation.LineVariantBinding
 import com.mocharealm.accompanist.lyrics.ui.preparation.PreparedLine
+import com.mocharealm.accompanist.lyrics.ui.preparation.PreparedRow
+
+/** Everything a band needs that does not depend on which variant owns it. */
+private class BandRenderEnv(
+    val playback: LyricsPlaybackState,
+    val resources: LyricsRenderResources,
+    val currentTimeProvider: () -> Int,
+    val color: Color,
+    val paints: RowPaints,
+    val debug: Boolean,
+    val rightAligned: Boolean,
+    val lineWidth: Float,
+    val binding: LineVariantBinding?,
+    /** 1 exposes the aligned geometry, 0 the compact one. */
+    val alignedness: () -> Float,
+)
 
 @Composable
 internal fun PreparedLineText(
@@ -39,14 +58,43 @@ internal fun PreparedLineText(
     val currentTime by rememberUpdatedState(currentTimeProvider)
     val density = LocalDensity.current
     val activeColor = resources.color
-    val rasterState = resources.rasterState(prepared)
-    val raster by rasterState
     val paints = remember(activeColor) { RowPaints(activeColor) }
-    DisposableEffect(resources, prepared) {
+    val transition = rememberLineVariantTransition(prepared, showPhonetic)
+    val compact = prepared.compact
+    val currentAligned = transition?.currentAligned ?: true
+    val targetAligned = transition?.targetAligned ?: true
+    val blending = transition != null && currentAligned != targetAligned
+    val alignedness: () -> Float =
+        transition?.let { { it.progress.value } } ?: { if (showPhonetic) 1f else 0f }
+    val currentLine = if (currentAligned) prepared else compact ?: prepared
+    val targetLine = if (targetAligned) prepared else compact ?: prepared
+    val alignedRaster = resources.rasterState(prepared)
+    val compactRaster = compact?.let { resources.rasterState(it) }
+    DisposableEffect(resources, prepared, compact) {
         resources.retain(prepared)
-        onDispose { resources.release(prepared) }
+        compact?.let(resources::retain)
+        onDispose {
+            resources.release(prepared)
+            compact?.let(resources::release)
+        }
     }
-    LaunchedEffect(resources, prepared) { resources.prepareRaster(prepared) }
+    LaunchedEffect(resources, currentLine, targetLine) {
+        resources.prepareRaster(currentLine)
+        if (targetLine !== currentLine) resources.prepareRaster(targetLine)
+    }
+    val env =
+        BandRenderEnv(
+            playback = playback,
+            resources = resources,
+            currentTimeProvider = currentTime,
+            color = activeColor,
+            paints = paints,
+            debug = showDebugRectangles,
+            rightAligned = prepared.rightAligned,
+            lineWidth = prepared.width,
+            binding = prepared.binding,
+            alignedness = alignedness,
+        )
     val accompanimentAlpha =
         if (prepared.source is KaraokeLine.AccompanimentKaraokeLine) 0.6f else 1f
     // Prepared geometry already resolves reading direction into a physical edge.
@@ -82,100 +130,111 @@ internal fun PreparedLineText(
                 showPhonetic = showPhonetic,
                 showDebugRectangles = showDebugRectangles,
             )
-            // Separate draw scopes mean a ticking row cannot invalidate its static neighbours.
+            // Separate draw scopes mean a ticking band cannot invalidate its static neighbours.
             Column(
                 Modifier.fillMaxWidth(),
                 horizontalAlignment = alignment,
             ) {
-                for ((index, row) in prepared.rows.withIndex()) {
-                    val rowPlayback = playback.row(row)
-                    // Timeline state selects the rows that need animation. Read the actual
-                    // position in draw so snapshotFlow scheduling cannot delay their sweep.
-                    // Inactive rows, including gaps within a row, keep their frozen position
-                    // and do not observe the ticking provider.
-                    val drawTime = remember(rowPlayback) {
-                        {
-                            if (rowPlayback.isAnimating.value) {
-                                val now = currentTime()
-                                if (lyricsTraceEnabled()) {
-                                    setLyricsTraceCounter("Lyrics.drawPositionMs", now.toLong())
-                                    setLyricsTraceCounter("Lyrics.timelineLagMs",
-                                        now.toLong() - rowPlayback.time.intValue)
-                                }
-                                now
-                            } else rowPlayback.time.intValue
+                val alignedRows = prepared.rows
+                val compactRows = compact?.rows.orEmpty()
+                val bandCount = maxOf(alignedRows.size, compactRows.size)
+                for (band in 0 until bandCount) {
+                    val alignedRow = alignedRows.getOrNull(band)
+                    val compactRow = compactRows.getOrNull(band)
+                    val alignedLayers = alignedRaster.value?.rows?.getOrNull(band)
+                    val compactLayers = compactRaster?.value?.rows?.getOrNull(band)
+                    val followingGap = alignedRows.getOrNull(band + 1)?.phoneticSpacingBefore ?: 0f
+                    when {
+                        // No compact geometry: captions own no width, so only they collapse.
+                        compact == null && alignedRow != null -> {
+                            BandText(
+                                env,
+                                alignedRow,
+                                null,
+                                alignedLayers,
+                                null,
+                                alignedRow.height - alignedRow.phoneticHeight,
+                                showAligned = true,
+                                showCompact = false,
+                                blending = false,
+                            )
+                            BandCaption(
+                                env,
+                                alignedRow,
+                                alignedLayers,
+                                showPhonetic,
+                                followingGap,
+                                alignment,
+                            )
                         }
-                    }
-                    val renderState = resources.row(row)
-                    val layers = raster?.rows?.getOrNull(index)
-                    val textHeight = row.height - row.phoneticHeight
-                    Box(
-                        Modifier.fillMaxWidth()
-                            .height(with(density) { textHeight.toDp() })
-                            .drawWithCache {
-                                val glows =
-                                    layers
-                                        ?.takeIf { it.hasGlow }
-                                        ?.let {
-                                            traceLyrics("Lyrics.layerCache") { RowGlowLayers(this, it) }
-                                        }
-                                onDrawBehind {
-                                    val preparedLayers = layers ?: return@onDrawBehind
-                                    translate(top = -row.top) {
-                                        drawPreparedRow(
-                                            row,
-                                            drawTime(),
-                                            renderState,
-                                            activeColor,
-                                            paints,
-                                            showDebugRectangles,
-                                            preparedLayers,
-                                            glows,
-                                            drawPhonetics = false,
-                                        )
-                                    }
+                        // Both geometries keep this band: units that stay slide, units that move
+                        // between bands are painted by both copies with complementary reveal.
+                        alignedRow != null && compactRow != null -> {
+                            val alignedHeight = alignedRow.height - alignedRow.phoneticHeight
+                            val compactHeight = compactRow.height - compactRow.phoneticHeight
+                            BandText(
+                                env,
+                                alignedRow,
+                                compactRow,
+                                alignedLayers,
+                                compactLayers,
+                                if (blending) maxOf(alignedHeight, compactHeight)
+                                else if (currentAligned) alignedHeight else compactHeight,
+                                showAligned = currentAligned || blending,
+                                showCompact = !currentAligned || blending,
+                                blending = blending,
+                            )
+                            BandCaption(
+                                env,
+                                alignedRow,
+                                alignedLayers,
+                                showPhonetic,
+                                if (!blending && !currentAligned) 0f else followingGap,
+                                alignment,
+                            )
+                        }
+                        // A band only the aligned geometry has collapses with the caption spring.
+                        alignedRow != null ->
+                            LyricsRevealProgress(progress = alignedness) {
+                                Column(horizontalAlignment = alignment) {
+                                    BandText(
+                                        env,
+                                        alignedRow,
+                                        null,
+                                        alignedLayers,
+                                        null,
+                                        alignedRow.height - alignedRow.phoneticHeight,
+                                        showAligned = true,
+                                        showCompact = false,
+                                        blending = false,
+                                    )
+                                    BandCaption(
+                                        env,
+                                        alignedRow,
+                                        alignedLayers,
+                                        showPhonetic,
+                                        followingGap,
+                                        alignment,
+                                    )
                                 }
                             }
-                    )
-                    if (row.phoneticHeight > 0f) {
-                        // Playback only sweeps pronunciation. Text lift/glow stay above;
-                        // caption visibility uses the same reveal as translations.
-                        val rowWidth = row.width
-                        val followingGap =
-                            prepared.rows.getOrNull(index + 1)?.phoneticSpacingBefore ?: 0f
-                        LyricsReveal(showPhonetic, keepContent = true) {
-                            Column {
-                                Box(
-                                    Modifier.size(
-                                        with(density) { rowWidth.toDp() },
-                                        with(density) { row.phoneticHeight.toDp() },
-                                    ).drawWithCache {
-                                        // Layout rounds caption width to pixels; compensate here
-                                        // so end-aligned pronunciation keeps the original x origin.
-                                        val rowLeft =
-                                            if (prepared.rightAligned) prepared.width - size.width
-                                            else 0f
-                                        onDrawBehind {
-                                            val preparedLayers = layers ?: return@onDrawBehind
-                                            translate(left = -rowLeft, top = -row.top - textHeight) {
-                                                drawPreparedRow(
-                                                    row,
-                                                    drawTime(),
-                                                    renderState,
-                                                    activeColor,
-                                                    paints,
-                                                    showDebugRectangles,
-                                                    preparedLayers,
-                                                    drawOriginal = false,
-                                                )
-                                            }
-                                        }
-                                    }
-                                )
-                                if (followingGap > 0f)
-                                    Spacer(Modifier.height(with(density) { followingGap.toDp() }))
+                        // A band only the compact geometry has grows while alignment returns.
+                        compactRow != null ->
+                            LyricsRevealProgress(progress = { 1f - alignedness() }) {
+                                Column(horizontalAlignment = alignment) {
+                                    BandText(
+                                        env,
+                                        null,
+                                        compactRow,
+                                        null,
+                                        compactLayers,
+                                        compactRow.height - compactRow.phoneticHeight,
+                                        showAligned = false,
+                                        showCompact = true,
+                                        blending = false,
+                                    )
+                                }
                             }
-                        }
                     }
                 }
             }
@@ -239,3 +298,130 @@ internal fun PreparedLineText(
         }
     }
 }
+
+/** One band's text layer; blended bands paint both geometries inside the same box. */
+@Composable
+private fun BandText(
+    env: BandRenderEnv,
+    alignedRow: PreparedRow?,
+    compactRow: PreparedRow?,
+    alignedLayers: PreparedRowLayers?,
+    compactLayers: PreparedRowLayers?,
+    height: Float,
+    showAligned: Boolean,
+    showCompact: Boolean,
+    blending: Boolean,
+) {
+    val density = LocalDensity.current
+    Box(
+        Modifier.fillMaxWidth()
+            .height(with(density) { height.toDp() })
+            .drawWithCache {
+                val alignedGlows =
+                    alignedLayers?.takeIf { showAligned && it.hasGlow }?.let {
+                        traceLyrics("Lyrics.layerCache") { RowGlowLayers(this, it) }
+                    }
+                val compactGlows =
+                    compactLayers?.takeIf { showCompact && it.hasGlow }?.let {
+                        traceLyrics("Lyrics.layerCache") { RowGlowLayers(this, it) }
+                    }
+                onDrawBehind {
+                    val reveal = env.alignedness()
+                    if (showAligned && alignedRow != null && alignedLayers != null) {
+                        translate(top = -alignedRow.top) {
+                            drawPreparedRow(
+                                alignedRow,
+                                rowTime(env, alignedRow),
+                                env.resources.row(alignedRow),
+                                env.color,
+                                env.paints,
+                                env.debug,
+                                alignedLayers,
+                                alignedGlows,
+                                drawPhonetics = false,
+                                blend = env.blend(blending, reveal, aligned = true),
+                            )
+                        }
+                    }
+                    if (showCompact && compactRow != null && compactLayers != null) {
+                        translate(top = -compactRow.top) {
+                            drawPreparedRow(
+                                compactRow,
+                                rowTime(env, compactRow),
+                                env.resources.row(compactRow),
+                                env.color,
+                                env.paints,
+                                env.debug,
+                                compactLayers,
+                                compactGlows,
+                                drawPhonetics = false,
+                                blend = env.blend(blending, reveal, aligned = false),
+                            )
+                        }
+                    }
+                }
+            }
+    )
+}
+
+/** Pronunciation captions of one aligned row, anchored below the text it belongs to. */
+@Composable
+private fun BandCaption(
+    env: BandRenderEnv,
+    row: PreparedRow,
+    layers: PreparedRowLayers?,
+    showPhonetic: Boolean,
+    followingGap: Float,
+    alignment: androidx.compose.ui.Alignment.Horizontal,
+) {
+    if (row.phoneticHeight <= 0f) return
+    val density = LocalDensity.current
+    val textHeight = row.height - row.phoneticHeight
+    val rowWidth = row.width
+    LyricsReveal(showPhonetic, keepContent = true) {
+        Column(horizontalAlignment = alignment) {
+            Box(
+                Modifier.size(
+                    with(density) { rowWidth.toDp() },
+                    with(density) { row.phoneticHeight.toDp() },
+                ).drawWithCache {
+                    // Layout rounds caption width to pixels; compensate here
+                    // so end-aligned pronunciation keeps the original x origin.
+                    val rowLeft = if (env.rightAligned) env.lineWidth - size.width else 0f
+                    onDrawBehind {
+                        if (layers == null) return@onDrawBehind
+                        translate(left = -rowLeft, top = -row.top - textHeight) {
+                            drawPreparedRow(
+                                row,
+                                rowTime(env, row),
+                                env.resources.row(row),
+                                env.color,
+                                env.paints,
+                                env.debug,
+                                layers,
+                                null,
+                                drawOriginal = false,
+                            )
+                        }
+                    }
+                }
+            )
+            if (followingGap > 0f) Spacer(Modifier.height(with(density) { followingGap.toDp() }))
+        }
+    }
+}
+
+/** Reads the clock only for rows the timeline marked as animating. */
+private fun rowTime(env: BandRenderEnv, row: PreparedRow): Int {
+    val state = env.playback.row(row)
+    if (!state.isAnimating.value) return state.time.intValue
+    val now = env.currentTimeProvider()
+    if (lyricsTraceEnabled()) {
+        setLyricsTraceCounter("Lyrics.drawPositionMs", now.toLong())
+        setLyricsTraceCounter("Lyrics.timelineLagMs", now.toLong() - state.time.intValue)
+    }
+    return now
+}
+
+private fun BandRenderEnv.blend(blending: Boolean, reveal: Float, aligned: Boolean): UnitBlend? =
+    if (!blending || binding == null) null else UnitBlend(binding, reveal, aligned)

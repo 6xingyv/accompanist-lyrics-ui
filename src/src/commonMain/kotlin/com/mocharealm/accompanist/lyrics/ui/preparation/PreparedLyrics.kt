@@ -6,6 +6,8 @@ class PreparedLyrics internal constructor(val lines: List<PreparedLine?>) {
         fun append(line: PreparedLine) {
             if (!seen.add(line)) return
             add(line)
+            // Both geometries of a line stay registered so playback and rasters resolve either.
+            line.compact?.let(::append)
             line.before.forEach(::append)
             line.after.forEach(::append)
         }

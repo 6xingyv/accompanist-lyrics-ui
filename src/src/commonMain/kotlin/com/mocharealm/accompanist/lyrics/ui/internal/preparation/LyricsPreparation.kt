@@ -29,6 +29,14 @@ private data class PreparedAtom(
     val phoneticGapBefore: Float = 0f,
 )
 
+/** Row assembly products, including the per-unit row index and x used to blend both variants. */
+private class PreparedRowLayout(
+    val rows: List<PreparedRow>,
+    val rowOf: IntArray,
+    val xOf: FloatArray,
+    val height: Float,
+)
+
 /**
  * Prepare the entire scene before publishing it. The cache also shares nested/top-level
  * accompaniment.
@@ -198,53 +206,62 @@ private fun prepareLine(
             ),
             line.syllables,
         )
-    val runs =
-        resolveProfiles(line.syllables, profiles, leadingWhitespace = rightAligned).map { run ->
-            PreparedProfileRun(
-                run.profile,
-                buildList {
-                    for (source in run.groups) {
-                        for (fragment in
-                            run.profile.wrap(
-                                run.profile.prepare(measuredLine, source, measurer, style),
-                                measurer,
-                                layoutWidth,
-                            )) {
-                            val units =
-                                fragment.map { text ->
-                                    PreparedTextUnit(
-                                        text,
-                                        if (showPhonetic)
-                                            text.phonetic
-                                                ?.takeIf { it.isNotBlank() }
-                                                ?.let {
-                                                    measurer.measure(
-                                                        it,
-                                                        animatedPhoneticStyle,
-                                                        softWrap = true,
-                                                        constraints =
-                                                            Constraints(
-                                                                maxWidth =
-                                                                    layoutWidth
-                                                                        .toInt()
-                                                                        .coerceAtLeast(1)
-                                                            ),
-                                                    )
-                                                }
-                                        else null,
-                                    )
-                                }
-                            if (units.isNotEmpty())
-                                add(PreparedGroup(units, accompaniment || !animate, run.profile))
-                        }
+    val localeTag = style.localeList?.firstOrNull()?.toLanguageTag()
+    val groupAccompaniment = accompaniment || !animate
+    // Captions belong to the aligned variant only; the compact variant reuses the same shaping
+    // with phonetic-free units, so no text is measured twice.
+    val runs = mutableListOf<PreparedProfileRun>()
+    val compactRuns = mutableListOf<PreparedProfileRun>()
+    for (run in resolveProfiles(line.syllables, profiles, leadingWhitespace = rightAligned)) {
+        val groups = mutableListOf<PreparedGroup>()
+        val compactGroups = mutableListOf<PreparedGroup>()
+        for (source in run.groups) {
+            for (fragment in
+                run.profile.wrap(
+                    run.profile.prepare(measuredLine, source, measurer, style),
+                    measurer,
+                    layoutWidth,
+                )) {
+                val units =
+                    fragment.map { text ->
+                        PreparedTextUnit(
+                            text,
+                            if (showPhonetic)
+                                text.phonetic
+                                    ?.takeIf { it.isNotBlank() }
+                                    ?.let {
+                                        measurer.measure(
+                                            it,
+                                            animatedPhoneticStyle,
+                                            softWrap = true,
+                                            constraints =
+                                                Constraints(
+                                                    maxWidth =
+                                                        layoutWidth.toInt().coerceAtLeast(1)
+                                                ),
+                                        )
+                                    }
+                            else null,
+                        )
                     }
-                },
-            )
+                if (units.isEmpty()) continue
+                groups.add(PreparedGroup(units, groupAccompaniment, run.profile))
+                compactGroups.add(
+                    PreparedGroup(
+                        units.map { PreparedTextUnit(it.text, null) },
+                        groupAccompaniment,
+                        run.profile,
+                    )
+                )
+            }
         }
+        runs.add(PreparedProfileRun(run.profile, groups))
+        compactRuns.add(PreparedProfileRun(run.profile, compactGroups))
+    }
     val phoneticSpaceWidth by lazy(LazyThreadSafetyMode.NONE) {
         measurer.measure(" ", animatedPhoneticStyle, softWrap = false).size.width.toFloat()
     }
-    val atoms = buildList {
+    fun atomsOf(runs: List<PreparedProfileRun>) = buildList {
         for (run in runs) for (group in run.groups) {
             val atom = PreparedAtom(run.profile, group, group.preparedSourceText())
             val previous = lastOrNull()
@@ -258,7 +275,114 @@ private fun prepareLine(
             )
         }
     }
+    val atoms = atomsOf(runs)
+    // A caption that fits inside its word reserves no width, so hiding pronunciation cannot move
+    // a unit or change a break; those lines keep the single geometry they always had.
+    val captionsReserveWidth =
+        runs.any { run -> run.groups.any { it.phoneticWidth > it.textWidth } }
+    val compactAtoms = if (captionsReserveWidth) atomsOf(compactRuns) else emptyList()
+    val primary = layoutRows(
+        atoms, width, rightAligned, rtl, density, animate, sweepFadeWidth, layoutWidth, localeTag,
+    )
+    val compactLayout =
+        if (compactAtoms.isEmpty()) null
+        else
+            layoutRows(
+                compactAtoms, width, rightAligned, rtl, density, animate, sweepFadeWidth,
+                layoutWidth, localeTag,
+            )
+    val unitCount = primary.xOf.size
+    val binding =
+        compactLayout?.let { compact ->
+            LineVariantBinding(
+                slide = FloatArray(unitCount) { compact.xOf[it] - primary.xOf[it] },
+                reflow = BooleanArray(unitCount) { compact.rowOf[it] != primary.rowOf[it] },
+            )
+        }
+    val nested =
+        (line as? KaraokeLine.MainKaraokeLine)?.accompanimentLines.orEmpty().map {
+            prepareLine(
+                it, profiles, measurer, normalStyle, accompanimentStyle, phoneticStyle,
+                translationStyle, width, density, showPhonetic, animate, cache, sweepWidths,
+                layoutWidth, fontScale,
+            )
+        }
+    val mainTextStart = line.syllables.minOfOrNull { it.start } ?: line.start
+    fun textStart(nestedLine: PreparedLine) =
+        nestedLine.source.syllables.minOfOrNull { it.start } ?: nestedLine.source.start
+    val orderedNested = nested.sortedBy { textStart(it) }
+    val before = orderedNested.filter { textStart(it) < mainTextStart }
+    val after = orderedNested.filter { textStart(it) >= mainTextStart }
+    val translationText = line.translation?.takeIf { it.isNotBlank() }
+    val wrappedTranslation =
+        translationText?.let {
+            wrapTextWithBalancedLineBreaks(it, animatedTranslationStyle, layoutWidth, measurer)
+        }
+    val linePhoneticText = line.phonetic?.takeIf { showPhonetic && it.isNotBlank() }
+    val wrappedPhonetic =
+        linePhoneticText?.let { phonetic ->
+            val translationRows = wrappedTranslation?.split(Regex("\\r\\n|\\r|\\n")).orEmpty()
+            val aligned = alignPhoneticLineBreaks(phonetic, translationRows)
+            wrapTextWithBalancedLineBreaks(aligned, animatedPhoneticStyle, layoutWidth, measurer)
+        }
+    fun captionLayout(text: String?, style: TextStyle) =
+        text?.let {
+            measurer.measure(
+                it,
+                style.copy(textAlign = if (rightAligned) TextAlign.Right else TextAlign.Left),
+                constraints = Constraints(maxWidth = layoutWidth.toInt().coerceAtLeast(1)),
+            )
+        }
+    val translationLayout = captionLayout(wrappedTranslation, animatedTranslationStyle)
+    val phoneticLayout = captionLayout(wrappedPhonetic, animatedPhoneticStyle)
+    val compactLine =
+        compactLayout?.let { compact ->
+            PreparedLine(
+                line,
+                compactRuns,
+                compact.rows,
+                width,
+                compact.height,
+                rightAligned,
+                before.map { it.compact ?: it },
+                after.map { it.compact ?: it },
+                translationLayout,
+                phoneticLayout,
+            )
+        }
+    return PreparedLine(
+            line,
+            runs,
+            primary.rows,
+            width,
+            primary.height,
+            rightAligned,
+            before,
+            after,
+            translationLayout,
+            phoneticLayout,
+            compactLine,
+            binding,
+        )
+        .also { cache[line] = it }
+}
+
+/** Assemble rows from atoms: breaks, row geometry, sweep arrays and per-unit positions. */
+private fun layoutRows(
+    atoms: List<PreparedAtom>,
+    width: Float,
+    rightAligned: Boolean,
+    rtl: Boolean,
+    density: Float,
+    animate: Boolean,
+    sweepFadeWidth: Float,
+    layoutWidth: Float,
+    localeTag: String?,
+): PreparedRowLayout {
     val rows = mutableListOf<PreparedRow>()
+    val rowOf = IntArray(atoms.sumOf { it.group.units.size }) { -1 }
+    val xOf = FloatArray(rowOf.size)
+    var rowUnitStart = 0
     var rowRuns = mutableListOf<PreparedProfileRun>()
     var rowGroups = mutableListOf<PreparedGroup>()
     val rowGaps = mutableListOf<Float>()
@@ -277,6 +401,7 @@ private fun prepareLine(
             rowProfile = null
             return
         }
+        val rowIndex = rows.size
         var baseline = 0f
         var descent = 0f
         var phoneticTextHeight = 0f
@@ -302,6 +427,7 @@ private fun prepareLine(
         var sweepEnd = Int.MIN_VALUE
         val windows = mutableListOf<RenderWindow>()
         var groupIndex = 0
+        var flat = 0
         for (run in rowRuns) for (group in run.groups) {
             val gap = rowGaps[groupIndex++]
             x += if (rtl) -gap else gap
@@ -323,6 +449,9 @@ private fun prepareLine(
                         textLeft + unit.text.left - group.shapingLeft
                     else if (groupRtl) localX - unit.width else localX
                 unit.position = Offset(unitX, top + baseline - unit.text.baseline)
+                rowOf[rowUnitStart + flat] = rowIndex
+                xOf[rowUnitStart + flat] = unitX
+                flat++
                 unit.phoneticPosition =
                     Offset(
                         groupLeft +
@@ -441,8 +570,10 @@ private fun prepareLine(
                 sweepFadeWidth,
                 previousPhoneticSpacing,
                 width = rowWidth,
+                unitStart = rowUnitStart,
             )
         )
+        rowUnitStart += flat
         previousPhoneticSpacing = if (hasPhonetics) wrappedRowSpacing else 0f
         top += phoneticHeight + baseline + descent + previousPhoneticSpacing
         rowRuns = mutableListOf()
@@ -475,7 +606,7 @@ private fun prepareLine(
                 segmentStart,
                 index,
                 layoutWidth,
-                style.localeList?.firstOrNull()?.toLanguageTag(),
+                localeTag,
                 ::appendRows,
             )
             segmentStart = index
@@ -486,85 +617,15 @@ private fun prepareLine(
         segmentStart,
         atoms.size,
         layoutWidth,
-        style.localeList?.firstOrNull()?.toLanguageTag(),
+        localeTag,
         ::appendRows,
     )
-    val nested =
-        (line as? KaraokeLine.MainKaraokeLine)?.accompanimentLines.orEmpty().map {
-            prepareLine(
-                it,
-                profiles,
-                measurer,
-                normalStyle,
-                accompanimentStyle,
-                phoneticStyle,
-                translationStyle,
-                width,
-                density,
-                showPhonetic,
-                animate,
-                cache,
-                sweepWidths,
-                layoutWidth,
-                fontScale,
-            )
-        }
-    val mainTextStart = line.syllables.minOfOrNull { it.start } ?: line.start
-    fun textStart(nestedLine: PreparedLine) =
-        nestedLine.source.syllables.minOfOrNull { it.start } ?: nestedLine.source.start
-    val orderedNested = nested.sortedBy { textStart(it) }
-    val translationText = line.translation?.takeIf { it.isNotBlank() }
-    val wrappedTranslation =
-        translationText?.let {
-            wrapTextWithBalancedLineBreaks(
-                it,
-                animatedTranslationStyle,
-                layoutWidth,
-                measurer,
-            )
-        }
-    val linePhoneticText = line.phonetic?.takeIf { showPhonetic && it.isNotBlank() }
-    val wrappedPhonetic =
-        linePhoneticText?.let { phonetic ->
-            val translationRows =
-                wrappedTranslation?.split(Regex("\\r\\n|\\r|\\n")).orEmpty()
-            val aligned = alignPhoneticLineBreaks(phonetic, translationRows)
-            wrapTextWithBalancedLineBreaks(
-                aligned,
-                animatedPhoneticStyle,
-                layoutWidth,
-                measurer,
-            )
-        }
-    return PreparedLine(
-            line,
-            runs,
-            rows,
-            width,
-            (top - previousPhoneticSpacing).coerceAtLeast(0f),
-            rightAligned,
-            orderedNested.filter { textStart(it) < mainTextStart },
-            orderedNested.filter { textStart(it) >= mainTextStart },
-            wrappedTranslation?.let {
-                measurer.measure(
-                    it,
-                    animatedTranslationStyle.copy(
-                        textAlign = if (rightAligned) TextAlign.Right else TextAlign.Left
-                    ),
-                    constraints = Constraints(maxWidth = layoutWidth.toInt().coerceAtLeast(1)),
-                )
-            },
-            wrappedPhonetic?.let {
-                measurer.measure(
-                    it,
-                    animatedPhoneticStyle.copy(
-                        textAlign = if (rightAligned) TextAlign.Right else TextAlign.Left
-                    ),
-                    constraints = Constraints(maxWidth = layoutWidth.toInt().coerceAtLeast(1)),
-                )
-            },
-        )
-        .also { cache[line] = it }
+    return PreparedRowLayout(
+        rows,
+        rowOf,
+        xOf,
+        (top - previousPhoneticSpacing).coerceAtLeast(0f),
+    )
 }
 
 /** Add only the missing caption separation when either word is wider in pronunciation. */

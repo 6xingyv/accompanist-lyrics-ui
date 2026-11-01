@@ -6,8 +6,36 @@ import androidx.compose.ui.graphics.*
 import androidx.compose.ui.graphics.drawscope.*
 import androidx.compose.ui.text.drawText
 import com.mocharealm.accompanist.lyrics.ui.internal.diagnostics.traceLyrics
+import com.mocharealm.accompanist.lyrics.ui.internal.effects.revealAlpha
+import com.mocharealm.accompanist.lyrics.ui.internal.effects.revealScale
+import com.mocharealm.accompanist.lyrics.ui.preparation.LineVariantBinding
 import com.mocharealm.accompanist.lyrics.ui.preparation.PreparedRow
 import com.mocharealm.accompanist.lyrics.ui.internal.effects.Bounce
+
+/**
+ * Per-unit blend between the two geometries of one line. Units that keep their row slide towards
+ * their compact x; units whose row changes are painted by both copies with complementary reveal.
+ */
+internal class UnitBlend(
+    private val binding: LineVariantBinding,
+    private val alignment: Float,
+    /** True when this draw paints the aligned geometry of the row. */
+    private val alignedCopy: Boolean,
+) {
+    private fun reveal(unit: Int): Float =
+        revealAlpha(if (alignedCopy) alignment else 1f - alignment)
+
+    fun visible(unit: Int): Boolean = alignedCopy || !binding.slides(unit)
+
+    fun alpha(unit: Int): Float = if (binding.slides(unit)) 1f else reveal(unit)
+
+    fun scale(unit: Int): Float =
+        if (binding.slides(unit)) 1f
+        else revealScale(if (alignedCopy) alignment else 1f - alignment)
+
+    fun dx(unit: Int): Float =
+        if (alignedCopy && binding.slides(unit)) binding.slideOffset(unit, alignment) else 0f
+}
 
 internal fun DrawScope.drawPreparedRow(
     row: PreparedRow,
@@ -20,6 +48,7 @@ internal fun DrawScope.drawPreparedRow(
     glows: RowGlowLayers? = null,
     drawOriginal: Boolean = true,
     drawPhonetics: Boolean = true,
+    blend: UnitBlend? = null,
 ) {
     traceLyrics(if (drawOriginal) "Lyrics.drawRow" else "Lyrics.drawPhonetics") {
         val canvas = drawContext.canvas
@@ -40,14 +69,18 @@ internal fun DrawScope.drawPreparedRow(
             canvas.saveLayer(bounds, state.layerPaint)
         }
         try {
+            var flat = row.unitStart
             if (drawOriginal) for (runIndex in row.runs.indices) {
                 val run = row.runs[runIndex]
                 for (groupIndex in run.groups.indices) {
                     val group = run.groups[groupIndex]
+                    val groupUnitStart = flat
+                    flat += group.units.size
                     val cachedGroup = layers?.runs?.get(runIndex)?.get(groupIndex)
                     val staticText = group.staticText
                     if (
                         !debug &&
+                            blend == null &&
                             staticText != null &&
                             (!row.animated ||
                                 time < group.sourceStart ||
@@ -83,6 +116,8 @@ internal fun DrawScope.drawPreparedRow(
                         } else 0
                     for (unitIndex in group.units.indices) {
                         val unit = group.units[unitIndex]
+                        val slot = groupUnitStart + unitIndex
+                        if (blend != null && !blend.visible(slot)) continue
                         val progress =
                             if (!row.animated) 1f
                             else
@@ -106,9 +141,23 @@ internal fun DrawScope.drawPreparedRow(
                                 group.effects.glowAsGroup -> groupShadowIndex
                                 else -> (Bounce.transform(progress).coerceIn(0f, 1f) * 64f).toInt()
                             }
+                        val unitAlpha = blend?.alpha(slot) ?: 1f
+                        val unitScale = blend?.scale(slot) ?: 1f
+                        val unitDx = blend?.dx(slot) ?: 0f
                         withTransform({
+                            // The reveal scales about the unit itself; the group swell keeps its
+                            // own pivot, so both are applied as separate uniform scales.
+                            if (unitScale != 1f)
+                                scale(
+                                    unitScale,
+                                    unitScale,
+                                    Offset(
+                                        unit.position.x + unitDx + unit.width / 2f,
+                                        unit.position.y - row.top + lift + unit.text.height / 2f,
+                                    ),
+                                )
                             scale(scale, scale, group.pivot)
-                            translate(unit.position.x, unit.position.y + lift)
+                            translate(unit.position.x + unitDx, unit.position.y + lift)
                         }) {
                             val cached = cachedGroup?.units?.get(unitIndex)
                             if (cached != null)
@@ -118,14 +167,15 @@ internal fun DrawScope.drawPreparedRow(
                                         glows?.glow(runIndex, groupIndex, unitIndex)
                                     else null,
                                     shadowIndex,
-                                    alpha,
+                                    alpha * unitAlpha,
                                     paints,
                                 )
                             else
                                 with(run.profile) {
                                     draw(
                                         unit.text,
-                                        drawColor,
+                                        if (unitAlpha >= 1f) drawColor
+                                        else drawColor.copy(alpha = drawColor.alpha * unitAlpha),
                                         if (shadowIndex == 0) Shadow.None
                                         else paints.shadows[shadowIndex],
                                     )

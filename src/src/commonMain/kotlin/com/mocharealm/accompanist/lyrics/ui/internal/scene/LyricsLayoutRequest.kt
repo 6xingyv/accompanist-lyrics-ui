@@ -21,9 +21,9 @@ internal data class LyricsLayoutRequest(
     val direction: LayoutDirection,
     val translationStyle: TextStyle,
 ) {
+    /** Captions are always measured: hiding them selects a second geometry, never a re-prepare. */
     fun prepare() = prepareLyrics(
         lyrics, profiles, measurer, normalStyle, accompanimentStyle, phoneticStyle,
         width, density.density, true, fontScale = density.fontScale,
         translationStyle = translationStyle,
-    )
-}
+    )}

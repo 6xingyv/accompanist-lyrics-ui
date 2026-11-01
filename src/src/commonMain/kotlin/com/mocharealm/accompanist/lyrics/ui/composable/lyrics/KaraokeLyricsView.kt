@@ -158,14 +158,18 @@ fun KaraokeLyricsView(
         val mapping = scene.items
         val sourceIndices = mapping.sourceIndices
         val translationShown = rememberUpdatedState(showTranslation)
+        val phoneticShown = rememberUpdatedState(showPhonetic)
+        val prefetchLines =
+            remember(mapping, showPhonetic) {
+                mapping.lines.map { it?.variant(showPhonetic) }
+            }
         LyricsTexturePrefetch(
-            mapping.lines,
+            prefetchLines,
             scene.resources,
             listState,
         ) {
             mapping.itemIndex(timeline.focus.value.firstIndex)
         }
-        val phoneticShown = rememberUpdatedState(showPhonetic)
         SideEffect { listState.setInterludeItem(focus.activeInterludeIndex?.let(mapping::itemIndex) ?: -1) }
         val listItems =
             remember(scene.lyrics, timeline, mapping) {

@@ -8,7 +8,7 @@ import com.mocharealm.accompanist.lyrics.ui.internal.effects.Swell
 class PreparedGroup
 internal constructor(
     val units: List<PreparedTextUnit>,
-    accompaniment: Boolean,
+    internal val accompaniment: Boolean,
     profile: LyricsProfile,
 ) {
     val sharedLayout =

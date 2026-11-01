@@ -8,7 +8,13 @@ import com.mocharealm.accompanist.lyrics.ui.internal.preparation.prepareLyricsIn
 import com.mocharealm.accompanist.lyrics.ui.internal.preparation.prepareLyricsLineInternal
 import com.mocharealm.accompanist.lyrics.ui.profile.LyricsProfile
 
-/** Prepare a complete lyrics scene, including measured rows and nested accompaniment. */
+/**
+ * Prepare a complete lyrics scene, including measured rows and nested accompaniment.
+ *
+ * `showPhonetic` measures pronunciation captions. Lines whose caption is wider than its word keep
+ * a second, caption-free geometry, so hiding pronunciation can drop the reserved width instead of
+ * re-preparing the scene.
+ */
 fun prepareLyrics(
     lyrics: SyncedLyrics,
     profiles: List<LyricsProfile>,

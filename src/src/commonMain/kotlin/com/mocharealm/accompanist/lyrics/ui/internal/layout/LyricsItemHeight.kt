@@ -12,8 +12,10 @@ internal fun PreparedLine.settledHeight(
     nested: Boolean = false,
 ): Float {
     if (nested && !playback.line(this).visible.value && !anticipateAccompaniment) return 0f
-    var extent = height + if (nested) 16f * density else 0f
-    if (!phoneticShown) for (row in rows)
+    // Hidden pronunciation falls back to the compact geometry, so heights follow its rows too.
+    val geometry = variant(phoneticShown)
+    var extent = geometry.height + if (nested) 16f * density else 0f
+    if (!phoneticShown) for (row in geometry.rows)
         extent -= row.phoneticHeight + row.phoneticSpacingBefore
     if (translationShown) extent += translation?.size?.height ?: 0
     if (phoneticShown) extent += phonetic?.size?.height ?: 0
