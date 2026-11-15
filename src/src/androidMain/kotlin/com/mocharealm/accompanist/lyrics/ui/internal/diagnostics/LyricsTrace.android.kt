@@ -1,10 +1,14 @@
 package com.mocharealm.accompanist.lyrics.ui.internal.diagnostics
 
-internal actual fun lyricsTraceEnabled(): Boolean = android.os.Trace.isEnabled()
+import androidx.tracing.Trace
 
-internal actual fun beginLyricsTrace(name: String) = android.os.Trace.beginSection(name)
+// androidx.tracing checks the SDK level internally and falls back on older devices.
+internal actual fun lyricsTraceEnabled(): Boolean = Trace.isEnabled()
 
-internal actual fun endLyricsTrace() = android.os.Trace.endSection()
+internal actual fun beginLyricsTrace(name: String) = Trace.beginSection(name)
 
+internal actual fun endLyricsTrace() = Trace.endSection()
+
+// Keep the Int overload: the Long overload of androidx.tracing's setCounter is API 29+ only.
 internal actual fun setLyricsTraceCounter(name: String, value: Long) =
-    android.os.Trace.setCounter(name, value)
+    Trace.setCounter(name, value.toInt())

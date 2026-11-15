@@ -88,6 +88,7 @@ kotlin {
         jvmMain.dependencies { implementation(libs.icu4j) }
         jvmTest.dependencies { implementation(compose.desktop.currentOs) }
         androidMain.dependencies {
+            implementation(libs.androidx.tracing)
         }
         val androidDeviceTest by getting {
             dependencies { implementation("androidx.test:runner:1.5.0") }
