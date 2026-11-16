@@ -52,7 +52,7 @@ internal fun DrawScope.drawPreparedRow(
 ) {
     traceLyrics(if (drawOriginal) "Lyrics.drawRow" else "Lyrics.drawPhonetics") {
         val canvas = drawContext.canvas
-        val inactive = row.animated && time < row.start
+        val inactive = time < row.start
         val alpha = if (inactive) FocusedRowUnlitAlpha else 1f
         val drawColor = if (inactive) color.copy(alpha = color.alpha * alpha) else color
         val phoneticColor =

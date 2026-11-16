@@ -37,6 +37,7 @@ private class TimelineBoundary {
     val endingLines = mutableListOf<Int>()
     val startingRows = mutableListOf<PreparedRow>()
     val endingRows = mutableListOf<PreparedRow>()
+    val staticRows = mutableListOf<PreparedRow>()
     val showingLines = mutableListOf<PreparedLine>()
     val hidingLines = mutableListOf<PreparedLine>()
     val startingInterludes = mutableListOf<Int>()
@@ -49,11 +50,12 @@ internal class LyricsPlaybackTimeline(lyrics: SyncedLyrics, prepared: PreparedLy
     private val focusStates: List<FocusState>
     private val activeRows: List<List<PreparedRow>>
     private val endingRows: List<List<PreparedRow>>
+    private val staticRows: List<List<PreparedRow>>
     private val visibleLines: List<List<PreparedLine>>
     private val hidingLines: List<List<PreparedLine>>
     private val accompaniment =
         prepared.allLines.filter { it.source is KaraokeLine.AccompanimentKaraokeLine }
-    private val allRows = prepared.rows
+    private val allRows = prepared.allLines.flatMap { it.rows }
     private val showingLines: List<List<PreparedLine>>
     private var previousRows: List<PreparedRow> = emptyList()
     private val cursor: BoundaryCursor
@@ -108,9 +110,16 @@ internal class LyricsPlaybackTimeline(lyrics: SyncedLyrics, prepared: PreparedLy
                 at(starts[index]).endingInterludes.add(index)
             }
         }
-        for (row in allRows) for (window in row.windows) {
-            at(window.start).startingRows.add(row)
-            at(window.end).endingRows.add(row)
+        for (row in allRows) {
+            if (!row.animated) {
+                at(row.start).staticRows.add(row)
+                at(row.end).staticRows.add(row)
+                continue
+            }
+            for (window in row.windows) {
+                at(window.start).startingRows.add(row)
+                at(window.end).endingRows.add(row)
+            }
         }
         for (line in accompaniment) {
             at(line.visibilityStart).showingLines.add(line)
@@ -203,6 +212,7 @@ internal class LyricsPlaybackTimeline(lyrics: SyncedLyrics, prepared: PreparedLy
         activeRows = rowIntervals
         visibleLines = visibleIntervals
         endingRows = orderedEvents.map { it.value.endingRows }
+        staticRows = orderedEvents.map { it.value.staticRows }
         hidingLines = orderedEvents.map { it.value.hidingLines }
         showingLines = orderedEvents.map { it.value.showingLines }
         cursor = BoundaryCursor(boundaries)
@@ -223,6 +233,7 @@ internal class LyricsPlaybackTimeline(lyrics: SyncedLyrics, prepared: PreparedLy
                 for (line in visibleLines[index]) state.line(line).visible.value = true
             } else {
                 for (boundary in previousIndex + 1..index) {
+                    for (row in staticRows[boundary]) state.row(row).time.intValue = staticTime(row, time)
                     for (row in endingRows[boundary]) {
                         state.row(row).time.intValue = staticTime(row, time)
                         state.row(row).isAnimating.value = false
