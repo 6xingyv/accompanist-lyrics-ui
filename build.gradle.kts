@@ -11,4 +11,4 @@ plugins {
     alias(libs.plugins.stability.analyzer) apply false
 }
 
-version = providers.gradleProperty("releaseVersion").getOrElse("2.0.0")
+version = providers.gradleProperty("releaseVersion").getOrElse("2.0.0-rc.4")
